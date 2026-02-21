@@ -1,7 +1,9 @@
 from importlib.metadata import version
 
-from . import pl, pp, tl
+from regularizedvi._components import DecoderSCVI, Encoder, FCLayers
+from regularizedvi._model import SCVI
+from regularizedvi._module import VAE
 
-__all__ = ["pl", "pp", "tl"]
+__all__ = ["DecoderSCVI", "Encoder", "FCLayers", "SCVI", "VAE"]
 
 __version__ = version("regularizedvi")

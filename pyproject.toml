@@ -5,7 +5,10 @@ requires = [ "hatchling" ]
 [project]
 name = "regularizedvi"
 version = "0.0.1"
-description = "Regularized scVI with ambient RNA correction and overdispersion regularisation, based on cell2location modelling principles"
+description = """\
+  Regularized scVI with ambient RNA correction and overdispersion regularisation, based on cell2location modelling \
+  principles\
+  """
 readme = "README.md"
 license = { file = "LICENSE" }
 maintainers = [
@@ -24,8 +27,11 @@ classifiers = [
 ]
 dependencies = [
   "anndata",
+  "numpy",
+  "scvi-tools>=1.2",
   # for debug logging (referenced from the issue template)
   "session-info2",
+  "torch>=2",
 ]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://regularizedvi.readthedocs.io/"
@@ -41,6 +47,7 @@ test = [
   "coverage>=7.10",
   "pytest",
   "pytest-cov",     # For VS Code’s coverage functionality
+  "scanpy",
 ]
 doc = [
   "ipykernel",

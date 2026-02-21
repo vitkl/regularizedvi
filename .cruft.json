@@ -1,0 +1,43 @@
+{
+  "template": "https://github.com/scverse/cookiecutter-scverse",
+  "commit": "07cfe33f5ac42c30afbf58654b12d4a25666492a",
+  "checkout": null,
+  "context": {
+    "cookiecutter": {
+      "project_name": "regularizedvi",
+      "package_name": "regularizedvi",
+      "project_description": "Regularized scVI with ambient RNA correction and overdispersion regularisation, based on cell2location modelling principles",
+      "author_full_name": "Vitalii Kleshchevnikov",
+      "author_email": "vitalii.kleshchevnikov@crick.ac.uk",
+      "github_user": "vitkl",
+      "github_repo": "regularizedvi",
+      "license": "MIT License",
+      "ide_integration": true,
+      "_copy_without_render": [
+        ".github/workflows/build.yaml",
+        ".github/workflows/test.yaml",
+        "docs/_templates/autosummary/**.rst"
+      ],
+      "_exclude_on_template_update": [
+        "CHANGELOG.md",
+        "LICENSE",
+        "README.md",
+        "docs/api.md",
+        "docs/index.md",
+        "docs/notebooks/example.ipynb",
+        "docs/references.bib",
+        "docs/references.md",
+        "src/**",
+        "tests/**"
+      ],
+      "_render_devdocs": false,
+      "_jinja2_env_vars": {
+        "lstrip_blocks": true,
+        "trim_blocks": true
+      },
+      "_template": "https://github.com/scverse/cookiecutter-scverse",
+      "_commit": "07cfe33f5ac42c30afbf58654b12d4a25666492a"
+    }
+  },
+  "directory": null
+}
