@@ -1,9 +1,19 @@
 from importlib.metadata import version
 
-from regularizedvi._components import DecoderSCVI, Encoder, FCLayers
-from regularizedvi._model import SCVI
-from regularizedvi._module import VAE
+from regularizedvi._components import (
+    RegularizedDecoderSCVI,
+    RegularizedEncoder,
+    RegularizedFCLayers,
+)
+from regularizedvi._model import AmbientRegularizedSCVI
+from regularizedvi._module import RegularizedVAE
 
-__all__ = ["DecoderSCVI", "Encoder", "FCLayers", "SCVI", "VAE"]
+__all__ = [
+    "AmbientRegularizedSCVI",
+    "RegularizedDecoderSCVI",
+    "RegularizedEncoder",
+    "RegularizedFCLayers",
+    "RegularizedVAE",
+]
 
 __version__ = version("regularizedvi")

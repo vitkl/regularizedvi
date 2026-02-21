@@ -1,7 +1,13 @@
-"""Model class for regularizedvi.
+"""AmbientRegularizedSCVI model class.
 
-Copied verbatim from scvi-tools (scvi.model._scvi) as a baseline.
-Only the SCVI class is included.
+Extends scvi.model.SCVI to use RegularizedVAE with regularizedvi defaults:
+- gene_likelihood="nb"
+- dispersion="gene-batch"
+- use_observed_lib_size=False (learned library size)
+- use_additive_background=True (ambient RNA correction)
+- use_batch_in_decoder=False (batch-free decoder)
+- regularise_dispersion=True (containment prior on overdispersion)
+- use_batch_norm="none", use_layer_norm="both" (LayerNorm preferred)
 """
 
 from __future__ import annotations
@@ -33,9 +39,9 @@ from scvi.model.base import (
     UnsupervisedTrainingMixin,
     VAEMixin,
 )
-from scvi.model.utils import get_minified_adata_scrna
-from scvi.module import VAE
 from scvi.utils import setup_anndata_dsp
+
+from regularizedvi._module import RegularizedVAE
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -53,7 +59,7 @@ _SCVI_OBSERVED_LIB_SIZE = "_scvi_observed_lib_size"
 logger = logging.getLogger(__name__)
 
 
-class SCVI(
+class AmbientRegularizedSCVI(
     EmbeddingMixin,
     RNASeqMixin,
     VAEMixin,
@@ -61,69 +67,87 @@ class SCVI(
     UnsupervisedTrainingMixin,
     BaseMinifiedModeModelClass,
 ):
-    """single-cell Variational Inference :cite:p:`Lopez18`.
+    """Regularized scVI with ambient RNA correction and overdispersion regularisation.
+
+    Adapts cell2location/cell2fate modelling principles to scVI:
+
+    - **Ambient RNA**: per-gene, per-sample additive background captures ambient RNA,
+      mirroring cell2location's ``(g_fg + b_eg) * h_e`` structure.
+    - **Overdispersion regularisation**: Exponential prior pushes NB toward Poisson,
+      forcing the model to explain variation through biology rather than inflated variance.
+    - **Batch-free decoder**: batch correction through additive background and categorical
+      covariates, not decoder conditioning.
+    - **Learned library size**: with constrained prior (``library_log_vars_weight=0.05``).
 
     Parameters
     ----------
     adata
-        AnnData object that has been registered via :meth:`~scvi.model.SCVI.setup_anndata`. If
-        ``None``, then the underlying module will not be initialized until training, and a
-        :class:`~lightning.pytorch.core.LightningDataModule` must be passed in during training
-        (``EXPERIMENTAL``).
+        AnnData object registered via :meth:`setup_anndata`.
     n_hidden
-        Number of nodes per hidden layer.
+        Number of nodes per hidden layer. High values (512-3000) are recommended —
+        the hidden layer acts as a dictionary of atomic regulatory programmes.
     n_latent
-        Dimensionality of the latent space.
+        Dimensionality of the latent space. High values (128-700) give free capacity,
+        removing competition between cell types for the same latent dimension.
     n_layers
-        Number of hidden layers used for encoder and decoder NNs.
+        Number of hidden layers.
     dropout_rate
-        Dropout rate for neural networks.
+        Dropout rate for encoder.
     dispersion
-        One of the following:
-
-        * ``'gene'`` - dispersion parameter of NB is constant per gene across cells
-        * ``'gene-batch'`` - dispersion can differ between different batches
-        * ``'gene-label'`` - dispersion can differ between different labels
-        * ``'gene-cell'`` - dispersion can differ for every gene in every cell
+        Dispersion parameter flexibility. Default ``"gene-batch"`` for per-gene,
+        per-batch overdispersion.
     gene_likelihood
-        One of:
-
-        * ``'nb'`` - Negative binomial distribution
-        * ``'zinb'`` - Zero-inflated negative binomial distribution
-        * ``'poisson'`` - Poisson distribution
-        * ``'normal'`` - ``EXPERIMENTAL`` Normal distribution
+        Reconstruction distribution. Default ``"nb"`` (Negative Binomial).
     latent_distribution
-        One of:
-
-        * ``'normal'`` - Normal distribution
-        * ``'ln'`` - Logistic normal distribution (Normal(0, I) transformed by softmax)
+        Latent space distribution.
+    library_log_vars_weight
+        Scale factor for library prior variance. Default ``0.05`` constrains
+        the library size to prevent absorbing biological signal.
+    library_n_hidden
+        Hidden units in library encoder. Default ``16`` for low capacity.
+    scale_activation
+        Decoder scale activation. Default ``"softplus"`` (expression not on simplex).
+    use_additive_background
+        Enable ambient RNA correction. Default ``True``.
+    use_batch_in_decoder
+        Pass batch info to decoder. Default ``False`` (batch-free decoder).
+    regularise_dispersion
+        Enable overdispersion regularisation. Default ``True``.
+    regularise_dispersion_prior
+        Rate for Exponential prior on dispersion. Default ``3.0``.
+    use_batch_norm
+        Where to use BatchNorm. Default ``"none"``.
+    use_layer_norm
+        Where to use LayerNorm. Default ``"both"``.
     **kwargs
-        Additional keyword arguments for :class:`~scvi.module.VAE`.
+        Additional keyword arguments for :class:`RegularizedVAE`.
 
     Examples
     --------
-    >>> adata = anndata.read_h5ad(path_to_anndata)
-    >>> scvi.model.SCVI.setup_anndata(adata, batch_key="batch")
-    >>> vae = scvi.model.SCVI(adata)
-    >>> vae.train()
-    >>> adata.obsm["X_scVI"] = vae.get_latent_representation()
-    >>> adata.obsm["X_normalized_scVI"] = vae.get_normalized_expression()
+    >>> import regularizedvi
+    >>> regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+    ...     adata,
+    ...     layer="counts",
+    ...     batch_key="batch",
+    ...     categorical_covariate_keys=["site", "donor"],
+    ... )
+    >>> model = regularizedvi.AmbientRegularizedSCVI(
+    ...     adata,
+    ...     n_hidden=512,
+    ...     n_layers=1,
+    ...     n_latent=128,
+    ... )
+    >>> model.train(train_size=1.0, max_epochs=2000, batch_size=1024)
+    >>> latent = model.get_latent_representation()
 
-    Notes
-    -----
-    See further usage examples in the following tutorials:
-
-    1. :doc:`/tutorials/notebooks/quick_start/api_overview`
-    2. :doc:`/tutorials/notebooks/scrna/harmonization`
-    3. :doc:`/tutorials/notebooks/scrna/scarches_scvi_tools`
-    4. :doc:`/tutorials/notebooks/scrna/scvi_in_R`
-
-    See Also
-    --------
-    :class:`~scvi.module.VAE`
+    References
+    ----------
+    - Lopez et al. (2018). Deep generative modeling for single-cell transcriptomics.
+    - Kleshchevnikov et al. (2022). Cell2location maps fine-grained cell types.
+    - Simpson et al. (2017). Penalising Model Component Complexity.
     """
 
-    _module_cls = VAE
+    _module_cls = RegularizedVAE
 
     def __init__(
         self,
@@ -132,9 +156,19 @@ class SCVI(
         n_latent: int = 10,
         n_layers: int = 1,
         dropout_rate: float = 0.1,
-        dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
-        gene_likelihood: Literal["zinb", "nb", "poisson", "normal"] = "zinb",
+        dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene-batch",
+        gene_likelihood: Literal["zinb", "nb", "poisson", "normal"] = "nb",
         latent_distribution: Literal["normal", "ln"] = "normal",
+        # regularizedvi defaults
+        library_log_vars_weight: float = 0.05,
+        library_n_hidden: int = 16,
+        scale_activation: str = "softplus",
+        use_additive_background: bool = True,
+        use_batch_in_decoder: bool = False,
+        regularise_dispersion: bool = True,
+        regularise_dispersion_prior: float = 3.0,
+        use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "none",
+        use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         **kwargs,
     ):
         super().__init__(adata)
@@ -147,13 +181,25 @@ class SCVI(
             "dispersion": dispersion,
             "gene_likelihood": gene_likelihood,
             "latent_distribution": latent_distribution,
+            "use_batch_norm": use_batch_norm,
+            "use_layer_norm": use_layer_norm,
+            "library_log_vars_weight": library_log_vars_weight,
+            "library_n_hidden": library_n_hidden,
+            "scale_activation": scale_activation,
+            "use_additive_background": use_additive_background,
+            "use_batch_in_decoder": use_batch_in_decoder,
+            "regularise_dispersion": regularise_dispersion,
+            "regularise_dispersion_prior": regularise_dispersion_prior,
             **kwargs,
         }
         self._model_summary_string = (
-            "SCVI model with the following parameters: \n"
+            "AmbientRegularizedSCVI model with the following parameters: \n"
             f"n_hidden: {n_hidden}, n_latent: {n_latent}, n_layers: {n_layers}, "
             f"dropout_rate: {dropout_rate}, dispersion: {dispersion}, "
-            f"gene_likelihood: {gene_likelihood}, latent_distribution: {latent_distribution}."
+            f"gene_likelihood: {gene_likelihood}, latent_distribution: {latent_distribution}, "
+            f"use_additive_background: {use_additive_background}, "
+            f"use_batch_in_decoder: {use_batch_in_decoder}, "
+            f"regularise_dispersion: {regularise_dispersion}."
         )
 
         if self._module_init_on_train:
@@ -191,6 +237,15 @@ class SCVI(
                 use_size_factor_key=use_size_factor_key,
                 library_log_means=library_log_means,
                 library_log_vars=library_log_vars,
+                use_batch_norm=use_batch_norm,
+                use_layer_norm=use_layer_norm,
+                library_log_vars_weight=library_log_vars_weight,
+                library_n_hidden=library_n_hidden,
+                scale_activation=scale_activation,
+                use_additive_background=use_additive_background,
+                use_batch_in_decoder=use_batch_in_decoder,
+                regularise_dispersion=regularise_dispersion,
+                regularise_dispersion_prior=regularise_dispersion_prior,
                 **kwargs,
             )
             self.module.minified_data_type = self.minified_data_type
@@ -277,32 +332,17 @@ class SCVI(
     ) -> None:
         """Minifies the model's adata.
 
-        Minifies the adata, and registers new anndata fields: latent qzm, latent qzv, adata uns
-        containing minified-adata type, and library size.
-        This also sets the appropriate property on the module to indicate that the adata is
-        minified.
-
         Parameters
         ----------
         minified_data_type
-            How to minify the data. Currently only supports `latent_posterior_parameters`.
-            If minified_data_type == `latent_posterior_parameters`:
-
-            * the original count data is removed (`adata.X`, adata.raw, and any layers)
-            * the parameters of the latent representation of the original data is stored
-            * everything else is left untouched
+            How to minify the data.
         use_latent_qzm_key
-            Key to use in `adata.obsm` where the latent qzm params are stored
+            Key in ``adata.obsm`` for latent qzm params.
         use_latent_qzv_key
-            Key to use in `adata.obsm` where the latent qzv params are stored
-
-        Notes
-        -----
-        The modification is not done inplace -- instead the model is assigned a new (minified)
-        version of the adata.
+            Key in ``adata.obsm`` for latent qzv params.
         """
-        # TODO(adamgayoso): Add support for a scenario where we want to cache the latent posterior
-        # without removing the original counts.
+        from scvi.model.utils import get_minified_adata_scrna
+
         if minified_data_type != ADATA_MINIFY_TYPE.LATENT_POSTERIOR:
             raise NotImplementedError(f"Unknown MinifiedDataType: {minified_data_type}")
 

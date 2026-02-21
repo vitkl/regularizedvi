@@ -1,7 +1,14 @@
-"""VAE module for regularizedvi.
+"""RegularizedVAE module for regularizedvi.
 
-Copied verbatim from scvi-tools (scvi.module._vae) as a baseline.
-Only the VAE class is included — LDVAE is not needed for regularizedvi.
+Modified from scvi-tools VAE (scvi.module._vae) with the following changes:
+
+1. Uses RegularizedEncoder and RegularizedDecoderSCVI from _components.py
+2. Additive ambient RNA background: per-gene, per-batch learnable parameter
+3. Overdispersion regularisation: Exponential prior pushing NB toward Poisson
+4. Batch-free decoder: batch info removed from decoder when use_batch_in_decoder=False
+5. Learned library size with constrained prior (library_log_vars_weight)
+6. Separate library_n_hidden for low-capacity library encoder
+7. Support for dropout_on_input via extra_encoder_kwargs/extra_decoder_kwargs
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from scvi.module.base import (
     LossOutput,
     auto_move_data,
 )
+from torch.distributions import Exponential
 from torch.nn.functional import one_hot
 
 if TYPE_CHECKING:
@@ -31,120 +39,96 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
-    """Variational auto-encoder :cite:p:`Lopez18`.
+class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
+    """Regularized variational auto-encoder with ambient RNA correction.
+
+    Extends the standard scVI VAE :cite:p:`Lopez18` with:
+
+    - **Ambient RNA correction**: per-gene, per-batch additive background term
+      ``b_{g,s_n} = exp(beta_{g,s_n})``, mirroring cell2location's
+      ``(g_fg + b_eg) * h_e`` structure :cite:p:`Kleshchevnikov22`.
+    - **Overdispersion regularisation**: Exponential prior on
+      ``sqrt(exp(phi_g))`` pushing NB toward Poisson, adapted from
+      cell2location's containment prior :cite:p:`Simpson17`.
+    - **Batch-free decoder**: batch correction through additive background
+      and categorical covariates rather than decoder conditioning.
+    - **Learned library size**: with constrained prior variance to prevent
+      library size from absorbing biological signal.
 
     Parameters
     ----------
     n_input
-        Number of input features.
+        Number of input features (genes).
     n_batch
         Number of batches. If ``0``, no batch correction is performed.
     n_labels
         Number of labels.
     n_hidden
-        Number of nodes per hidden layer. Passed into :class:`~scvi.nn.Encoder` and
-        :class:`~scvi.nn.DecoderSCVI`.
+        Number of nodes per hidden layer for encoder and decoder.
     n_latent
         Dimensionality of the latent space.
     n_layers
-        Number of hidden layers. Passed into :class:`~scvi.nn.Encoder` and
-        :class:`~scvi.nn.DecoderSCVI`.
+        Number of hidden layers for encoder and decoder.
     n_continuous_cov
         Number of continuous covariates.
     n_cats_per_cov
-        A list of integers containing the number of categories for each categorical covariate.
+        Number of categories for each categorical covariate.
     dropout_rate
-        Dropout rate. Passed into :class:`~scvi.nn.Encoder` but not :class:`~scvi.nn.DecoderSCVI`.
+        Dropout rate for encoder.
     dispersion
-        Flexibility of the dispersion parameter when ``gene_likelihood`` is either ``"nb"`` or
-        ``"zinb"``. One of the following:
-
-        * ``"gene"``: parameter is constant per gene across cells.
-        * ``"gene-batch"``: parameter is constant per gene per batch.
-        * ``"gene-label"``: parameter is constant per gene per label.
-        * ``"gene-cell"``: parameter is constant per gene per cell.
+        Flexibility of the dispersion parameter.
     log_variational
-        If ``True``, use :func:`~torch.log1p` on input data before encoding for numerical stability
-        (not normalization).
+        If ``True``, use log1p on input before encoding.
     gene_likelihood
-        Distribution to use for reconstruction in the generative process. One of the following:
-
-        * ``"nb"``: :class:`~scvi.distributions.NegativeBinomial`.
-        * ``"zinb"``: :class:`~scvi.distributions.ZeroInflatedNegativeBinomial`.
-        * ``"poisson"``: :class:`~scvi.distributions.Poisson`.
-        * ``"normal"``: :class:`~torch.distributions.Normal`.
+        Distribution for reconstruction.
     latent_distribution
-        Distribution to use for the latent space. One of the following:
-
-        * ``"normal"``: isotropic normal.
-        * ``"ln"``: logistic normal with normal params N(0, 1).
+        Distribution for the latent space.
     encode_covariates
-        If ``True``, covariates are concatenated to gene expression prior to passing through
-        the encoder(s). Else, only gene expression is used.
+        If ``True``, covariates are concatenated to gene expression for encoding.
     deeply_inject_covariates
-        If ``True`` and ``n_layers > 1``, covariates are concatenated to the outputs of hidden
-        layers in the encoder(s) (if ``encoder_covariates`` is ``True``) and the decoder prior to
-        passing through the next layer.
+        If ``True``, covariates injected into each hidden layer.
     batch_representation
-        ``EXPERIMENTAL`` Method for encoding batch information. One of the following:
-
-        * ``"one-hot"``: represent batches with one-hot encodings.
-        * ``"embedding"``: represent batches with continuously-valued embeddings using
-          :class:`~scvi.nn.Embedding`.
-
-        Note that batch representations are only passed into the encoder(s) if
-        ``encode_covariates`` is ``True``.
+        Method for encoding batch information.
     use_batch_norm
-        Specifies where to use :class:`~torch.nn.BatchNorm1d` in the model. One of the following:
-
-        * ``"none"``: don't use batch norm in either encoder(s) or decoder.
-        * ``"encoder"``: use batch norm only in the encoder(s).
-        * ``"decoder"``: use batch norm only in the decoder.
-        * ``"both"``: use batch norm in both encoder(s) and decoder.
-
-        Note: if ``use_layer_norm`` is also specified, both will be applied (first
-        :class:`~torch.nn.BatchNorm1d`, then :class:`~torch.nn.LayerNorm`).
+        Where to use BatchNorm.
     use_layer_norm
-        Specifies where to use :class:`~torch.nn.LayerNorm` in the model. One of the following:
-
-        * ``"none"``: don't use layer norm in either encoder(s) or decoder.
-        * ``"encoder"``: use layer norm only in the encoder(s).
-        * ``"decoder"``: use layer norm only in the decoder.
-        * ``"both"``: use layer norm in both encoder(s) and decoder.
-
-        Note: if ``use_batch_norm`` is also specified, both will be applied (first
-        :class:`~torch.nn.BatchNorm1d`, then :class:`~torch.nn.LayerNorm`).
+        Where to use LayerNorm.
     use_size_factor_key
-        If ``True``, use the :attr:`~anndata.AnnData.obs` column as defined by the
-        ``size_factor_key`` parameter in the model's ``setup_anndata`` method as the scaling
-        factor in the mean of the conditional distribution. Takes priority over
-        ``use_observed_lib_size``.
+        If ``True``, use size factor from anndata.
     use_observed_lib_size
-        If ``True``, use the observed library size for RNA as the scaling factor in the mean of the
-        conditional distribution.
+        If ``True``, use observed library size.
     library_log_means
-        :class:`~numpy.ndarray` of shape ``(1, n_batch)`` of means of the log library sizes that
-        parameterize the prior on library size if ``use_size_factor_key`` is ``False`` and
-        ``use_observed_lib_size`` is ``False``.
+        Prior means for log library sizes.
     library_log_vars
-        :class:`~numpy.ndarray` of shape ``(1, n_batch)`` of variances of the log library sizes
-        that parameterize the prior on library size if ``use_size_factor_key`` is ``False`` and
-        ``use_observed_lib_size`` is ``False``.
+        Prior variances for log library sizes.
     var_activation
-        Callable used to ensure positivity of the variance of the variational distribution. Passed
-        into :class:`~scvi.nn.Encoder`. Defaults to :func:`~torch.exp`.
+        Callable for variance positivity.
     extra_encoder_kwargs
-        Additional keyword arguments passed into :class:`~scvi.nn.Encoder`.
+        Additional kwargs for encoder (e.g., ``dropout_on_input=True``).
     extra_decoder_kwargs
-        Additional keyword arguments passed into :class:`~scvi.nn.DecoderSCVI`.
+        Additional kwargs for decoder.
     batch_embedding_kwargs
-        Keyword arguments passed into :class:`~scvi.nn.Embedding` if ``batch_representation`` is
-        set to ``"embedding"``.
-
-    Notes
-    -----
-    Lifecycle: argument ``batch_representation`` is experimental in v1.2.
+        Kwargs for batch embedding.
+    library_log_vars_weight
+        Scale factor for library log variance prior. Smaller values constrain
+        the library size more tightly, preventing it from absorbing biological signal.
+    library_n_hidden
+        Hidden units in library encoder. Small values (16-32) prevent the
+        library encoder from becoming a pathway for biological signal.
+        If None, uses n_hidden.
+    scale_activation
+        Override for decoder scale activation. If provided, overrides the
+        default logic based on use_size_factor_key. Use "softplus" for
+        regularizedvi (expression is no longer on the simplex).
+    use_additive_background
+        If True, add per-gene, per-batch learnable ambient RNA background.
+    use_batch_in_decoder
+        If False, remove batch info from decoder. Batch correction handled
+        through additive background and categorical covariates.
+    regularise_dispersion
+        If True, add Exponential prior on dispersion pushing NB toward Poisson.
+    regularise_dispersion_prior
+        Rate parameter for the Exponential prior on sqrt(exp(phi_g)).
     """
 
     def __init__(
@@ -175,8 +159,16 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         extra_encoder_kwargs: dict | None = None,
         extra_decoder_kwargs: dict | None = None,
         batch_embedding_kwargs: dict | None = None,
+        # regularizedvi-specific parameters
+        library_log_vars_weight: float | None = None,
+        library_n_hidden: int | None = None,
+        scale_activation: str | None = None,
+        use_additive_background: bool = False,
+        use_batch_in_decoder: bool = True,
+        regularise_dispersion: bool = False,
+        regularise_dispersion_prior: float = 3.0,
     ):
-        from scvi.nn import DecoderSCVI, Encoder
+        from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
         super().__init__()
 
@@ -190,13 +182,21 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.encode_covariates = encode_covariates
         self.use_size_factor_key = use_size_factor_key
         self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
+        self.use_additive_background = use_additive_background
+        self.use_batch_in_decoder = use_batch_in_decoder
+        self.regularise_dispersion = regularise_dispersion
+        self.regularise_dispersion_prior = regularise_dispersion_prior
 
         if not self.use_observed_lib_size:
             if library_log_means is None or library_log_vars is None:
                 raise ValueError("If not using observed_lib_size, must provide library_log_means and library_log_vars.")
 
             self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
-            self.register_buffer("library_log_vars", torch.from_numpy(library_log_vars).float())
+            # Scale library_log_vars by weight to constrain the prior
+            log_vars = torch.from_numpy(library_log_vars).float()
+            if library_log_vars_weight is not None:
+                log_vars = log_vars * library_log_vars_weight
+            self.register_buffer("library_log_vars", log_vars)
 
         if self.dispersion == "gene":
             self.px_r = torch.nn.Parameter(torch.randn(n_input))
@@ -208,6 +208,10 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             pass
         else:
             raise ValueError("`dispersion` must be one of 'gene', 'gene-batch', 'gene-label', 'gene-cell'.")
+
+        # Additive background: per-gene, per-batch learnable parameter
+        if self.use_additive_background:
+            self.additive_background = torch.nn.Parameter(torch.randn(n_input, n_batch))
 
         self.batch_representation = batch_representation
         if self.batch_representation == "embedding":
@@ -230,7 +234,7 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         encoder_cat_list = cat_list if encode_covariates else None
         _extra_encoder_kwargs = extra_encoder_kwargs or {}
-        self.z_encoder = Encoder(
+        self.z_encoder = RegularizedEncoder(
             n_input_encoder,
             n_latent,
             n_cat_list=encoder_cat_list,
@@ -246,12 +250,14 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             **_extra_encoder_kwargs,
         )
         # l encoder goes from n_input-dimensional data to 1-d library size
-        self.l_encoder = Encoder(
+        # Use library_n_hidden for low-capacity library encoder
+        _library_n_hidden = library_n_hidden if library_n_hidden is not None else n_hidden
+        self.l_encoder = RegularizedEncoder(
             n_input_encoder,
             1,
             n_layers=1,
             n_cat_list=encoder_cat_list,
-            n_hidden=n_hidden,
+            n_hidden=_library_n_hidden,
             dropout_rate=dropout_rate,
             inject_covariates=deeply_inject_covariates,
             use_batch_norm=use_batch_norm_encoder,
@@ -260,21 +266,36 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             return_dist=True,
             **_extra_encoder_kwargs,
         )
+
+        # Decoder setup
         n_input_decoder = n_latent + n_continuous_cov
-        if self.batch_representation == "embedding":
-            n_input_decoder += batch_dim
+        if self.use_batch_in_decoder:
+            if self.batch_representation == "embedding":
+                n_input_decoder += batch_dim
+            decoder_cat_list = cat_list
+        else:
+            # Batch-free decoder: only categorical covariates, no batch
+            decoder_cat_list = list([] if n_cats_per_cov is None else n_cats_per_cov)
+
+        # Determine scale activation
+        if scale_activation is not None:
+            _scale_activation = scale_activation
+        elif use_size_factor_key:
+            _scale_activation = "softplus"
+        else:
+            _scale_activation = "softmax"
 
         _extra_decoder_kwargs = extra_decoder_kwargs or {}
-        self.decoder = DecoderSCVI(
+        self.decoder = RegularizedDecoderSCVI(
             n_input_decoder,
             n_input,
-            n_cat_list=cat_list,
+            n_cat_list=decoder_cat_list,
             n_layers=n_layers,
             n_hidden=n_hidden,
             inject_covariates=deeply_inject_covariates,
             use_batch_norm=use_batch_norm_decoder,
             use_layer_norm=use_layer_norm_decoder,
-            scale_activation="softplus" if use_size_factor_key else "softmax",
+            scale_activation=_scale_activation,
             **_extra_decoder_kwargs,
         )
 
@@ -411,7 +432,6 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             raise NotImplementedError(f"Unknown minified-data type: {self.minified_data_type}")
 
         dist = Normal(qzm, qzv.sqrt())
-        # use dist.sample() rather than rsample because we aren't optimizing the z here
         untran_z = dist.sample() if n_samples == 1 else dist.sample((n_samples,))
         z = self.z_encoder.z_transformation(untran_z)
         library = torch.log(observed_lib_size)
@@ -447,7 +467,6 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         )
         from torch.nn.functional import linear
 
-        # TODO: refactor forward function to not rely on y
         # Likelihood distribution
         if cont_covs is None:
             decoder_input = z
@@ -467,24 +486,47 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         if not self.use_size_factor_key:
             size_factor = library
 
-        if self.batch_representation == "embedding":
-            batch_rep = self.compute_embedding(REGISTRY_KEYS.BATCH_KEY, batch_index)
-            decoder_input = torch.cat([decoder_input, batch_rep], dim=-1)
-            px_scale, px_r, px_rate, px_dropout = self.decoder(
-                self.dispersion,
-                decoder_input,
-                size_factor,
-                *categorical_input,
-                y,
+        # Compute additive background if enabled
+        bg = None
+        if self.use_additive_background:
+            # one_hot(batch_index) @ exp(self.additive_background).T -> (n_cells, n_genes)
+            bg = torch.matmul(
+                one_hot(batch_index.squeeze(-1), self.n_batch).float(),
+                torch.exp(self.additive_background).T,
             )
+
+        # Decoder call: batch-free or with batch
+        if self.use_batch_in_decoder:
+            if self.batch_representation == "embedding":
+                batch_rep = self.compute_embedding(REGISTRY_KEYS.BATCH_KEY, batch_index)
+                decoder_input = torch.cat([decoder_input, batch_rep], dim=-1)
+                px_scale, px_r, px_rate, px_dropout = self.decoder(
+                    self.dispersion,
+                    decoder_input,
+                    size_factor,
+                    *categorical_input,
+                    y,
+                    additive_background=bg,
+                )
+            else:
+                px_scale, px_r, px_rate, px_dropout = self.decoder(
+                    self.dispersion,
+                    decoder_input,
+                    size_factor,
+                    batch_index,
+                    *categorical_input,
+                    y,
+                    additive_background=bg,
+                )
         else:
+            # Batch-free decoder: omit batch_index, only pass categorical covariates
             px_scale, px_r, px_rate, px_dropout = self.decoder(
                 self.dispersion,
                 decoder_input,
                 size_factor,
-                batch_index,
                 *categorical_input,
                 y,
+                additive_background=bg,
             )
 
         if self.dispersion == "gene-label":
@@ -536,7 +578,7 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         generative_outputs: dict[str, Distribution | None],
         kl_weight: float = 1.0,
     ) -> LossOutput:
-        """Compute the loss."""
+        """Compute the loss with optional dispersion regularisation."""
         from torch.distributions import kl_divergence
 
         x = tensors[REGISTRY_KEYS.X_KEY]
@@ -559,6 +601,15 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         loss = torch.mean(reconst_loss + weighted_kl_local)
 
+        # Overdispersion regularisation: Exponential prior on sqrt(exp(phi_g))
+        # pushing NB toward Poisson. Scaled by 1/N (number of observations).
+        if self.regularise_dispersion:
+            n_obs = x.shape[0]
+            rate = torch.ones_like(self.px_r) * self.regularise_dispersion_prior
+            px_r_transformed = torch.exp(self.px_r).pow(0.5)
+            neg_log_prior = -Exponential(rate).log_prob(px_r_transformed).sum()
+            loss = loss + neg_log_prior / n_obs
+
         return LossOutput(
             loss=loss,
             reconstruction_loss=reconst_loss,
@@ -577,23 +628,14 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
     ) -> torch.Tensor:
         r"""Generate predictive samples from the posterior predictive distribution.
 
-        The posterior predictive distribution is denoted as :math:`p(\hat{x} \mid x)`, where
-        :math:`x` is the input data and :math:`\hat{x}` is the sampled data.
-
-        We sample from this distribution by first sampling ``n_samples`` times from the posterior
-        distribution :math:`q(z \mid x)` for a given observation, and then sampling from the
-        likelihood :math:`p(\hat{x} \mid z)` for each of these.
-
         Parameters
         ----------
         tensors
-            Dictionary of tensors passed into :meth:`~scvi.module.VAE.forward`.
+            Dictionary of tensors passed into forward.
         n_samples
-            Number of Monte Carlo samples to draw from the distribution for each observation.
+            Number of Monte Carlo samples to draw.
         max_poisson_rate
-            The maximum value to which to clip the ``rate`` parameter of
-            :class:`~scvi.distributions.Poisson`. Avoids numerical sampling issues when the
-            parameter is very large due to the variance of the distribution.
+            Maximum value for Poisson rate parameter.
 
         Returns
         -------
@@ -609,9 +651,7 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         if self.gene_likelihood == "poisson":
             dist = Poisson(torch.clamp(dist.rate, max=max_poisson_rate))
 
-        # (n_obs, n_vars) if n_samples == 1, else (n_samples, n_obs, n_vars)
         samples = dist.sample()
-        # (n_samples, n_obs, n_vars) -> (n_obs, n_vars, n_samples)
         samples = torch.permute(samples, (1, 2, 0)) if n_samples > 1 else samples
 
         return samples.cpu()
@@ -625,19 +665,7 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         return_mean: bool = False,
         n_mc_samples_per_pass: int = 1,
     ):
-        """Compute the marginal log-likelihood of the data under the model.
-
-        Parameters
-        ----------
-        tensors
-            Dictionary of tensors passed into :meth:`~scvi.module.VAE.forward`.
-        n_mc_samples
-            Number of Monte Carlo samples to use for the estimation of the marginal log-likelihood.
-        return_mean
-            Whether to return the mean of marginal likelihoods over cells.
-        n_mc_samples_per_pass
-            Number of Monte Carlo samples to use per pass. This is useful to avoid memory issues.
-        """
+        """Compute the marginal log-likelihood of the data under the model."""
         from torch import logsumexp
         from torch.distributions import Normal
 
@@ -653,17 +681,14 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             n_mc_samples_per_pass = n_mc_samples
         n_passes = int(np.ceil(n_mc_samples / n_mc_samples_per_pass))
         for _ in range(n_passes):
-            # Distribution parameters and sampled variables
             inference_outputs, _, losses = self.forward(tensors, inference_kwargs={"n_samples": n_mc_samples_per_pass})
             qz = inference_outputs[MODULE_KEYS.QZ_KEY]
             ql = inference_outputs[MODULE_KEYS.QL_KEY]
             z = inference_outputs[MODULE_KEYS.Z_KEY]
             library = inference_outputs[MODULE_KEYS.LIBRARY_KEY]
 
-            # Reconstruction Loss
             reconst_loss = losses.dict_sum(losses.reconstruction_loss)
 
-            # Log-probabilities
             p_z = Normal(torch.zeros_like(qz.loc), torch.ones_like(qz.scale)).log_prob(z).sum(dim=-1)
             p_x_zl = -reconst_loss
             q_z_x = qz.log_prob(z).sum(dim=-1)

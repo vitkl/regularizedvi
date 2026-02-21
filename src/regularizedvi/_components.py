@@ -1,9 +1,19 @@
 """Neural network building blocks for regularizedvi.
 
-Copied verbatim from scvi-tools (scvi.nn._base_components) as a baseline.
-Only FCLayers, Encoder, and DecoderSCVI are included — the other classes
-(LinearDecoderSCVI, Decoder, MultiEncoder, MultiDecoder, DecoderTOTALVI,
-EncoderTOTALVI) are not needed for regularizedvi.
+Modified from scvi-tools (scvi.nn._base_components) with the following changes:
+
+RegularizedFCLayers (from FCLayers):
+- New ``dropout_on_input`` parameter: applies dropout BEFORE the linear layer
+- Default ``use_batch_norm=False``, ``use_layer_norm=True`` (LayerNorm preferred)
+
+RegularizedEncoder (from Encoder):
+- Uses ``RegularizedFCLayers`` instead of ``FCLayers``
+- New ``"softplus"`` distribution option for non-negative latent transformations
+
+RegularizedDecoderSCVI (from DecoderSCVI):
+- Uses ``RegularizedFCLayers`` instead of ``FCLayers``
+- New ``additive_background`` parameter in ``forward()`` for ambient RNA correction
+- Rate computation: ``library_act(library) * (px_scale + additive_background)``
 """
 
 import collections
@@ -19,8 +29,15 @@ def _identity(x):
     return x
 
 
-class FCLayers(nn.Module):
-    """A helper class to build fully-connected layers for a neural network.
+class RegularizedFCLayers(nn.Module):
+    """Fully-connected layers with optional dropout-on-input.
+
+    When ``dropout_on_input=True``, dropout is applied BEFORE the linear layer
+    (feature-level masking) rather than after activation. This prevents over-reliance
+    on any single gene and works better with the regularizedvi model.
+
+    Default normalization is LayerNorm (not BatchNorm), as LayerNorm normalises
+    across features within each sample, making it independent of batch composition.
 
     Parameters
     ----------
@@ -50,6 +67,9 @@ class FCLayers(nn.Module):
         Whether to inject covariates in each layer, or just the first (default).
     activation_fn
         Which activation function to use
+    dropout_on_input
+        If True, apply dropout before the linear layer instead of after activation.
+        Layer order becomes: Dropout -> Linear -> BatchNorm -> LayerNorm -> Activation.
     """
 
     def __init__(
@@ -60,15 +80,17 @@ class FCLayers(nn.Module):
         n_layers: int = 1,
         n_hidden: int = 128,
         dropout_rate: float = 0.1,
-        use_batch_norm: bool = True,
-        use_layer_norm: bool = False,
+        use_batch_norm: bool = False,
+        use_layer_norm: bool = True,
         use_activation: bool = True,
         bias: bool = True,
         inject_covariates: bool = True,
         activation_fn: nn.Module = nn.ReLU,
+        dropout_on_input: bool = False,
     ):
         super().__init__()
         self.inject_covariates = inject_covariates
+        self.dropout_on_input = dropout_on_input
         layers_dim = [n_in] + (n_layers - 1) * [n_hidden] + [n_out]
 
         if n_cat_list is not None:
@@ -78,29 +100,53 @@ class FCLayers(nn.Module):
             self.n_cat_list = []
 
         cat_dim = sum(self.n_cat_list)
-        self.fc_layers = nn.Sequential(
-            collections.OrderedDict(
-                [
-                    (
-                        f"Layer {i}",
-                        nn.Sequential(
-                            nn.Linear(
-                                n_in + cat_dim * self.inject_into_layer(i),
-                                n_out,
-                                bias=bias,
+
+        if dropout_on_input:
+            # Dropout -> Linear -> BatchNorm -> LayerNorm -> Activation (no trailing dropout)
+            self.fc_layers = nn.Sequential(
+                collections.OrderedDict(
+                    [
+                        (
+                            f"Layer {i}",
+                            nn.Sequential(
+                                nn.Dropout(p=dropout_rate) if dropout_rate > 0 else None,
+                                nn.Linear(
+                                    n_in + cat_dim * self.inject_into_layer(i),
+                                    n_out,
+                                    bias=bias,
+                                ),
+                                nn.BatchNorm1d(n_out, momentum=0.01, eps=0.001) if use_batch_norm else None,
+                                nn.LayerNorm(n_out, elementwise_affine=False) if use_layer_norm else None,
+                                activation_fn() if use_activation else None,
                             ),
-                            # non-default params come from defaults in original Tensorflow
-                            # implementation
-                            nn.BatchNorm1d(n_out, momentum=0.01, eps=0.001) if use_batch_norm else None,
-                            nn.LayerNorm(n_out, elementwise_affine=False) if use_layer_norm else None,
-                            activation_fn() if use_activation else None,
-                            nn.Dropout(p=dropout_rate) if dropout_rate > 0 else None,
-                        ),
-                    )
-                    for i, (n_in, n_out) in enumerate(zip(layers_dim[:-1], layers_dim[1:], strict=True))
-                ]
+                        )
+                        for i, (n_in, n_out) in enumerate(zip(layers_dim[:-1], layers_dim[1:], strict=True))
+                    ]
+                )
             )
-        )
+        else:
+            # Standard order: Linear -> BatchNorm -> LayerNorm -> Activation -> Dropout
+            self.fc_layers = nn.Sequential(
+                collections.OrderedDict(
+                    [
+                        (
+                            f"Layer {i}",
+                            nn.Sequential(
+                                nn.Linear(
+                                    n_in + cat_dim * self.inject_into_layer(i),
+                                    n_out,
+                                    bias=bias,
+                                ),
+                                nn.BatchNorm1d(n_out, momentum=0.01, eps=0.001) if use_batch_norm else None,
+                                nn.LayerNorm(n_out, elementwise_affine=False) if use_layer_norm else None,
+                                activation_fn() if use_activation else None,
+                                nn.Dropout(p=dropout_rate) if dropout_rate > 0 else None,
+                            ),
+                        )
+                        for i, (n_in, n_out) in enumerate(zip(layers_dim[:-1], layers_dim[1:], strict=True))
+                    ]
+                )
+            )
 
     def inject_into_layer(self, layer_num) -> bool:
         """Helper to determine if covariates should be injected."""
@@ -183,11 +229,12 @@ class FCLayers(nn.Module):
         return x
 
 
-# Encoder
-class Encoder(nn.Module):
+class RegularizedEncoder(nn.Module):
     """Encode data of ``n_input`` dimensions into a latent space of ``n_output`` dimensions.
 
-    Uses a fully-connected neural network of ``n_hidden`` layers.
+    Uses ``RegularizedFCLayers`` with LayerNorm by default and optional dropout-on-input.
+    Adds ``"softplus"`` distribution option for non-negative latent transformations,
+    needed for the ambient RNA additive background coefficient.
 
     Parameters
     ----------
@@ -206,7 +253,8 @@ class Encoder(nn.Module):
     dropout_rate
         Dropout rate to apply to each of the hidden layers
     distribution
-        Distribution of z
+        Distribution of z. One of ``"normal"``, ``"ln"`` (logistic normal),
+        or ``"softplus"`` (non-negative via softplus transformation).
     var_eps
         Minimum value for the variance;
         used for numerical stability
@@ -216,7 +264,7 @@ class Encoder(nn.Module):
     return_dist
         Return directly the distribution of z instead of its parameters.
     **kwargs
-        Keyword args for :class:`~scvi.nn.FCLayers`
+        Keyword args for :class:`RegularizedFCLayers`
     """
 
     def __init__(
@@ -237,7 +285,7 @@ class Encoder(nn.Module):
 
         self.distribution = distribution
         self.var_eps = var_eps
-        self.encoder = FCLayers(
+        self.encoder = RegularizedFCLayers(
             n_in=n_input,
             n_out=n_hidden,
             n_cat_list=n_cat_list,
@@ -252,6 +300,8 @@ class Encoder(nn.Module):
 
         if distribution == "ln":
             self.z_transformation = nn.Softmax(dim=-1)
+        elif distribution == "softplus":
+            self.z_transformation = nn.Softplus()
         else:
             self.z_transformation = _identity
         self.var_activation = torch.exp if var_activation is None else var_activation
@@ -288,11 +338,13 @@ class Encoder(nn.Module):
         return q_m, q_v, latent
 
 
-# Decoder
-class DecoderSCVI(nn.Module):
-    """Decodes data from latent space of ``n_input`` dimensions into ``n_output`` dimensions.
+class RegularizedDecoderSCVI(nn.Module):
+    """Decoder with ambient RNA additive background support.
 
-    Uses a fully-connected neural network of ``n_hidden`` layers.
+    Uses ``RegularizedFCLayers`` with LayerNorm by default.
+    The ``forward()`` method accepts an optional ``additive_background`` tensor
+    that is added to ``px_scale`` before multiplying by library size, implementing
+    the ambient RNA correction: ``rate = library_act(library) * (px_scale + background)``.
 
     Parameters
     ----------
@@ -319,7 +371,7 @@ class DecoderSCVI(nn.Module):
     scale_activation
         Activation layer to use for px_scale_decoder
     **kwargs
-        Keyword args for :class:`~scvi.nn.FCLayers`.
+        Keyword args for :class:`RegularizedFCLayers`.
     """
 
     def __init__(
@@ -336,7 +388,7 @@ class DecoderSCVI(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.px_decoder = FCLayers(
+        self.px_decoder = RegularizedFCLayers(
             n_in=n_input,
             n_out=n_hidden,
             n_cat_list=n_cat_list,
@@ -371,6 +423,7 @@ class DecoderSCVI(nn.Module):
         z: torch.Tensor,
         library: torch.Tensor,
         *cat_list: int,
+        additive_background: torch.Tensor | None = None,
     ):
         """The forward computation for a single sample.
 
@@ -389,10 +442,14 @@ class DecoderSCVI(nn.Module):
             * ``'gene-cell'`` - dispersion can differ for every gene in every cell
         z :
             tensor with shape ``(n_input,)``
-        library_size
-            library size
+        library
+            library size (log-scale)
         cat_list
             list of category membership(s) for this sample
+        additive_background
+            Per-gene, per-cell additive background (ambient RNA).
+            Shape ``(n_cells, n_genes)``. Added to ``px_scale`` before
+            multiplying by library size.
 
         Returns
         -------
@@ -404,7 +461,12 @@ class DecoderSCVI(nn.Module):
         px = self.px_decoder(z, *cat_list)
         px_scale = self.px_scale_decoder(px)
         px_dropout = self.px_dropout_decoder(px)
-        # Clamp to high value: exp(12) ~ 160000 to avoid nans (computational stability)
-        px_rate = torch.exp(library) * px_scale  # torch.clamp( , max=12)
+
+        # Ambient RNA: add per-gene, per-batch background before scaling by library
+        if additive_background is not None:
+            px_rate = torch.exp(library) * (px_scale + additive_background)
+        else:
+            px_rate = torch.exp(library) * px_scale
+
         px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
         return px_scale, px_r, px_rate, px_dropout
