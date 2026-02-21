@@ -46,7 +46,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
     - **Ambient RNA correction**: per-gene, per-batch additive background term
       ``b_{g,s_n} = exp(beta_{g,s_n})``, mirroring cell2location's
-      ``(g_fg + b_eg) * h_e`` structure :cite:p:`Kleshchevnikov22`.
+      ``(g_fg + b_eg) * h_e`` structure :cite:p:`Kleshchevnikov22`
+      and cell2fate's Bayesian modelling principles :cite:p:`Aivazidis25`.
     - **Overdispersion regularisation**: Exponential prior on
       ``sqrt(exp(phi_g))`` pushing NB toward Poisson, adapted from
       cell2location's containment prior :cite:p:`Simpson17`.

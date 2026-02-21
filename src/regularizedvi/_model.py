@@ -82,7 +82,7 @@ class AmbientRegularizedSCVI(
 ):
     """Regularized scVI with ambient RNA correction and overdispersion regularisation.
 
-    Adapts cell2location/cell2fate modelling principles to scVI:
+    Adapts `cell2location <https://doi.org/10.1038/s41587-021-01139-4>`_/`cell2fate <https://doi.org/10.1038/s41592-025-02608-3>`_ modelling principles to scVI:
 
     - **Ambient RNA**: per-gene, per-sample additive background captures ambient RNA,
       mirroring cell2location's ``(g_fg + b_eg) * h_e`` structure.
@@ -157,6 +157,7 @@ class AmbientRegularizedSCVI(
     ----------
     - Lopez et al. (2018). Deep generative modeling for single-cell transcriptomics.
     - Kleshchevnikov et al. (2022). Cell2location maps fine-grained cell types.
+    - Aivazidis et al. (2025). Cell2fate infers RNA velocity modules.
     - Simpson et al. (2017). Penalising Model Component Complexity.
     """
 
