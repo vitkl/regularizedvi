@@ -41,6 +41,19 @@ from scvi.model.base import (
 )
 from scvi.utils import setup_anndata_dsp
 
+from regularizedvi._constants import (
+    DEFAULT_DISPERSION,
+    DEFAULT_GENE_LIKELIHOOD,
+    DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
+    DEFAULT_LIBRARY_N_HIDDEN,
+    DEFAULT_REGULARISE_DISPERSION,
+    DEFAULT_REGULARISE_DISPERSION_PRIOR,
+    DEFAULT_SCALE_ACTIVATION,
+    DEFAULT_USE_ADDITIVE_BACKGROUND,
+    DEFAULT_USE_BATCH_IN_DECODER,
+    DEFAULT_USE_BATCH_NORM,
+    DEFAULT_USE_LAYER_NORM,
+)
 from regularizedvi._module import RegularizedVAE
 
 if TYPE_CHECKING:
@@ -156,19 +169,19 @@ class AmbientRegularizedSCVI(
         n_latent: int = 10,
         n_layers: int = 1,
         dropout_rate: float = 0.1,
-        dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene-batch",
-        gene_likelihood: Literal["zinb", "nb", "poisson", "normal"] = "nb",
+        dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = DEFAULT_DISPERSION,
+        gene_likelihood: Literal["zinb", "nb", "poisson", "normal"] = DEFAULT_GENE_LIKELIHOOD,
         latent_distribution: Literal["normal", "ln"] = "normal",
-        # regularizedvi defaults
-        library_log_vars_weight: float = 0.05,
-        library_n_hidden: int = 16,
-        scale_activation: str = "softplus",
-        use_additive_background: bool = True,
-        use_batch_in_decoder: bool = False,
-        regularise_dispersion: bool = True,
-        regularise_dispersion_prior: float = 3.0,
-        use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "none",
-        use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "both",
+        # regularizedvi defaults (from _constants.py)
+        library_log_vars_weight: float = DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
+        library_n_hidden: int = DEFAULT_LIBRARY_N_HIDDEN,
+        scale_activation: str = DEFAULT_SCALE_ACTIVATION,
+        use_additive_background: bool = DEFAULT_USE_ADDITIVE_BACKGROUND,
+        use_batch_in_decoder: bool = DEFAULT_USE_BATCH_IN_DECODER,
+        regularise_dispersion: bool = DEFAULT_REGULARISE_DISPERSION,
+        regularise_dispersion_prior: float = DEFAULT_REGULARISE_DISPERSION_PRIOR,
+        use_batch_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_BATCH_NORM,
+        use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
         **kwargs,
     ):
         super().__init__(adata)
