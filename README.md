@@ -16,18 +16,19 @@ Standard scVI (Lopez et al. 2018) models observed UMI counts $x_{ng}$ for cell $
 
 $$z_n \sim \text{Normal}(0, I)$$
 $$\ell_n \sim \text{LogNormal}(\ell_\mu^\top s_n,\; \ell_{\sigma^2}^\top s_n)$$
-$$\rho_n = f_w(z_n, s_n) \in \Delta^{G-1}$$
+$$\rho_{ng} = f_w(z_n, s_n, c_n) \in \Delta^{G-1}$$
 $$x_{ng} \sim \text{NB}(\mu = \ell_n \rho_{ng},\; \theta_{g,s_n})$$
 
 where:
 - $z_n \in \mathbb{R}^d$ — low-dimensional latent cell state
-- $\ell_n \in (0, \infty)$ — library size (total UMI count per cell), with log-normal prior parameterised per batch $s_n$
-- $\rho_n \in \Delta^{G-1}$ — decoder output on the probability simplex (via softmax), representing denoised normalised gene expression
-- $f_w(z_n, s_n): \mathbb{R}^d \times \{0,1\}^K \to \Delta^{G-1}$ — decoder neural network, conditioned on batch $s_n$
-- $\theta_{g,s_n} \in (0, \infty)$ — per-gene, per-batch inverse dispersion (code: `px_r`, stored as unconstrained $\phi_{g,s_n}$ where $\theta_{g,s_n} = \exp(\phi_{g,s_n})$)
+- $\ell_n \in (0, \infty)$ — library size (by default fixed to total UMI count per cell), with log-normal prior parameterised per batch $s_n$
+- $\rho_n \in \Delta^{G-1}$ — decoder output on the probability simplex (via softmax) as a fraction of total $\ell_n$ RNA per cell, representing denoised normalised gene expression
+- $f_w(z_n, s_n): \mathbb{R}^d \times {0,1}^K \to \Delta^{G-1}$ — decoder neural network, conditioned on batch $s_n$
+- $\theta_{g,s_n} \in (0, \infty)$ — per-gene, per-batch inverse dispersion (code: `px_r`, stored as unconstrained $\phi_{g,s_n}$ where $\theta_{g,s_n} = \exp(\phi_{g,s_n})$ )
 - $s_n \in \{0,1\}^K$ — one-hot batch indicator for cell $n$
+- $c_n \in \{0,1\}^K$ — one-hot categorical covariate indicator for cell $n$
 
-The inference model uses amortised variational inference: $q_\eta(z_n, \ell_n \mid x_n) = q_\eta(z_n \mid x_n, s_n) \, q_\eta(\ell_n \mid x_n)$.
+The inference model uses amortised variational inference to fit all cell specific variables (encoder NNs): $q_\eta(z_n, \ell_n \mid x_n, s_n, c_n) = q_\eta(z_n \mid x_n, s_n, c_n) \, q_\eta(\ell_n \mid x_n, s_n, c_n)$. Note that both batch $s_n$ and $c_n$ categorical covariates are used in both decoders (model) and encoders (amortised variational inference of  $z_n, \ell_n$).
 
 ### regularizedvi generative model
 
@@ -35,31 +36,31 @@ The inference model uses amortised variational inference: $q_\eta(z_n, \ell_n \m
 
 $$z_n \sim \text{Normal}(0, I)$$
 $$\ell_n \sim \text{LogNormal}(\ell_\mu^\top s_n,\; 0.05 \cdot \ell_{\sigma^2}^\top s_n)$$
-$$\rho_n = \text{softplus}\!\big(f_w(z_n, c_n)\big) \in \mathbb{R}_{\geq 0}^G$$
+$$\rho_{ng} = \text{softplus}\big(f_w(z_n, c_n)\big) \in \mathbb{R}_{\geq 0}^G$$
 $$b_{g,s_n} = \exp(\beta_{g,s_n})$$
 $$\sqrt{\theta_{g,s_n}} \sim \text{Exponential}(\lambda)$$
-$$x_{ng} \sim \text{NB}\Big(\mu = \ell_n \cdot \big(\rho_{ng} + b_{g,s_n}\big),\;\theta_{g,s_n}\Big)$$
+$$x_{ng} \sim \text{NB}\Big(\mu = \ell_n \cdot \big(\rho_{ng} + b_{g,s_n}\big),\theta_{g,s_n}\Big)$$
 
 where additionally:
 - $b_{g,s_n} = \exp(\beta_{g,s_n})$ — per-gene, per-batch additive ambient RNA background (learnable parameter)
-- $\beta_{g,s_n}$ — unconstrained ambient background parameter (code: `additive_background`)
+- $\beta_{g,s_n}$ — unconstrained ambient background parameter (code: `additive_background`), this is an implementational detail
 - $c_n$ — categorical covariates only (site, donor, etc.), **not** batch $s_n$ (batch-free decoder)
-- $\rho_n \in \mathbb{R}_{\geq 0}^G$ — decoder output via softplus (no longer on the simplex), since $\rho_{ng} + b_{g,s_n}$ need not sum to 1
+- $\rho_{ng} \in \mathbb{R}_{\geq 0}^G$ — decoder output via softplus (no longer on the simplex), since $\rho_{ng} + b_{g,s_n}$ need not sum to 1
 - $\theta_{g,s_n} = \exp(\phi_{g,s_n})$ — inverse dispersion, parameterised in log-space (code: `px_r` stores $\phi$)
 - $\lambda = 3$ — rate for Exponential containment prior on $\sqrt{\theta_{g,s_n}}$
 - $0.05$ — library prior variance scaling factor (constraining library size)
 
-The NB variance is $\text{Var}(x) = \mu + \mu^2/\theta$, where $\theta$ is the inverse dispersion (= `GammaPoisson` concentration parameter). Large $\theta$ means less overdispersion (approaching Poisson).
+The NB variance is $\text{Var}(x) = \mu + \mu^2/\theta$, where $\theta$ is the inverse dispersion (= `GammaPoisson` concentration parameter). Large $\theta$ means less overdispersion and less variance (variance approaching Poisson $\mu^2/\theta = 0$ -> $\text{Var}(x) = \mu$).
 
 ### Comparison with cell2location/cell2fate overdispersion
 
 Cell2location and cell2fate (Kleshchevnikov et al. 2022, Aivazidis et al. 2025) use Pyro's `GammaPoisson(concentration=α, rate=α/μ)` and place an Exponential containment prior (Simpson et al. 2017) on a quantity they call `alpha_g_inverse`:
 
-$$\alpha_{g,\text{inv}} \sim \text{Exponential}(\lambda_{\text{hyp}}) \qquad \theta_g = \frac{1}{\alpha_{g,\text{inv}}^2}$$
+$$\alpha_{g,s_n}^{\text{inv}} \sim \text{Exponential}(\lambda_{\text{hyp}}) \qquad \theta_{g,s_n} = \frac{1}{{\alpha_{g,s_n}^{\text{inv}}}^2}$$
 
-where $\lambda_{\text{hyp}}$ is itself Gamma-distributed. The Exponential prior penalises large $\alpha_{g,\text{inv}}$, which corresponds to small $\theta$ (high overdispersion). This pushes $\theta$ toward large values (Poisson limit) unless the data support overdispersion.
+where $\lambda_{\text{hyp}}$ is itself Gamma-distributed. The Exponential prior penalises large $\alpha_{g,\text{inv}}$, which corresponds to small $\theta_{g,s_n}$ (high overdispersion). This pushes $\theta_{g,s_n}$ toward large values (Poisson limit) unless the data support overdispersion.
 
-In **regularizedvi**, scvi-tools parameterises inverse dispersion as $\theta = \exp(\phi)$ (code: `px_r`), which is the same $\theta$ = GammaPoisson concentration. The containment prior is placed on $\sqrt{\theta}$:
+In **regularizedvi**, scvi-tools parameterises inverse dispersion as $\theta_{g,s_n} = \exp(\phi)$ (code: `px_r`), which is the same $\theta_{g,s_n}$ = GammaPoisson concentration. The containment prior is placed on $\sqrt{\theta_{g,s_n}}$:
 
 $$\sqrt{\theta_{g,s_n}} = \sqrt{\exp(\phi_{g,s_n})} \sim \text{Exponential}(\lambda)$$
 
