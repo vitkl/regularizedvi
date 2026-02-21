@@ -235,6 +235,10 @@ class AmbientRegularizedSCVI(
             library_log_means, library_log_vars = None, None
             if not use_size_factor_key and self.minified_data_type is None:
                 library_log_means, library_log_vars = _init_library_size(self.adata_manager, n_batch)
+            # Determine use_observed_lib_size:
+            # If library_log_means/vars are provided (computed above), learn library size.
+            # This is a key regularizedvi default — observed totals include ambient RNA.
+            use_observed_lib_size = library_log_means is None
             self.module = self._module_cls(
                 n_input=self.summary_stats.n_vars,
                 n_batch=n_batch,
@@ -249,6 +253,7 @@ class AmbientRegularizedSCVI(
                 gene_likelihood=gene_likelihood,
                 latent_distribution=latent_distribution,
                 use_size_factor_key=use_size_factor_key,
+                use_observed_lib_size=use_observed_lib_size,
                 library_log_means=library_log_means,
                 library_log_vars=library_log_vars,
                 use_batch_norm=use_batch_norm,
