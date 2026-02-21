@@ -12,19 +12,19 @@ Regularized scVI with ambient RNA correction and overdispersion regularisation, 
 
 Standard scVI (Lopez et al. 2018) models observed counts as:
 
-$$x_{ng} \sim \text{NB}(\mu = \ell_n \rho_{ng},\; \theta_g)$$
+$$x_{ng} \sim \text{NB}(\mu = \ell_n \rho_{ng},\; \theta_{g,s_n})$$
 
-where $\rho_n \in \Delta^{G-1}$ (softmax output), $\ell_n$ is library size, and $\theta_g$ is per-gene inverse dispersion.
+where $n$ is cell, $g$ is gene, $s_n$ is batch_key index, $\rho_n \in \Delta^{G-1}$ is decoder output (softmax output), $\ell_n$ is library size, and $\theta_{g,s_n}$ is per-gene per-batch inverse dispersion.
 
 **regularizedvi** adapts cell2location modelling principles to scVI:
 
-$$x_{ng} \sim \text{NB}\!\Big(\mu = \ell_n \cdot \big(\rho_{ng} + b_{g,s_n}\big),\;\theta_{g,s_n}\Big)$$
+$$x_{ng} \sim \text{NB}\Big(\mu = \ell_n \cdot \big(\rho_{ng} + b_{g,s_n}\big),\;\theta_{g,s_n}\Big)$$
 
-with a containment prior on overdispersion: $\sqrt{\exp(\phi_g)} \sim \text{Exponential}(\lambda)$
+with a containment prior on overdispersion: $\sqrt{\exp(\theta_{g,s_n})} \sim \text{Exponential}(\lambda)$
 
 ### Key modifications
 
-1. **Ambient RNA correction**: Per-gene, per-sample additive background $b_{g,s_n}$ captures ambient RNA contamination, mirroring cell2location's $(g_{fg} + b_{eg}) \cdot h_e$ structure.
+1. **Ambient RNA correction**: Per-gene, per-sample additive background $b_{g,s_n}$ captures ambient RNA contamination, mirroring cell2location's $(g_{f,g} + b_{e,g}) \cdot h_e$ structure.
 
 2. **Overdispersion regularisation**: Exponential prior pushes NB toward Poisson, forcing the model to explain count variation through the mean (biology) rather than inflated variance.
 
