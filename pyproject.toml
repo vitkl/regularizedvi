@@ -28,6 +28,7 @@ classifiers = [
 dependencies = [
   "anndata",
   "numpy",
+  "scrublet",
   "scvi-tools>=1.2",
   # for debug logging (referenced from the issue template)
   "session-info2",
