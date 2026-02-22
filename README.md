@@ -52,28 +52,6 @@ where additionally:
 
 The NB variance is $\text{Var}(x) = \mu + \mu^2/\theta$, where $\theta$ is the inverse dispersion (= `GammaPoisson` concentration parameter). Large $\theta$ means less overdispersion and less variance (variance approaching Poisson $\mu^2/\theta = 0$ -> $\text{Var}(x) = \mu$).
 
-### Comparison with cell2location/cell2fate overdispersion
-
-Cell2location and cell2fate (Kleshchevnikov et al. 2022, Aivazidis et al. 2025) use Pyro's `GammaPoisson(concentration=α, rate=α/μ)` and place an Exponential containment prior (Simpson et al. 2017) on a quantity they call `alpha_g_inverse`:
-
-$$\alpha_{g,s_n}^{\text{inv}} \sim \text{Exponential}(\lambda_{\text{hyp}}) \qquad \theta_{g,s_n} = \frac{1}{{\alpha_{g,s_n}^{\text{inv}}}^2}$$
-
-where $\lambda_{\text{hyp}}$ is itself Gamma-distributed. The Exponential prior penalises large $\alpha_{g,\text{inv}}$, which corresponds to small $\theta_{g,s_n}$ (high overdispersion). This pushes $\theta_{g,s_n}$ toward large values (Poisson limit) unless the data support overdispersion.
-
-In **regularizedvi**, scvi-tools parameterises $\theta_{g,s_n} = \exp(\phi_{g,s_n})$ (code: `px_r` stores $\phi$), which is the same $\theta$ = GammaPoisson concentration. The regularisation prior is placed on the **dispersion** quantity $\sqrt{\theta_{g,s_n}}$ (not the overdispersion quantity $1/\sqrt{\theta_{g,s_n}}$):
-
-$$\sqrt{\theta_{g,s_n}} = \sqrt{\exp(\phi_{g,s_n})} \sim \text{Exponential}(\lambda)$$
-
-This gives the following prior expectations: $\mathbb{E}[\sqrt{\theta}] = 1/\lambda = 1/3$, so $\theta \approx 1/9$ and overdispersion $1/\theta \approx 9$.
-
-**Opposite directions, same goal.** The Exponential distribution always pushes its argument toward zero. The critical difference is **which quantity** the prior is placed on:
-
-- **Cell2location** (Bayesian inference with Pyro): Exponential prior on $\alpha_{g}^{\text{inv}} = 1/\sqrt{\theta}$ (an **overdispersion** quantity). Pushes $1/\sqrt{\theta}$ toward zero → $\theta$ **large** → Poisson limit. In the Bayesian framework, the prior sets the "base model" — genes default to Poisson-like unless the data provide evidence for overdispersion.
-
-- **regularizedvi** (amortised variational inference with PyTorch): Exponential prior on $\sqrt{\theta}$ (a **dispersion** quantity). Pushes $\sqrt{\theta}$ toward zero → $\theta$ **small** → away from Poisson. During gradient-based VAE training, the reconstruction loss naturally pushes $\theta$ **large** because a tighter NB likelihood (Poisson-like) reduces reconstruction error when the mean is well-estimated. Without regularisation, $\theta$ grows unconstrained, collapsing the NB to Poisson and causing the model to overfit individual count values. The prior counteracts this by penalising large $\theta$, preserving the model's ability to accommodate genuine count overdispersion.
-
-Both approaches achieve the same practical outcome: $\theta$ is kept at reasonable intermediate values where the NB can model genuine biological overdispersion without extreme behaviour in either direction. The prior direction is adapted to the optimisation framework rather than being a universal choice.
-
 ### Key modifications
 
 1. **Ambient RNA correction**: Per-gene, per-sample additive background $b_{g,s_n}$ captures ambient RNA contamination, mirroring cell2location's $(g_{f,g} + b_{e,g}) \cdot h_e$ structure. Implemented as `nn.Parameter(torch.randn(n_genes, n_batch))` with per-batch selection via one-hot encoding.
@@ -107,8 +85,6 @@ Both approaches achieve the same practical outcome: $\theta$ is kept at reasonab
 ### GPU environment (recommended)
 
 ```bash
-export PYTHONNOUSERSITE="1"
-module load ISG/conda
 export PYTHONNOUSERSITE="1"
 conda create -y -n regularizedvi python=3.11
 conda activate regularizedvi
