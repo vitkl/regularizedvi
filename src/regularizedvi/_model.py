@@ -46,6 +46,7 @@ from regularizedvi._constants import (
     DEFAULT_GENE_LIKELIHOOD,
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
     DEFAULT_LIBRARY_N_HIDDEN,
+    DEFAULT_LIKELIHOOD_DISTRIBUTION,
     DEFAULT_REGULARISE_DISPERSION,
     DEFAULT_REGULARISE_DISPERSION_PRIOR,
     DEFAULT_SCALE_ACTIVATION,
@@ -86,8 +87,9 @@ class AmbientRegularizedSCVI(
 
     - **Ambient RNA**: per-gene, per-sample additive background captures ambient RNA,
       mirroring cell2location's ``(g_fg + b_eg) * h_e`` structure.
-    - **Overdispersion regularisation**: Exponential prior pushes NB toward Poisson,
-      forcing the model to explain variation through biology rather than inflated variance.
+    - **Dispersion regularisation**: Exponential prior on the dispersion quantity
+      ``sqrt(theta)`` penalises large theta, preventing NB collapse to Poisson
+      during gradient-based training.
     - **Batch-free decoder**: batch correction through additive background and categorical
       covariates, not decoder conditioning.
     - **Learned library size**: with constrained prior (``library_log_vars_weight=0.05``).
@@ -128,6 +130,11 @@ class AmbientRegularizedSCVI(
         Enable overdispersion regularisation. Default ``True``.
     regularise_dispersion_prior
         Rate for Exponential prior on dispersion. Default ``3.0``.
+    likelihood_distribution
+        Distribution implementation for reconstruction loss.
+        ``"nb"`` (default): scvi-tools NegativeBinomial with Exp prior on sqrt(theta).
+        ``"gamma_poisson"``: Pyro GammaPoisson with Exp prior on 1/sqrt(theta)
+        (cell2location direction, pushes theta toward Poisson).
     use_batch_norm
         Where to use BatchNorm. Default ``"none"``.
     use_layer_norm
@@ -181,6 +188,7 @@ class AmbientRegularizedSCVI(
         use_batch_in_decoder: bool = DEFAULT_USE_BATCH_IN_DECODER,
         regularise_dispersion: bool = DEFAULT_REGULARISE_DISPERSION,
         regularise_dispersion_prior: float = DEFAULT_REGULARISE_DISPERSION_PRIOR,
+        likelihood_distribution: Literal["nb", "gamma_poisson"] = DEFAULT_LIKELIHOOD_DISTRIBUTION,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_BATCH_NORM,
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
         **kwargs,
@@ -204,6 +212,7 @@ class AmbientRegularizedSCVI(
             "use_batch_in_decoder": use_batch_in_decoder,
             "regularise_dispersion": regularise_dispersion,
             "regularise_dispersion_prior": regularise_dispersion_prior,
+            "likelihood_distribution": likelihood_distribution,
             **kwargs,
         }
         self._model_summary_string = (
@@ -211,6 +220,7 @@ class AmbientRegularizedSCVI(
             f"n_hidden: {n_hidden}, n_latent: {n_latent}, n_layers: {n_layers}, "
             f"dropout_rate: {dropout_rate}, dispersion: {dispersion}, "
             f"gene_likelihood: {gene_likelihood}, latent_distribution: {latent_distribution}, "
+            f"likelihood_distribution: {likelihood_distribution}, "
             f"use_additive_background: {use_additive_background}, "
             f"use_batch_in_decoder: {use_batch_in_decoder}, "
             f"regularise_dispersion: {regularise_dispersion}."
@@ -265,6 +275,7 @@ class AmbientRegularizedSCVI(
                 use_batch_in_decoder=use_batch_in_decoder,
                 regularise_dispersion=regularise_dispersion,
                 regularise_dispersion_prior=regularise_dispersion_prior,
+                likelihood_distribution=likelihood_distribution,
                 **kwargs,
             )
             self.module.minified_data_type = self.minified_data_type

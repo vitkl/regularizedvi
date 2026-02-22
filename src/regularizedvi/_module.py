@@ -39,6 +39,42 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class GammaPoissonWithScale:
+    """Thin wrapper around Pyro GammaPoisson for scvi-tools compatibility.
+
+    scvi-tools expects distributions to have a ``.scale`` property and
+    ``get_normalized()`` method. This wrapper adds those while delegating
+    ``log_prob`` and other methods to Pyro's ``GammaPoisson``.
+    """
+
+    def __init__(self, concentration: torch.Tensor, rate: torch.Tensor, scale: torch.Tensor | None = None):
+        from pyro.distributions import GammaPoisson
+
+        self._dist = GammaPoisson(concentration=concentration, rate=rate)
+        self._scale = scale
+
+    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+        return self._dist.log_prob(value)
+
+    @property
+    def scale(self) -> torch.Tensor | None:
+        return self._scale
+
+    @property
+    def mean(self) -> torch.Tensor:
+        return self._dist.mean
+
+    def get_normalized(self, key: str) -> torch.Tensor:
+        if key == "scale":
+            return self._scale
+        if key == "mu":
+            return self.mean
+        raise ValueError(f"Normalized key {key!r} not recognized")
+
+    def sample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
+        return self._dist.sample(sample_shape)
+
+
 class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
     """Regularized variational auto-encoder with ambient RNA correction.
 
@@ -48,9 +84,11 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
       ``b_{g,s_n} = exp(beta_{g,s_n})``, mirroring cell2location's
       ``(g_fg + b_eg) * h_e`` structure :cite:p:`Kleshchevnikov22`
       and cell2fate's Bayesian modelling principles :cite:p:`Aivazidis25`.
-    - **Overdispersion regularisation**: Exponential prior on
-      ``sqrt(exp(phi_g))`` pushing NB toward Poisson, adapted from
-      cell2location's containment prior :cite:p:`Simpson17`.
+    - **Dispersion regularisation**: Exponential prior on the dispersion
+      quantity ``sqrt(exp(phi_g))`` (not overdispersion ``1/sqrt(exp(phi_g))``),
+      penalising large theta to prevent NB collapse to Poisson during
+      gradient-based training. Inspired by cell2location's containment prior
+      :cite:p:`Simpson17` :cite:p:`Kleshchevnikov22` :cite:p:`Aivazidis25`.
     - **Batch-free decoder**: batch correction through additive background
       and categorical covariates rather than decoder conditioning.
     - **Learned library size**: with constrained prior variance to prevent
@@ -130,6 +168,14 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         If True, add Exponential prior on dispersion pushing NB toward Poisson.
     regularise_dispersion_prior
         Rate parameter for the Exponential prior on sqrt(exp(phi_g)).
+    likelihood_distribution
+        Which distribution implementation to use for the reconstruction loss.
+        ``"nb"`` uses scvi-tools ``NegativeBinomial(mu, theta)`` with Exp prior
+        on ``sqrt(theta)`` (pushes theta small).
+        ``"gamma_poisson"`` uses Pyro ``GammaPoisson(concentration=theta, rate=theta/mu)``
+        with Exp prior on ``1/sqrt(theta)`` (pushes theta large, cell2location direction).
+        Both are mathematically equivalent NB distributions; the difference is only
+        in the prior direction on the dispersion parameter.
     """
 
     def __init__(
@@ -168,6 +214,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         use_batch_in_decoder: bool = True,
         regularise_dispersion: bool = False,
         regularise_dispersion_prior: float = 3.0,
+        likelihood_distribution: Literal["nb", "gamma_poisson"] = "nb",
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -187,6 +234,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.use_batch_in_decoder = use_batch_in_decoder
         self.regularise_dispersion = regularise_dispersion
         self.regularise_dispersion_prior = regularise_dispersion_prior
+        self.likelihood_distribution = likelihood_distribution
 
         if not self.use_observed_lib_size:
             if library_log_means is None or library_log_vars is None:
@@ -541,7 +589,11 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         px_r = torch.exp(px_r)
 
-        if self.gene_likelihood == "zinb":
+        if self.likelihood_distribution == "gamma_poisson":
+            # Pyro GammaPoisson: concentration=theta, rate=theta/mu
+            # Mathematically identical to scvi-tools NB(mu, theta)
+            px = GammaPoissonWithScale(concentration=px_r, rate=px_r / px_rate, scale=px_scale)
+        elif self.gene_likelihood == "zinb":
             px = ZeroInflatedNegativeBinomial(
                 mu=px_rate,
                 theta=px_r,
@@ -602,12 +654,27 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         loss = torch.mean(reconst_loss + weighted_kl_local)
 
-        # Overdispersion regularisation: Exponential prior on sqrt(exp(phi_g))
-        # pushing NB toward Poisson. Scaled by 1/N (number of observations).
+        # Dispersion regularisation via containment prior (Simpson et al. 2017).
+        # Two directions depending on likelihood_distribution:
+        #
+        # "nb" (default): Exp prior on sqrt(theta).
+        #   Pushes theta small (away from Poisson). Counteracts the reconstruction
+        #   loss which tends to push theta large during gradient-based VAE training.
+        #
+        # "gamma_poisson": Exp prior on 1/sqrt(theta) (cell2location direction).
+        #   Pushes theta large (toward Poisson), matching the Bayesian prior used
+        #   in cell2location/cell2fate.
+        #
+        # Scaled by 1/N (number of observations in mini-batch).
         if self.regularise_dispersion:
             n_obs = x.shape[0]
             rate = torch.ones_like(self.px_r) * self.regularise_dispersion_prior
-            px_r_transformed = torch.exp(self.px_r).pow(0.5)
+            if self.likelihood_distribution == "gamma_poisson":
+                # Cell2location direction: Exp on 1/sqrt(theta) → pushes theta large
+                px_r_transformed = torch.exp(-self.px_r).pow(0.5)
+            else:
+                # Current direction: Exp on sqrt(theta) → pushes theta small
+                px_r_transformed = torch.exp(self.px_r).pow(0.5)
             neg_log_prior = -Exponential(rate).log_prob(px_r_transformed).sum()
             loss = loss + neg_log_prior / n_obs
 

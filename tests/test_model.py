@@ -246,3 +246,68 @@ class TestRegularizedVAEModule:
         # Both should have the regularise_dispersion attribute set correctly
         assert model_reg.module.regularise_dispersion is True
         assert model_noreg.module.regularise_dispersion is False
+
+
+class TestGammaPoissonMode:
+    """Tests for likelihood_distribution='gamma_poisson' mode."""
+
+    def test_gamma_poisson_init(self, adata):
+        """Test model initialisation with gamma_poisson mode."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            likelihood_distribution="gamma_poisson",
+        )
+        assert model.module.likelihood_distribution == "gamma_poisson"
+
+    def test_gamma_poisson_train(self, adata):
+        """Test training with gamma_poisson mode runs without error."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            likelihood_distribution="gamma_poisson",
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+
+    def test_gamma_poisson_latent(self, adata):
+        """Test latent representation with gamma_poisson mode."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            likelihood_distribution="gamma_poisson",
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        latent = model.get_latent_representation()
+        assert latent.shape == (adata.n_obs, 4)
+
+    def test_default_is_nb(self, adata):
+        """Test that the default likelihood_distribution is 'nb'."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+        )
+        assert model.module.likelihood_distribution == "nb"

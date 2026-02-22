@@ -60,17 +60,25 @@ $$\alpha_{g,s_n}^{\text{inv}} \sim \text{Exponential}(\lambda_{\text{hyp}}) \qqu
 
 where $\lambda_{\text{hyp}}$ is itself Gamma-distributed. The Exponential prior penalises large $\alpha_{g,\text{inv}}$, which corresponds to small $\theta_{g,s_n}$ (high overdispersion). This pushes $\theta_{g,s_n}$ toward large values (Poisson limit) unless the data support overdispersion.
 
-In **regularizedvi**, scvi-tools parameterises inverse dispersion as $\theta_{g,s_n} = \exp(\phi)$ (code: `px_r`), which is the same $\theta_{g,s_n}$ = GammaPoisson concentration. The containment prior is placed on $\sqrt{\theta_{g,s_n}}$:
+In **regularizedvi**, scvi-tools parameterises $\theta_{g,s_n} = \exp(\phi_{g,s_n})$ (code: `px_r` stores $\phi$), which is the same $\theta$ = GammaPoisson concentration. The regularisation prior is placed on the **dispersion** quantity $\sqrt{\theta_{g,s_n}}$ (not the overdispersion quantity $1/\sqrt{\theta_{g,s_n}}$):
 
 $$\sqrt{\theta_{g,s_n}} = \sqrt{\exp(\phi_{g,s_n})} \sim \text{Exponential}(\lambda)$$
 
-This is equivalent to the cell2location approach but adapted for scvi's log-space parameterisation. The Exponential prior penalises large $\sqrt{\theta}$, regularising overdispersion. Note that cell2location regularises $1/\sqrt{\theta}$ (calling it `alpha_g_inverse`) while regularizedvi regularises $\sqrt{\theta}$ directly — because scvi already parameterises $\theta$ (inverse dispersion) rather than the dispersion itself, the Exponential prior acts on the appropriate transformation of the same underlying quantity.
+This gives the following prior expectations: $\mathbb{E}[\sqrt{\theta}] = 1/\lambda = 1/3$, so $\theta \approx 1/9$ and overdispersion $1/\theta \approx 9$.
+
+**Opposite directions, same goal.** The Exponential distribution always pushes its argument toward zero. The critical difference is **which quantity** the prior is placed on:
+
+- **Cell2location** (Bayesian inference with Pyro): Exponential prior on $\alpha_{g}^{\text{inv}} = 1/\sqrt{\theta}$ (an **overdispersion** quantity). Pushes $1/\sqrt{\theta}$ toward zero → $\theta$ **large** → Poisson limit. In the Bayesian framework, the prior sets the "base model" — genes default to Poisson-like unless the data provide evidence for overdispersion.
+
+- **regularizedvi** (amortised variational inference with PyTorch): Exponential prior on $\sqrt{\theta}$ (a **dispersion** quantity). Pushes $\sqrt{\theta}$ toward zero → $\theta$ **small** → away from Poisson. During gradient-based VAE training, the reconstruction loss naturally pushes $\theta$ **large** because a tighter NB likelihood (Poisson-like) reduces reconstruction error when the mean is well-estimated. Without regularisation, $\theta$ grows unconstrained, collapsing the NB to Poisson and causing the model to overfit individual count values. The prior counteracts this by penalising large $\theta$, preserving the model's ability to accommodate genuine count overdispersion.
+
+Both approaches achieve the same practical outcome: $\theta$ is kept at reasonable intermediate values where the NB can model genuine biological overdispersion without extreme behaviour in either direction. The prior direction is adapted to the optimisation framework rather than being a universal choice.
 
 ### Key modifications
 
 1. **Ambient RNA correction**: Per-gene, per-sample additive background $b_{g,s_n}$ captures ambient RNA contamination, mirroring cell2location's $(g_{f,g} + b_{e,g}) \cdot h_e$ structure. Implemented as `nn.Parameter(torch.randn(n_genes, n_batch))` with per-batch selection via one-hot encoding.
 
-2. **Overdispersion regularisation**: Containment prior $\sqrt{\theta_{g,s_n}} \sim \text{Exponential}(\lambda)$ adapted from Simpson et al. (2017) via cell2location/cell2fate. See comparison above for the relationship between cell2location's `alpha_g_inverse` parameterisation and regularizedvi's `sqrt(theta)` parameterisation.
+2. **Dispersion regularisation**: Prior $\sqrt{\theta_{g,s_n}} \sim \text{Exponential}(\lambda)$ on the dispersion quantity (not overdispersion) penalises large $\theta$, preventing the NB from collapsing to Poisson during gradient-based training. Inspired by the containment prior of Simpson et al. (2017) as used in cell2location/cell2fate, but placed on the dispersion rather than overdispersion quantity — see comparison above.
 
 3. **Batch-free decoder**: The decoder $f_w(z_n, c_n)$ receives only categorical covariates $c_n$ (site, donor), **not** the batch indicator $s_n$. This prevents the decoder from learning arbitrary batch-specific corrections and forces batch correction through: (a) the additive background $b_{g,s_n}$, (b) categorical covariates, and (c) batch-specific dispersion $\theta_{g,s_n}$.
 
@@ -92,7 +100,7 @@ This is equivalent to the cell2location approach but adapted for scvi's log-spac
 
 - **Additivity in non-negative space**: The additive background operates in non-negative space ($b_{g,s_n} = \exp(\beta_{g,s_n})$), reflecting the ambient RNA correction mechanism. Without empty droplets data, the additive component can learn the minimal expression of each gene across cells — for many genes this reflects ambient levels, but for ubiquitously expressed genes it captures genuine baseline expression. The additive mechanism therefore works best when individual batches are composed of diverse cell types.
 
-- **Regularised overdispersion alone likely helps**: Overdispersion regularisation by itself likely contributes to improved sensitivity by forcing the model to explain count variation through biology, but this needs more systematic testing.
+- **Regularised overdispersion alone likely helps**: Overdispersion regularisation prevents the NB from collapsing to Poisson during training, keeping the likelihood appropriately "loose" so the decoder captures genuine biological signal rather than overfitting individual count values. This likely contributes to improved sensitivity, but needs more systematic testing.
 
 ## Installation
 
