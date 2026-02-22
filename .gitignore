@@ -14,6 +14,8 @@ __pycache__/
 
 # Tests and coverage
 /data/
+docs/notebooks/data/
+docs/notebooks/results/
 /node_modules/
 /.coverage*
 
