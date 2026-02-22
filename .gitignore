@@ -2,6 +2,8 @@
 .DS_Store
 *~
 buck-out/
+*.gpu.err
+*.gpu.out
 
 # Compiled files
 .venv/
@@ -14,6 +16,7 @@ __pycache__/
 
 # Tests and coverage
 /data/
+/results/
 docs/notebooks/data/
 docs/notebooks/results/
 /node_modules/
