@@ -200,6 +200,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
         use_size_factor_key: bool = False,
         use_observed_lib_size: bool = True,
+        extra_payload_autotune: bool = False,
         library_log_means: np.ndarray | None = None,
         library_log_vars: np.ndarray | None = None,
         var_activation: Callable[[torch.Tensor], torch.Tensor] = None,
@@ -214,7 +215,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         use_batch_in_decoder: bool = True,
         regularise_dispersion: bool = False,
         regularise_dispersion_prior: float = 3.0,
-        likelihood_distribution: Literal["nb", "gamma_poisson"] = "nb",
+        likelihood_distribution: Literal["nb", "gamma_poisson"] = "gamma_poisson",
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -230,6 +231,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.encode_covariates = encode_covariates
         self.use_size_factor_key = use_size_factor_key
         self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
+        self.extra_payload_autotune = extra_payload_autotune
         self.use_additive_background = use_additive_background
         self.use_batch_in_decoder = use_batch_in_decoder
         self.regularise_dispersion = regularise_dispersion
@@ -678,6 +680,16 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             neg_log_prior = -Exponential(rate).log_prob(px_r_transformed).sum()
             loss = loss + neg_log_prior / n_obs
 
+        # a payload to be used during autotune
+        if self.extra_payload_autotune:
+            extra_metrics_payload = {
+                "z": inference_outputs["z"],
+                "batch": tensors[REGISTRY_KEYS.BATCH_KEY],
+                "labels": tensors[REGISTRY_KEYS.LABELS_KEY],
+            }
+        else:
+            extra_metrics_payload = {}
+
         return LossOutput(
             loss=loss,
             reconstruction_loss=reconst_loss,
@@ -685,6 +697,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 MODULE_KEYS.KL_L_KEY: kl_divergence_l,
                 MODULE_KEYS.KL_Z_KEY: kl_divergence_z,
             },
+            extra_metrics=extra_metrics_payload,
         )
 
     @torch.inference_mode()
