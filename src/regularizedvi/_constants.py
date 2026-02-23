@@ -22,7 +22,7 @@ DEFAULT_USE_BATCH_IN_DECODER = False
 # --- Dispersion regularisation (containment prior) ---
 DEFAULT_REGULARISE_DISPERSION = True
 DEFAULT_REGULARISE_DISPERSION_PRIOR = 3.0
-DEFAULT_LIKELIHOOD_DISTRIBUTION = "nb"
+DEFAULT_LIKELIHOOD_DISTRIBUTION = "gamma_poisson"
 
 # --- Network architecture ---
 DEFAULT_USE_BATCH_NORM = "none"
