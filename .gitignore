@@ -4,6 +4,8 @@
 buck-out/
 *.gpu.err
 *.gpu.out
+*.err
+*.out
 
 # Compiled files
 .venv/
@@ -16,9 +18,9 @@ __pycache__/
 
 # Tests and coverage
 /data/
-/results/
-docs/notebooks/data/
-docs/notebooks/results/
+**/results/
+**/data/
+*.h5ad
 /node_modules/
 /.coverage*
 

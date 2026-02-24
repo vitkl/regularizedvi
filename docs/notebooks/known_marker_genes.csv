@@ -1,0 +1,193 @@
+gene,cell_type,lineage,category
+CD34,HSC,Progenitor,HSC / Progenitor
+AVP,HSC,Progenitor,HSC / Progenitor
+HLF,HSC,Progenitor,HSC / Progenitor
+MLLT3,HSC,Progenitor,HSC / Progenitor
+CRHBP,HSC,Progenitor,HSC / Progenitor
+HOPX,HSC,Progenitor,HSC / Progenitor
+MECOM,HSC,Progenitor,HSC / Progenitor
+THY1,HSC,Progenitor,HSC / Progenitor
+SMIM24,HSC,Progenitor,HSC / Progenitor
+SPINK2,HSC,Progenitor,HSC / Progenitor
+CXCR4,HSC,Progenitor,HSC / Progenitor
+KIT,Early Lymphoid / MPP,Progenitor,HSC / Progenitor
+FLT3,Early Lymphoid / MPP,Progenitor,HSC / Progenitor
+CD164,Early Lymphoid / MPP,Progenitor,HSC / Progenitor
+IL7R,Early Lymphoid / CLP,Progenitor,HSC / Progenitor
+DNTT,Early Lymphoid / CLP,Progenitor,HSC / Progenitor
+MME,Early Lymphoid / CLP,Progenitor,HSC / Progenitor
+CEBPA,G/M prog,Progenitor,HSC / Progenitor
+CSF3R,G/M prog,Progenitor,HSC / Progenitor
+MPO,G/M prog,Progenitor,HSC / Progenitor
+ELANE,G/M prog,Progenitor,HSC / Progenitor
+AZU1,G/M prog,Progenitor,HSC / Progenitor
+ITGA2B,MK/E prog,Progenitor,HSC / Progenitor
+GP1BA,MK/E prog,Progenitor,HSC / Progenitor
+PF4,MK/E prog,Progenitor,HSC / Progenitor
+PPBP,MK/E prog,Progenitor,HSC / Progenitor
+GP9,MK/E prog,Progenitor,HSC / Progenitor
+GATA1,Erythroid (broad),Erythroid,Erythroid
+KLF1,Erythroid (broad),Erythroid,Erythroid
+TAL1,Erythroid (broad),Erythroid,Erythroid
+GATA2,Proerythroblast,Erythroid,Erythroid
+EPOR,Proerythroblast,Erythroid,Erythroid
+TFRC,Erythroblast,Erythroid,Erythroid
+HBZ,Erythroblast,Erythroid,Erythroid
+HBA1,Erythroblast,Erythroid,Erythroid
+HBA2,Erythroblast,Erythroid,Erythroid
+HBB,Normoblast,Erythroid,Erythroid
+HBD,Normoblast,Erythroid,Erythroid
+GYPA,Normoblast,Erythroid,Erythroid
+SLC4A1,Normoblast,Erythroid,Erythroid
+ALAS2,Erythroid (broad),Erythroid,Erythroid
+ANK1,Erythroid (broad),Erythroid,Erythroid
+CD3D,T cell (pan),Lymphoid,T cell
+CD3E,T cell (pan),Lymphoid,T cell
+CD3G,T cell (pan),Lymphoid,T cell
+CD4,CD4+ T (pan),Lymphoid,T cell
+CD8A,CD8+ T (pan),Lymphoid,T cell
+CD8B,CD8+ T (pan),Lymphoid,T cell
+CCR7,T naive / Tcm,Lymphoid,T cell
+SELL,T naive / Tcm,Lymphoid,T cell
+LEF1,T naive,Lymphoid,T cell
+TCF7,T naive,Lymphoid,T cell
+IL7R,T naive / memory,Lymphoid,T cell
+CD27,T activated / memory,Lymphoid,T cell
+CD28,T naive / Tcm,Lymphoid,T cell
+IL2RA,Treg / T activated,Lymphoid,T cell
+FOXP3,Treg,Lymphoid,T cell
+CTLA4,Treg / T exhausted,Lymphoid,T cell
+IKZF2,Treg,Lymphoid,T cell
+TNFRSF4,Treg,Lymphoid,T cell
+TNFRSF18,Treg,Lymphoid,T cell
+TIGIT,Treg / T exhausted,Lymphoid,T cell
+TBX21,Th1,Lymphoid,T cell
+IFNG,Th1,Lymphoid,T cell
+CXCR3,Th1,Lymphoid,T cell
+IL12RB2,Th1,Lymphoid,T cell
+STAT4,Th1,Lymphoid,T cell
+GATA3,Th2,Lymphoid,T cell
+IL4,Th2,Lymphoid,T cell
+IL5,Th2,Lymphoid,T cell
+IL13,Th2,Lymphoid,T cell
+CCR4,Th2 / Th17,Lymphoid,T cell
+RORC,Th17,Lymphoid,T cell
+IL17A,Th17,Lymphoid,T cell
+IL23R,Th17,Lymphoid,T cell
+CCR6,Th17,Lymphoid,T cell
+IL22,Th17 / ILC3,Lymphoid,T cell
+CXCR5,Tfh,Lymphoid,T cell
+BCL6,Tfh / GC B,Lymphoid,T cell
+ICOS,Tfh,Lymphoid,T cell
+PDCD1,Tfh / T exhausted,Lymphoid,T cell
+IL21,Tfh,Lymphoid,T cell
+TOX,T exhausted,Lymphoid,T cell
+LAG3,T exhausted,Lymphoid,T cell
+HAVCR2,T exhausted,Lymphoid,T cell
+ENTPD1,T exhausted / Treg,Lymphoid,T cell
+PRF1,CD8+ T cytotoxic / NK,Lymphoid,T cell
+GZMB,CD8+ T cytotoxic / NK,Lymphoid,T cell
+GZMA,CD8+ T cytotoxic / NK,Lymphoid,T cell
+GZMK,CD8+ T effector memory,Lymphoid,T cell
+GZMH,CD8+ T cytotoxic,Lymphoid,T cell
+GNLY,CD8+ T cytotoxic / NK,Lymphoid,T cell
+NKG7,CD8+ T cytotoxic / NK,Lymphoid,T cell
+EOMES,CD8+ T effector / NK,Lymphoid,T cell
+KLRG1,CD8+ T effector,Lymphoid,T cell
+CX3CR1,CD8+ T effector / Temra,Lymphoid,T cell
+TRDC,Gamma-delta T,Lymphoid,T cell
+TRGC1,Gamma-delta T,Lymphoid,T cell
+TRGC2,Gamma-delta T,Lymphoid,T cell
+KLRB1,NKT / gamma-delta T,Lymphoid,T cell
+ZBTB16,NKT / MAIT,Lymphoid,T cell
+SLC4A10,MAIT,Lymphoid,T cell
+MKI67,Proliferating T / B,Lymphoid,T cell
+STMN1,Proliferating T / B,Lymphoid,T cell
+TOP2A,Proliferating T / B,Lymphoid,T cell
+CD19,B cell (pan),Lymphoid,B cell
+MS4A1,B cell (pan - CD20),Lymphoid,B cell
+CD79A,B cell (pan),Lymphoid,B cell
+CD79B,B cell (pan),Lymphoid,B cell
+PAX5,B cell (pan - commitment),Lymphoid,B cell
+EBF1,B cell (specification),Lymphoid,B cell
+VPREB1,Pro-B / Pre-B,Lymphoid,B cell
+IGLL1,Pro-B / Pre-B,Lymphoid,B cell
+RAG1,Pro-B / Pre-B,Lymphoid,B cell
+RAG2,Pro-B / Pre-B,Lymphoid,B cell
+DNTT,Pro-B / Pre-B,Lymphoid,B cell
+CD24,Transitional B / Pre-B,Lymphoid,B cell
+CD38,Transitional B / Plasma,Lymphoid,B cell
+IGHM,Naive B / Transitional B,Lymphoid,B cell
+IGHD,Naive CD20+ B,Lymphoid,B cell
+FCER2,Naive CD20+ B (CD23),Lymphoid,B cell
+TCL1A,Naive CD20+ B / Transitional B,Lymphoid,B cell
+YBX3,Naive CD20+ B,Lymphoid,B cell
+BACH2,Naive B / memory B,Lymphoid,B cell
+CD5,B1 B,Lymphoid,B cell
+CD43,B1 B,Lymphoid,B cell
+CD27,Memory B,Lymphoid,B cell
+GPR183,Memory B,Lymphoid,B cell
+TXNIP,Memory B,Lymphoid,B cell
+IGHG1,Memory B / Plasma (IgG),Lymphoid,B cell
+IGHG2,Memory B (IgG),Lymphoid,B cell
+IGHA1,Memory B / Plasma (IgA),Lymphoid,B cell
+AICDA,Germinal center B,Lymphoid,B cell
+RGS13,Germinal center B,Lymphoid,B cell
+POU2AF1,Germinal center B,Lymphoid,B cell
+SUGCT,Germinal center B,Lymphoid,B cell
+CD40,Germinal center B,Lymphoid,B cell
+SDC1,Plasma (CD138),Lymphoid,B cell
+XBP1,Plasma,Lymphoid,B cell
+IRF4,Plasma,Lymphoid,B cell
+PRDM1,Plasma (BLIMP1),Lymphoid,B cell
+MZB1,Plasma,Lymphoid,B cell
+JCHAIN,Plasma,Lymphoid,B cell
+IGLC2,Plasma,Lymphoid,B cell
+NCAM1,NK (CD56),Lymphoid,NK / ILC
+KLRD1,NK (CD94),Lymphoid,NK / ILC
+KLRF1,NK,Lymphoid,NK / ILC
+FCGR3A,NK CD16+ / CD16+ Mono,Lymphoid,NK / ILC
+NCAM1,NK CD56bright,Lymphoid,NK / ILC
+NKG7,NK,Lymphoid,NK / ILC
+GNLY,NK,Lymphoid,NK / ILC
+PRF1,NK,Lymphoid,NK / ILC
+GZMB,NK cytotoxic,Lymphoid,NK / ILC
+KLRC1,NK,Lymphoid,NK / ILC
+KLRC2,NK adaptive,Lymphoid,NK / ILC
+CD160,NK / ILC1,Lymphoid,NK / ILC
+ZNF683,ILC1 (Hobit),Lymphoid,NK / ILC
+TBX21,ILC1 / NK,Lymphoid,NK / ILC
+GATA3,ILC2,Lymphoid,NK / ILC
+IL1RL1,ILC2,Lymphoid,NK / ILC
+PTGDR2,ILC2 (CRTH2),Lymphoid,NK / ILC
+RORC,ILC3,Lymphoid,NK / ILC
+IL23R,ILC3,Lymphoid,NK / ILC
+NCR2,ILC3 (NKp44),Lymphoid,NK / ILC
+CD14,CD14+ Mono,Myeloid,Myeloid / DC
+LYZ,CD14+ Mono,Myeloid,Myeloid / DC
+S100A8,CD14+ Mono,Myeloid,Myeloid / DC
+S100A9,CD14+ Mono,Myeloid,Myeloid / DC
+VCAN,CD14+ Mono,Myeloid,Myeloid / DC
+FCN1,CD14+ Mono,Myeloid,Myeloid / DC
+CSF1R,Monocyte (pan),Myeloid,Myeloid / DC
+CD68,Monocyte / Macrophage,Myeloid,Myeloid / DC
+FCGR3A,CD16+ Mono,Myeloid,Myeloid / DC
+MS4A7,CD16+ Mono,Myeloid,Myeloid / DC
+CDKN1C,CD16+ Mono,Myeloid,Myeloid / DC
+LILRB2,CD16+ Mono,Myeloid,Myeloid / DC
+CSF1,Monocyte (pan),Myeloid,Myeloid / DC
+SPI1,Myeloid (PU.1 - master TF),Myeloid,Myeloid / DC
+CEBPA,Myeloid (C/EBPa - master TF),Myeloid,Myeloid / DC
+CD1C,cDC2,Myeloid,Myeloid / DC
+FCER1A,cDC2,Myeloid,Myeloid / DC
+CLEC10A,cDC2,Myeloid,Myeloid / DC
+IRF4,cDC2,Myeloid,Myeloid / DC
+CLEC9A,cDC1,Myeloid,Myeloid / DC
+XCR1,cDC1,Myeloid,Myeloid / DC
+BATF3,cDC1,Myeloid,Myeloid / DC
+IRF8,cDC1 / pDC,Myeloid,Myeloid / DC
+LILRA4,pDC,Myeloid,Myeloid / DC
+IL3RA,pDC,Myeloid,Myeloid / DC
+TCF4,pDC (E2-2),Myeloid,Myeloid / DC
+JCHAIN,pDC,Myeloid,Myeloid / DC
+PTPRC,Pan-immune (CD45),Pan-immune,Pan-immune

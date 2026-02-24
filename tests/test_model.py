@@ -298,8 +298,8 @@ class TestGammaPoissonMode:
         latent = model.get_latent_representation()
         assert latent.shape == (adata.n_obs, 4)
 
-    def test_default_is_nb(self, adata):
-        """Test that the default likelihood_distribution is 'nb'."""
+    def test_default_is_gamma_poisson(self, adata):
+        """Test that the default likelihood_distribution is 'gamma_poisson'."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(
             adata,
             layer="counts",
@@ -310,4 +310,4 @@ class TestGammaPoissonMode:
             n_hidden=16,
             n_latent=4,
         )
-        assert model.module.likelihood_distribution == "nb"
+        assert model.module.likelihood_distribution == "gamma_poisson"
