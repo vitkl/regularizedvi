@@ -43,6 +43,8 @@ from scvi.utils import setup_anndata_dsp
 
 from regularizedvi._constants import (
     DEFAULT_DISPERSION,
+    DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
+    DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
     DEFAULT_GENE_LIKELIHOOD,
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
     DEFAULT_LIBRARY_N_HIDDEN,
@@ -189,6 +191,8 @@ class AmbientRegularizedSCVI(
         regularise_dispersion: bool = DEFAULT_REGULARISE_DISPERSION,
         regularise_dispersion_prior: float = DEFAULT_REGULARISE_DISPERSION_PRIOR,
         likelihood_distribution: Literal["nb", "gamma_poisson"] = DEFAULT_LIKELIHOOD_DISTRIBUTION,
+        dispersion_hyper_prior_alpha: float = DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
+        dispersion_hyper_prior_beta: float = DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_BATCH_NORM,
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
         **kwargs,
@@ -213,6 +217,8 @@ class AmbientRegularizedSCVI(
             "regularise_dispersion": regularise_dispersion,
             "regularise_dispersion_prior": regularise_dispersion_prior,
             "likelihood_distribution": likelihood_distribution,
+            "dispersion_hyper_prior_alpha": dispersion_hyper_prior_alpha,
+            "dispersion_hyper_prior_beta": dispersion_hyper_prior_beta,
             **kwargs,
         }
         self._model_summary_string = (
@@ -276,6 +282,8 @@ class AmbientRegularizedSCVI(
                 regularise_dispersion=regularise_dispersion,
                 regularise_dispersion_prior=regularise_dispersion_prior,
                 likelihood_distribution=likelihood_distribution,
+                dispersion_hyper_prior_alpha=dispersion_hyper_prior_alpha,
+                dispersion_hyper_prior_beta=dispersion_hyper_prior_beta,
                 **kwargs,
             )
             self.module.minified_data_type = self.minified_data_type

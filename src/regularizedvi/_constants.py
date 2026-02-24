@@ -24,6 +24,12 @@ DEFAULT_REGULARISE_DISPERSION = True
 DEFAULT_REGULARISE_DISPERSION_PRIOR = 3.0
 DEFAULT_LIKELIHOOD_DISTRIBUTION = "gamma_poisson"
 
+# --- Hierarchical dispersion hyper-prior (cell2location-style) ---
+# Gamma(alpha, beta) hyper-prior on the Exponential rate parameter.
+# Mean = alpha/beta = 9/3 = 3.0, concentrated around the default rate.
+DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA = 9.0
+DEFAULT_DISPERSION_HYPER_PRIOR_BETA = 3.0
+
 # --- Network architecture ---
 DEFAULT_USE_BATCH_NORM = "none"
 DEFAULT_USE_LAYER_NORM = "both"

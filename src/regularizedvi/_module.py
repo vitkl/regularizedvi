@@ -176,6 +176,13 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         with Exp prior on ``1/sqrt(theta)`` (pushes theta large, cell2location direction).
         Both are mathematically equivalent NB distributions; the difference is only
         in the prior direction on the dispersion parameter.
+    dispersion_hyper_prior_alpha
+        Alpha parameter for the Gamma hyper-prior on the learned dispersion
+        rate parameter. Default ``9.0`` (from cell2location).
+    dispersion_hyper_prior_beta
+        Beta parameter for the Gamma hyper-prior on the learned dispersion
+        rate parameter. Default ``3.0`` (from cell2location).
+        Together with alpha, gives Gamma(9, 3) with mean=3.0.
     """
 
     def __init__(
@@ -216,6 +223,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         regularise_dispersion: bool = False,
         regularise_dispersion_prior: float = 3.0,
         likelihood_distribution: Literal["nb", "gamma_poisson"] = "gamma_poisson",
+        dispersion_hyper_prior_alpha: float = 9.0,
+        dispersion_hyper_prior_beta: float = 3.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -237,6 +246,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.regularise_dispersion = regularise_dispersion
         self.regularise_dispersion_prior = regularise_dispersion_prior
         self.likelihood_distribution = likelihood_distribution
+        self.dispersion_hyper_prior_alpha = dispersion_hyper_prior_alpha
+        self.dispersion_hyper_prior_beta = dispersion_hyper_prior_beta
 
         if not self.use_observed_lib_size:
             if library_log_means is None or library_log_vars is None:
@@ -259,6 +270,20 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             pass
         else:
             raise ValueError("`dispersion` must be one of 'gene', 'gene-batch', 'gene-label', 'gene-cell'.")
+
+        # Learnable dispersion prior rate (cell2location-style hierarchical prior)
+        # Initialized at inverse_softplus(regularise_dispersion_prior) so that
+        # softplus(raw) = regularise_dispersion_prior at initialization.
+        # Gamma(alpha, beta) hyper-prior keeps the rate near the default.
+        if self.regularise_dispersion:
+            _init_rate = regularise_dispersion_prior
+            # inverse softplus: log(exp(x) - 1)
+            _raw_init = torch.log(torch.expm1(torch.tensor(_init_rate)))
+            if self.dispersion in ("gene-batch", "gene-label"):
+                n_rate = n_batch if self.dispersion == "gene-batch" else n_labels
+                self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.expand(n_rate).clone())
+            else:
+                self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.unsqueeze(0).clone())
 
         # Additive background: per-gene, per-batch learnable parameter
         if self.use_additive_background:
@@ -656,21 +681,39 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         loss = torch.mean(reconst_loss + weighted_kl_local)
 
-        # Dispersion regularisation via containment prior (Simpson et al. 2017).
-        # Two directions depending on likelihood_distribution:
-        #
-        # "nb" (default): Exp prior on sqrt(theta).
-        #   Pushes theta small (away from Poisson). Counteracts the reconstruction
-        #   loss which tends to push theta large during gradient-based VAE training.
-        #
-        # "gamma_poisson": Exp prior on 1/sqrt(theta) (cell2location direction).
-        #   Pushes theta large (toward Poisson), matching the Bayesian prior used
-        #   in cell2location/cell2fate.
-        #
+        # Hierarchical dispersion regularisation (cell2location-style).
+        # Two-level prior:
+        #   Level 1: alpha_g_phi_hyp ~ Gamma(alpha_prior, beta_prior)  [learned rate]
+        #   Level 2: 1/sqrt(theta) ~ Exponential(alpha_g_phi_hyp)      [per-gene dispersion]
+        # The learned rate adapts regularisation strength during training.
         # Scaled by 1/N (number of observations in mini-batch).
         if self.regularise_dispersion:
+            from torch.distributions import Gamma
+
             n_obs = x.shape[0]
-            rate = torch.ones_like(self.px_r) * self.regularise_dispersion_prior
+
+            # Level 1: learned rate with Gamma hyper-prior
+            learned_rate = torch.nn.functional.softplus(self.dispersion_prior_rate_raw)
+            neg_log_hyper_prior = (
+                -Gamma(
+                    self.dispersion_hyper_prior_alpha,
+                    self.dispersion_hyper_prior_beta,
+                )
+                .log_prob(learned_rate)
+                .sum()
+            )
+
+            # Level 2: Exponential prior on dispersion with learned rate
+            # Broadcast rate to match px_r shape
+            if self.dispersion == "gene-batch":
+                # learned_rate: (n_batch,), px_r: (n_input, n_batch)
+                rate = learned_rate.unsqueeze(0).expand_as(self.px_r)
+            elif self.dispersion == "gene-label":
+                rate = learned_rate.unsqueeze(0).expand_as(self.px_r)
+            else:
+                # learned_rate: (1,), px_r: (n_input,)
+                rate = learned_rate.expand_as(self.px_r)
+
             if self.likelihood_distribution == "gamma_poisson":
                 # Cell2location direction: Exp on 1/sqrt(theta) → pushes theta large
                 px_r_transformed = torch.exp(-self.px_r).pow(0.5)
@@ -678,7 +721,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 # Current direction: Exp on sqrt(theta) → pushes theta small
                 px_r_transformed = torch.exp(self.px_r).pow(0.5)
             neg_log_prior = -Exponential(rate).log_prob(px_r_transformed).sum()
-            loss = loss + neg_log_prior / n_obs
+            loss = loss + (neg_log_prior + neg_log_hyper_prior) / n_obs
 
         # a payload to be used during autotune
         if self.extra_payload_autotune:
