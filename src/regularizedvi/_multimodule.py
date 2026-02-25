@@ -163,7 +163,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         dropout_rate: float = 0.1,
         latent_mode: Literal["concatenation", "single_encoder", "weighted_mean"] = "concatenation",
         modality_weights: Literal["equal", "universal", "cell"] = "equal",
-        dispersion: dict[str, str] | str = "gene",
+        dispersion: dict[str, str] | str = "gene-batch",
         log_variational: bool = True,
         use_size_factor_key: bool = False,
         use_observed_lib_size: bool = True,

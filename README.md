@@ -41,7 +41,9 @@ $$\ell_n \sim \text{LogNormal}(\ell_\mu^\top s_n,\; 0.05 \cdot \ell_{\sigma^2}^\
 $$\rho_{ng} = \text{softplus}\big(f_w(z_n, c_n)\big) \in \mathbb{R}_{\geq 0}^G$$
 $$b_{g,s_n} = \exp(\beta_{g,s_n})$$
 $$\sqrt{\theta_{g,s_n}} \sim \text{Exponential}(\lambda)$$
-$$x_{ng} \sim \text{NB}\Big(\mu = \ell_n \cdot \big(\rho_{ng} + b_{g,s_n}\big),\theta_{g,s_n}\Big)$$
+$$x_{ng} \sim \text{GammaPoisson}\Big(\text{concentration} = \theta_{g,s_n}, \text{rate} = \frac{\theta_{g,s_n}}{\ell_n \cdot \big(\rho_{ng} + b_{g,s_n}\big)}\Big)$$
+
+or equivalently as negative binomial with mean $\mu = \ell_n \cdot \big(\rho_{ng} + b_{g,s_n}\big)$ and dispersion $\theta_{g,s_n}$.
 
 where additionally:
 - $b\_{g,s\_n} = \exp(\beta\_{g,s\_n})$ — per-gene, per-batch additive ambient RNA background (learnable parameter)
@@ -140,6 +142,10 @@ model.train(
 )
 latent = model.get_latent_representation()
 ```
+
+### Default configuration
+
+The model now uses **GammaPoisson likelihood** (cell2location-style) by default, which provides more flexible count modelling than NB and a regularised overdispersion prior to prevent overfitting. The default dispersion is `"gene-batch"`, providing per-gene, per-batch inverse dispersion parameters.
 
 ## Release notes
 

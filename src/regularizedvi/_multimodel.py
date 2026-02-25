@@ -127,7 +127,7 @@ class RegularizedMultimodalVI(
         dropout_rate: float = 0.1,
         latent_mode: Literal["concatenation", "single_encoder", "weighted_mean"] = "concatenation",
         modality_weights: Literal["equal", "universal", "cell"] = "equal",
-        dispersion: dict[str, str] | str = "gene",
+        dispersion: dict[str, str] | str = "gene-batch",
         library_log_vars_weight: float = DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
         library_n_hidden: int = DEFAULT_LIBRARY_N_HIDDEN,
         scale_activation: str = DEFAULT_SCALE_ACTIVATION,

@@ -196,7 +196,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         n_continuous_cov: int = 0,
         n_cats_per_cov: list[int] | None = None,
         dropout_rate: float = 0.1,
-        dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
+        dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene-batch",
         log_variational: bool = True,
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "zinb",
         latent_distribution: Literal["normal", "ln"] = "normal",

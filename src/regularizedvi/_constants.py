@@ -6,7 +6,7 @@ principles adapted to the scVI framework.
 """
 
 # --- Likelihood and dispersion ---
-DEFAULT_GENE_LIKELIHOOD = "nb"
+DEFAULT_GENE_LIKELIHOOD = "gamma_poisson"
 DEFAULT_DISPERSION = "gene-batch"
 
 # --- Library size ---
