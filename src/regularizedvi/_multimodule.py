@@ -1,1019 +1,835 @@
-from collections.abc import Iterable
-from typing import Literal
+"""RegularizedMultimodalVAE module for multi-modal single-cell data.
+
+N-modality extensible VAE with symmetric regularized components.
+Each modality uses the same encoder/decoder architecture (RegularizedEncoder,
+RegularizedDecoderSCVI) with per-modality configuration for:
+- n_hidden, n_latent (architecture sizing)
+- additive_background (ambient correction, default ON for RNA only)
+- region_factors (per-feature bias, default ON for ATAC only)
+- dispersion parameterization (gene/region, gene-batch/region-batch)
+- GammaPoisson likelihood (default for all modalities)
+
+Supports three latent combination strategies:
+- "concatenation" (default): z = [z_mod1; z_mod2; ...], preserves modality-specific signal
+- "single_encoder": one encoder for concatenated input
+- "weighted_mean": MultiVI-style weighted mixing
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from scvi import REGISTRY_KEYS
-from scvi.distributions import (
-    NegativeBinomial,
-    NegativeBinomialMixture,
-    ZeroInflatedNegativeBinomial,
-)
-from scvi.module._peakvae import Decoder as DecoderPeakVI
-from scvi.module.base import BaseMinifiedModeModuleClass, LossOutput, auto_move_data
-from scvi.nn import DecoderSCVI, Encoder, FCLayers
+from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
 from torch import nn
-from torch.distributions import Normal, Poisson
+from torch.distributions import Exponential, Gamma, Normal
 from torch.distributions import kl_divergence as kld
-from torch.nn import functional as F
 
-from ._utils import masked_softmax
+if TYPE_CHECKING:
+    from typing import Literal
 
+    from torch.distributions import Distribution
 
-class LibrarySizeEncoder(torch.nn.Module):
-    """Library size encoder."""
-
-    def __init__(
-        self,
-        n_input: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 2,
-        n_hidden: int = 128,
-        use_batch_norm: bool = False,
-        use_layer_norm: bool = True,
-        deep_inject_covariates: bool = False,
-        **kwargs,
-    ):
-        super().__init__()
-        self.px_decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=0,
-            activation_fn=torch.nn.LeakyReLU,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-            inject_covariates=deep_inject_covariates,
-            **kwargs,
-        )
-        self.output = torch.nn.Sequential(torch.nn.Linear(n_hidden, 1), torch.nn.LeakyReLU())
-
-    def forward(self, x: torch.Tensor, *cat_list: int):
-        """Forward pass."""
-        return self.output(self.px_decoder(x, *cat_list))
+logger = logging.getLogger(__name__)
 
 
-class DecoderADT(torch.nn.Module):
-    """Decoder for just surface proteins (ADT)."""
-
-    def __init__(
-        self,
-        n_input: int,
-        n_output_proteins: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 2,
-        n_hidden: int = 128,
-        dropout_rate: float = 0.1,
-        use_batch_norm: bool = False,
-        use_layer_norm: bool = True,
-        deep_inject_covariates: bool = False,
-    ):
-        super().__init__()
-        self.n_output_proteins = n_output_proteins
-
-        linear_args = {
-            "n_layers": 1,
-            "use_activation": False,
-            "use_batch_norm": False,
-            "use_layer_norm": False,
-            "dropout_rate": 0,
-        }
-
-        self.py_fore_decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-        )
-        self.py_fore_scale_decoder = FCLayers(
-            n_in=n_hidden + n_input,
-            n_out=n_output_proteins,
-            n_cat_list=n_cat_list,
-            n_layers=1,
-            use_activation=True,
-            use_batch_norm=False,
-            use_layer_norm=False,
-            dropout_rate=0,
-            activation_fn=nn.ReLU,
-        )
-
-        self.py_background_decoder = FCLayers(
-            n_in=n_hidden + n_input,
-            n_out=n_output_proteins,
-            n_cat_list=n_cat_list,
-            **linear_args,
-        )
-
-        # dropout (mixture component for proteins, ZI probability for genes)
-        self.sigmoid_decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-        )
-
-        # background mean parameters second decoder
-        self.py_back_mean_log_alpha = FCLayers(
-            n_in=n_hidden + n_input,
-            n_out=n_output_proteins,
-            n_cat_list=n_cat_list,
-            **linear_args,
-        )
-        self.py_back_mean_log_beta = FCLayers(
-            n_in=n_hidden + n_input,
-            n_out=n_output_proteins,
-            n_cat_list=n_cat_list,
-            **linear_args,
-        )
-
-        # background mean first decoder
-        self.py_back_decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-        )
-
-    def forward(self, z: torch.Tensor, *cat_list: int):
-        """Forward pass."""
-        # z is the latent repr
-        py_ = {}
-
-        py_back = self.py_back_decoder(z, *cat_list)
-        py_back_cat_z = torch.cat([py_back, z], dim=-1)
-
-        py_["back_alpha"] = self.py_back_mean_log_alpha(py_back_cat_z, *cat_list)
-        py_["back_beta"] = torch.exp(self.py_back_mean_log_beta(py_back_cat_z, *cat_list))
-        log_pro_back_mean = Normal(py_["back_alpha"], py_["back_beta"]).rsample()
-        py_["rate_back"] = torch.exp(log_pro_back_mean)
-
-        py_fore = self.py_fore_decoder(z, *cat_list)
-        py_fore_cat_z = torch.cat([py_fore, z], dim=-1)
-        py_["fore_scale"] = self.py_fore_scale_decoder(py_fore_cat_z, *cat_list) + 1 + 1e-8
-        py_["rate_fore"] = py_["rate_back"] * py_["fore_scale"]
-
-        p_mixing = self.sigmoid_decoder(z, *cat_list)
-        p_mixing_cat_z = torch.cat([p_mixing, z], dim=-1)
-        py_["mixing"] = self.py_background_decoder(p_mixing_cat_z, *cat_list)
-
-        protein_mixing = 1 / (1 + torch.exp(-py_["mixing"]))
-        py_["scale"] = torch.nn.functional.normalize((1 - protein_mixing) * py_["rate_fore"], p=1, dim=-1)
-
-        return py_, log_pro_back_mean
-
-
-class MULTIVAE(BaseMinifiedModeModuleClass):
-    """Variational auto-encoder model for joint paired + unpaired RNA-seq and ATAC-seq data.
+def _resolve_per_modality(value, modality_names: list[str]) -> dict[str, any]:
+    """Resolve a scalar or dict into a per-modality dict.
 
     Parameters
     ----------
-    n_input_regions
-        Number of input regions.
-    n_input_genes
-        Number of input genes.
-    n_input_proteins
-        Number of input proteins
-    modality_weights
-        Weighting scheme across modalities. One of the following:
-        * ``"equal"``: Equal weight in each modality
-        * ``"universal"``: Learn weights across modalities w_m.
-        * ``"cell"``: Learn weights across modalities and cells. w_{m,c}
-    modality_penalty
-        Training Penalty across modalities. One of the following:
-        * ``"Jeffreys"``: Jeffreys penalty to align modalities
-        * ``"MMD"``: MMD penalty to align modalities
-        * ``"None"``: No penalty
+    value
+        Either a scalar (applied to all modalities) or a dict keyed by modality name.
+    modality_names
+        List of modality names.
+
+    Returns
+    -------
+    Dict mapping each modality name to its value.
+    """
+    if isinstance(value, dict):
+        missing = set(modality_names) - set(value.keys())
+        if missing:
+            raise ValueError(f"Missing modality keys in config: {missing}")
+        return {name: value[name] for name in modality_names}
+    return dict.fromkeys(modality_names, value)
+
+
+def masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """Softmax with masking for missing modalities."""
+    logits = logits.masked_fill(~mask, float("-inf"))
+    return torch.softmax(logits, dim=dim)
+
+
+class RegularizedMultimodalVAE(BaseModuleClass):
+    """N-modality extensible VAE with symmetric regularized components.
+
+    All modalities share the same encoder/decoder class (RegularizedEncoder,
+    RegularizedDecoderSCVI) but can differ in architecture size, normalization,
+    and per-modality flags (additive_background, region_factors).
+
+    Parameters
+    ----------
+    modality_names
+        Ordered list of modality names (e.g., ``["rna", "atac"]``).
+    n_input_per_modality
+        Dict mapping modality name to number of input features.
     n_batch
-        Number of batches, if 0, no batch correction is performed.
-    gene_likelihood
-        The distribution to use for gene expression data. One of the following
-        * ``'zinb'`` - Zero-Inflated Negative Binomial
-        * ``'nb'`` - Negative Binomial
-        * ``'poisson'`` - Poisson
-    gene_dispersion
-        One of the following:
-        * ``'gene'`` - dispersion parameter of NB is constant per gene across cells
-        * ``'gene-batch'`` - dispersion can differ between different batches
-        * ``'gene-label'`` - dispersion can differ between different labels
-        * ``'gene-cell'`` - dispersion can differ for every gene in every cell
-    protein_dispersion
-        One of the following:
-
-        * ``'protein'`` - protein_dispersion parameter is constant per protein across cells
-        * ``'protein-batch'`` - protein_dispersion can differ between different batches NOT TESTED
-        * ``'protein-label'`` - protein_dispersion can differ between different labels NOT TESTED
+        Number of batches.
+    n_labels
+        Number of labels.
     n_hidden
-        Number of nodes per hidden layer. If `None`, defaults to square root
-        of number of regions.
+        Number of hidden units per modality. Scalar (shared) or dict per modality.
     n_latent
-        Dimensionality of the latent space. If `None`, defaults to square root
-        of `n_hidden`.
-    n_layers_encoder
-        Number of hidden layers used for encoder NN.
-    n_layers_decoder
-        Number of hidden layers used for decoder NN.
+        Latent dimensionality per modality. Scalar (shared) or dict per modality.
+    n_layers
+        Number of hidden layers. Scalar (shared) or dict per modality.
+    n_continuous_cov
+        Number of continuous covariates.
+    n_cats_per_cov
+        Number of categories per categorical covariate.
     dropout_rate
-        Dropout rate for neural networks
-    region_factors
-        Include region-specific factors in the model
-    use_batch_norm
-        One of the following
-        * ``'encoder'`` - use batch normalization in the encoder only
-        * ``'decoder'`` - use batch normalization in the decoder only
-        * ``'none'`` - do not use batch normalization
-        * ``'both'`` - use batch normalization in both the encoder and decoder
-    use_layer_norm
-        One of the following
-        * ``'encoder'`` - use layer normalization in the encoder only
-        * ``'decoder'`` - use layer normalization in the decoder only
-        * ``'none'`` - do not use layer normalization
-        * ``'both'`` - use layer normalization in both the encoder and decoder
-    latent_distribution
-        which latent distribution to use, options are
-        * ``'normal'`` - Normal distribution
-        * ``'ln'`` - Logistic normal distribution (Normal(0, I) transformed by softmax)
-    deeply_inject_covariates
-        Whether to deeply inject covariates into all layers of the decoder. If False,
-        covariates will only be included in the input layer.
-    encode_covariates
-        If True, include covariates in the input to the encoder.
+        Dropout rate for encoders.
+    latent_mode
+        How to combine per-modality encoder outputs:
+        ``"concatenation"`` (default): z = [z_mod1; z_mod2; ...].
+        ``"single_encoder"``: one encoder for all concatenated inputs.
+        ``"weighted_mean"``: weighted average of per-modality z.
+    modality_weights
+        For weighted_mean mode: ``"equal"``, ``"universal"``, or ``"cell"``.
+    dispersion
+        Dispersion parameterization per modality. Scalar or dict.
+        Options: ``"gene"``, ``"gene-batch"`` (or ``"region"``, ``"region-batch"``).
+    log_variational
+        If True, use log1p on input before encoding.
     use_size_factor_key
-        Use size_factor AnnDataField defined by the user as scaling factor in mean of conditional
-        RNA distribution.
-    protein_background_prior_mean
-        Array of proteins by batches, the prior initialization for the protein background mean
-        (log scale)
-    protein_background_prior_scale
-        Array of proteins by batches, the prior initialization for the protein background scale
-        (log scale)
-    protein_dispersion
-        One of the following
-
-        * ``'protein'`` - protein_dispersion parameter is constant per protein across cells
-        * ``'protein-batch'`` - protein_dispersion can differ between different batches NOT TESTED
-        * ``'protein-label'`` - protein_dispersion can differ between different labels NOT TESTED
-    extra_payload_autotune
-        If ``True``, will return extra matrices in the loss output to be used during autotune
+        If True, use size_factor from anndata.
+    use_observed_lib_size
+        If True, use observed library size (sum of counts).
+    library_log_means
+        Prior means for log library sizes, dict per modality.
+    library_log_vars
+        Prior variances for log library sizes, dict per modality.
+    library_log_vars_weight
+        Scale factor for library prior variance.
+    library_n_hidden
+        Hidden units for library encoder.
+    scale_activation
+        Decoder scale activation.
+    use_batch_in_decoder
+        If False, batch-free decoder.
+    additive_background_modalities
+        List of modality names that get additive ambient background.
+    region_factors_modalities
+        List of modality names that get per-feature region factors.
+    regularise_dispersion
+        Enable dispersion regularization.
+    regularise_dispersion_prior
+        Initialization for the Exponential rate parameter.
+    likelihood_distribution
+        ``"gamma_poisson"`` (default) or ``"nb"``.
+    dispersion_hyper_prior_alpha
+        Alpha for Gamma hyper-prior on learned rate.
+    dispersion_hyper_prior_beta
+        Beta for Gamma hyper-prior on learned rate.
+    use_batch_norm
+        Where to use BatchNorm.
+    use_layer_norm
+        Where to use LayerNorm.
+    encode_covariates
+        If True, include covariates in encoder input.
+    deeply_inject_covariates
+        If True, inject covariates into all decoder layers.
+    extra_encoder_kwargs
+        Additional kwargs for RegularizedEncoder.
+    extra_decoder_kwargs
+        Additional kwargs for RegularizedDecoderSCVI.
     """
 
     def __init__(
         self,
-        n_input_regions: int = 0,
-        n_input_genes: int = 0,
-        n_input_proteins: int = 0,
-        modality_weights: Literal["equal", "cell", "universal"] = "equal",
-        modality_penalty: Literal["Jeffreys", "MMD", "None"] = "Jeffreys",
+        modality_names: list[str],
+        n_input_per_modality: dict[str, int],
         n_batch: int = 0,
-        n_obs: int = 0,
         n_labels: int = 0,
-        gene_likelihood: Literal["zinb", "nb", "poisson"] = "zinb",
-        gene_dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
-        n_hidden: int = None,
-        n_latent: int = None,
-        n_layers_encoder: int = 2,
-        n_layers_decoder: int = 2,
+        n_hidden: dict[str, int] | int = 128,
+        n_latent: dict[str, int] | int = 10,
+        n_layers: dict[str, int] | int = 1,
         n_continuous_cov: int = 0,
-        n_cats_per_cov: Iterable[int] | None = None,
+        n_cats_per_cov: list[int] | None = None,
         dropout_rate: float = 0.1,
-        region_factors: bool = True,
+        latent_mode: Literal["concatenation", "single_encoder", "weighted_mean"] = "concatenation",
+        modality_weights: Literal["equal", "universal", "cell"] = "equal",
+        dispersion: dict[str, str] | str = "gene",
+        log_variational: bool = True,
+        use_size_factor_key: bool = False,
+        use_observed_lib_size: bool = True,
+        library_log_means: dict[str, np.ndarray] | None = None,
+        library_log_vars: dict[str, np.ndarray] | None = None,
+        library_log_vars_weight: float | None = None,
+        library_n_hidden: int = 16,
+        scale_activation: str = "softplus",
+        use_batch_in_decoder: bool = False,
+        additive_background_modalities: list[str] | None = None,
+        region_factors_modalities: list[str] | None = None,
+        regularise_dispersion: bool = True,
+        regularise_dispersion_prior: float = 3.0,
+        likelihood_distribution: Literal["nb", "gamma_poisson"] = "gamma_poisson",
+        dispersion_hyper_prior_alpha: float = 9.0,
+        dispersion_hyper_prior_beta: float = 3.0,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "none",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "both",
-        latent_distribution: Literal["normal", "ln"] = "normal",
-        deeply_inject_covariates: bool = False,
         encode_covariates: bool = False,
-        use_size_factor_key: bool = False,
-        protein_background_prior_mean: np.ndarray | None = None,
-        protein_background_prior_scale: np.ndarray | None = None,
-        protein_dispersion: str = "protein",
-        extra_payload_autotune: bool = False,
+        deeply_inject_covariates: bool = True,
+        extra_encoder_kwargs: dict | None = None,
+        extra_decoder_kwargs: dict | None = None,
     ):
+        from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
+
         super().__init__()
 
-        # INIT PARAMS
-        self.n_input_regions = n_input_regions
-        self.n_input_genes = n_input_genes
-        self.n_input_proteins = n_input_proteins
-        if n_hidden is None:
-            if n_input_regions == 0:
-                self.n_hidden = np.min([128, int(np.sqrt(self.n_input_genes))])
-            else:
-                self.n_hidden = np.min([128, int(np.sqrt(self.n_input_regions))])
-        else:
-            self.n_hidden = n_hidden
+        self.modality_names = list(modality_names)
+        self.n_modalities = len(self.modality_names)
+        self.n_input_per_modality = n_input_per_modality
         self.n_batch = n_batch
-
-        self.gene_likelihood = gene_likelihood
-        self.latent_distribution = latent_distribution
-
-        self.n_latent = int(np.sqrt(self.n_hidden)) if n_latent is None else n_latent
-        self.n_layers_encoder = n_layers_encoder
-        self.n_layers_decoder = n_layers_decoder
-        self.n_cats_per_cov = n_cats_per_cov
-        self.n_continuous_cov = n_continuous_cov
-        self.dropout_rate = dropout_rate
-        self.extra_payload_autotune = extra_payload_autotune
-
-        self.use_batch_norm_encoder = use_batch_norm in ("encoder", "both")
-        self.use_batch_norm_decoder = use_batch_norm in ("decoder", "both")
-        self.use_layer_norm_encoder = use_layer_norm in ("encoder", "both")
-        self.use_layer_norm_decoder = use_layer_norm in ("decoder", "both")
-        self.encode_covariates = encode_covariates
-        self.deeply_inject_covariates = deeply_inject_covariates
+        self.n_labels = n_labels
+        self.log_variational = log_variational
+        self.latent_mode = latent_mode
+        self.modality_weights_mode = modality_weights
         self.use_size_factor_key = use_size_factor_key
+        self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
+        self.use_batch_in_decoder = use_batch_in_decoder
+        self.regularise_dispersion = regularise_dispersion
+        self.likelihood_distribution = likelihood_distribution
+        self.dispersion_hyper_prior_alpha = dispersion_hyper_prior_alpha
+        self.dispersion_hyper_prior_beta = dispersion_hyper_prior_beta
+        self.encode_covariates = encode_covariates
 
-        cat_list = [n_batch] + list(n_cats_per_cov) if n_cats_per_cov is not None else []
+        additive_background_modalities = additive_background_modalities or []
+        region_factors_modalities = region_factors_modalities or []
+        self.additive_background_modalities = additive_background_modalities
+        self.region_factors_modalities = region_factors_modalities
+
+        # Resolve per-modality configs
+        n_hidden_dict = _resolve_per_modality(n_hidden, self.modality_names)
+        n_latent_dict = _resolve_per_modality(n_latent, self.modality_names)
+        n_layers_dict = _resolve_per_modality(n_layers, self.modality_names)
+        dispersion_dict = _resolve_per_modality(dispersion, self.modality_names)
+
+        self.n_hidden_dict = n_hidden_dict
+        self.n_latent_dict = n_latent_dict
+        self.dispersion_dict = dispersion_dict
+
+        use_batch_norm_encoder = use_batch_norm in ("encoder", "both")
+        use_batch_norm_decoder = use_batch_norm in ("decoder", "both")
+        use_layer_norm_encoder = use_layer_norm in ("encoder", "both")
+        use_layer_norm_decoder = use_layer_norm in ("decoder", "both")
+
+        # Batch/covariate handling
+        cat_list = [n_batch] + list(n_cats_per_cov or [])
         encoder_cat_list = cat_list if encode_covariates else None
 
-        # expression
-        # expression dispersion parameters
-        self.gene_likelihood = gene_likelihood
-        self.gene_dispersion = gene_dispersion
-        if self.gene_dispersion == "gene":
-            self.px_r = torch.nn.Parameter(torch.randn(n_input_genes))
-        elif self.gene_dispersion == "gene-batch":
-            self.px_r = torch.nn.Parameter(torch.randn(n_input_genes, n_batch))
-        elif self.gene_dispersion == "gene-label":
-            self.px_r = torch.nn.Parameter(torch.randn(n_input_genes, n_labels))
-        elif self.gene_dispersion == "gene-cell":
-            pass
+        if not use_batch_in_decoder:
+            decoder_cat_list = list(n_cats_per_cov or [])
         else:
-            raise ValueError(
-                "dispersion must be one of ['gene', 'gene-batch',"
-                " 'gene-label', 'gene-cell'], but input was "
-                "{}.format(self.dispersion)"
-            )
+            decoder_cat_list = cat_list
 
-        # expression encoder
-        if self.n_input_genes == 0:
-            input_exp = 1
-        else:
-            input_exp = self.n_input_genes
-        n_input_encoder_exp = input_exp + n_continuous_cov * encode_covariates
-        self.z_encoder_expression = Encoder(
-            n_input=n_input_encoder_exp,
-            n_output=self.n_latent,
-            n_cat_list=encoder_cat_list,
-            n_layers=self.n_layers_encoder,
-            n_hidden=self.n_hidden,
-            dropout_rate=self.dropout_rate,
-            distribution=self.latent_distribution,
-            inject_covariates=deeply_inject_covariates,
-            use_batch_norm=self.use_batch_norm_encoder,
-            use_layer_norm=self.use_layer_norm_encoder,
-            activation_fn=torch.nn.LeakyReLU,
-            var_eps=0,
-            return_dist=False,
-        )
+        _extra_encoder_kwargs = extra_encoder_kwargs or {}
+        _extra_decoder_kwargs = extra_decoder_kwargs or {}
 
-        # expression library size encoder
-        self.l_encoder_expression = LibrarySizeEncoder(
-            n_input_encoder_exp,
-            n_cat_list=encoder_cat_list,
-            n_layers=self.n_layers_encoder,
-            n_hidden=self.n_hidden,
-            use_batch_norm=self.use_batch_norm_encoder,
-            use_layer_norm=self.use_layer_norm_encoder,
-            deep_inject_covariates=self.deeply_inject_covariates,
-        )
-
-        # expression decoder
-        n_input_decoder = self.n_latent + self.n_continuous_cov
-        self.z_decoder_expression = DecoderSCVI(
-            n_input_decoder,
-            n_input_genes,
-            n_cat_list=cat_list,
-            n_layers=n_layers_decoder,
-            n_hidden=self.n_hidden,
-            inject_covariates=self.deeply_inject_covariates,
-            use_batch_norm=self.use_batch_norm_decoder,
-            use_layer_norm=self.use_layer_norm_decoder,
-            scale_activation="softplus" if use_size_factor_key else "softmax",
-        )
-
-        # accessibility
-        # accessibility encoder
-        if self.n_input_regions == 0:
-            input_acc = 1
-        else:
-            input_acc = self.n_input_regions
-        n_input_encoder_acc = input_acc + n_continuous_cov * encode_covariates
-        self.z_encoder_accessibility = Encoder(
-            n_input=n_input_encoder_acc,
-            n_layers=self.n_layers_encoder,
-            n_output=self.n_latent,
-            n_hidden=self.n_hidden,
-            n_cat_list=encoder_cat_list,
-            dropout_rate=self.dropout_rate,
-            activation_fn=torch.nn.LeakyReLU,
-            distribution=self.latent_distribution,
-            var_eps=0,
-            use_batch_norm=self.use_batch_norm_encoder,
-            use_layer_norm=self.use_layer_norm_encoder,
-            return_dist=False,
-        )
-
-        # accessibility region-specific factors
-        self.region_factors = None
-        if region_factors:
-            self.region_factors = torch.nn.Parameter(torch.zeros(self.n_input_regions))
-
-        # accessibility decoder
-        self.z_decoder_accessibility = DecoderPeakVI(
-            n_input=self.n_latent + self.n_continuous_cov,
-            n_output=n_input_regions,
-            n_hidden=self.n_hidden,
-            n_cat_list=cat_list,
-            n_layers=self.n_layers_decoder,
-            use_batch_norm=self.use_batch_norm_decoder,
-            use_layer_norm=self.use_layer_norm_decoder,
-            deep_inject_covariates=self.deeply_inject_covariates,
-        )
-
-        # accessibility library size encoder
-        self.l_encoder_accessibility = DecoderPeakVI(
-            n_input=n_input_encoder_acc,
-            n_output=1,
-            n_hidden=self.n_hidden,
-            n_cat_list=encoder_cat_list,
-            n_layers=self.n_layers_encoder,
-            use_batch_norm=self.use_batch_norm_encoder,
-            use_layer_norm=self.use_layer_norm_encoder,
-            deep_inject_covariates=self.deeply_inject_covariates,
-        )
-
-        # protein
-        # protein encoder
-        self.protein_dispersion = protein_dispersion
-        if protein_background_prior_mean is None:
-            if n_batch > 0:
-                self.background_pro_alpha = torch.nn.Parameter(torch.randn(n_input_proteins, n_batch))
-                self.background_pro_log_beta = torch.nn.Parameter(
-                    torch.clamp(torch.randn(n_input_proteins, n_batch), -10, 1)
+        # Compute total latent dim for decoder input
+        if latent_mode == "concatenation":
+            self.total_latent_dim = sum(n_latent_dict.values())
+        elif latent_mode == "single_encoder":
+            # Single encoder outputs into a shared latent space
+            # Use sum of per-modality n_latent as total
+            self.total_latent_dim = sum(n_latent_dict.values())
+        elif latent_mode == "weighted_mean":
+            # All modalities must have the same n_latent for weighted mean
+            latent_vals = list(n_latent_dict.values())
+            if len(set(latent_vals)) != 1:
+                raise ValueError(
+                    f"All modalities must have the same n_latent for weighted_mean mode. Got: {n_latent_dict}"
                 )
-            else:
-                self.background_pro_alpha = torch.nn.Parameter(torch.randn(n_input_proteins))
-                self.background_pro_log_beta = torch.nn.Parameter(torch.clamp(torch.randn(n_input_proteins), -10, 1))
-        else:
-            if protein_background_prior_mean.shape[1] == 1 and n_batch != 1:
-                init_mean = protein_background_prior_mean.ravel()
-                init_scale = protein_background_prior_scale.ravel()
-            else:
-                init_mean = protein_background_prior_mean
-                init_scale = protein_background_prior_scale
-            self.background_pro_alpha = torch.nn.Parameter(torch.from_numpy(init_mean.astype(np.float32)))
-            self.background_pro_log_beta = torch.nn.Parameter(
-                torch.log(torch.from_numpy(init_scale.astype(np.float32)))
+            self.total_latent_dim = latent_vals[0]
+
+        n_input_decoder = self.total_latent_dim + n_continuous_cov
+
+        # ---- Per-modality encoders ----
+        self.encoders = nn.ModuleDict()
+        for name in self.modality_names:
+            n_in = n_input_per_modality[name] + n_continuous_cov * encode_covariates
+            self.encoders[name] = RegularizedEncoder(
+                n_input=n_in,
+                n_output=n_latent_dict[name],
+                n_cat_list=encoder_cat_list,
+                n_layers=n_layers_dict[name],
+                n_hidden=n_hidden_dict[name],
+                dropout_rate=dropout_rate,
+                distribution="normal",
+                inject_covariates=deeply_inject_covariates,
+                use_batch_norm=use_batch_norm_encoder,
+                use_layer_norm=use_layer_norm_encoder,
+                return_dist=True,
+                **_extra_encoder_kwargs,
             )
 
-        # protein encoder
-        if self.n_input_proteins == 0:
-            input_pro = 1
-        else:
-            input_pro = self.n_input_proteins
-        n_input_encoder_pro = input_pro + n_continuous_cov * encode_covariates
-        self.z_encoder_protein = Encoder(
-            n_input=n_input_encoder_pro,
-            n_layers=self.n_layers_encoder,
-            n_output=self.n_latent,
-            n_hidden=self.n_hidden,
-            n_cat_list=encoder_cat_list,
-            dropout_rate=self.dropout_rate,
-            activation_fn=torch.nn.LeakyReLU,
-            distribution=self.latent_distribution,
-            var_eps=0,
-            use_batch_norm=self.use_batch_norm_encoder,
-            use_layer_norm=self.use_layer_norm_encoder,
-            return_dist=False,
-        )
+        # ---- Single encoder (for single_encoder mode) ----
+        if latent_mode == "single_encoder":
+            total_input = sum(n_input_per_modality.values()) + n_continuous_cov * encode_covariates
+            # Use max n_hidden across modalities for single encoder
+            max_n_hidden = max(n_hidden_dict.values())
+            max_n_layers = max(n_layers_dict.values())
+            self.joint_encoder = RegularizedEncoder(
+                n_input=total_input,
+                n_output=self.total_latent_dim,
+                n_cat_list=encoder_cat_list,
+                n_layers=max_n_layers,
+                n_hidden=max_n_hidden,
+                dropout_rate=dropout_rate,
+                distribution="normal",
+                inject_covariates=deeply_inject_covariates,
+                use_batch_norm=use_batch_norm_encoder,
+                use_layer_norm=use_layer_norm_encoder,
+                return_dist=True,
+                **_extra_encoder_kwargs,
+            )
 
-        # protein decoder
-        self.z_decoder_pro = DecoderADT(
-            n_input=n_input_decoder,
-            n_output_proteins=n_input_proteins,
-            n_hidden=self.n_hidden,
-            n_cat_list=cat_list,
-            n_layers=self.n_layers_decoder,
-            use_batch_norm=self.use_batch_norm_decoder,
-            use_layer_norm=self.use_layer_norm_decoder,
-            deep_inject_covariates=self.deeply_inject_covariates,
-        )
+        # ---- Modality weights (for weighted_mean mode) ----
+        if latent_mode == "weighted_mean":
+            if modality_weights == "universal":
+                self.modality_weight_params = nn.Parameter(torch.zeros(self.n_modalities))
+            elif modality_weights == "cell":
+                # Small network to predict per-cell weights
+                self.modality_weight_net = nn.Linear(self.total_latent_dim * self.n_modalities, self.n_modalities)
 
-        # protein dispersion parameters
-        if self.protein_dispersion == "protein":
-            self.py_r = torch.nn.Parameter(2 * torch.rand(self.n_input_proteins))
-        elif self.protein_dispersion == "protein-batch":
-            self.py_r = torch.nn.Parameter(2 * torch.rand(self.n_input_proteins, n_batch))
-        elif self.protein_dispersion == "protein-label":
-            self.py_r = torch.nn.Parameter(2 * torch.rand(self.n_input_proteins, n_labels))
-        else:  # protein-cell
-            pass
+        # ---- Per-modality decoders ----
+        self.decoders = nn.ModuleDict()
+        for name in self.modality_names:
+            self.decoders[name] = RegularizedDecoderSCVI(
+                n_input=n_input_decoder,
+                n_output=n_input_per_modality[name],
+                n_cat_list=decoder_cat_list,
+                n_layers=n_layers_dict[name],
+                n_hidden=n_hidden_dict[name],
+                inject_covariates=deeply_inject_covariates,
+                use_batch_norm=use_batch_norm_decoder,
+                use_layer_norm=use_layer_norm_decoder,
+                scale_activation=scale_activation,
+                **_extra_decoder_kwargs,
+            )
 
-        # modality alignment
-        self.n_obs = n_obs
-        self.modality_weights = modality_weights
-        self.modality_penalty = modality_penalty
-        self.n_modalities = int(n_input_genes > 0) + int(n_input_regions > 0)
-        max_n_modalities = 3
-        if modality_weights == "equal":
-            mod_weights = torch.ones(max_n_modalities)
-            self.register_buffer("mod_weights", mod_weights)
-        elif modality_weights == "universal":
-            self.mod_weights = torch.nn.Parameter(torch.ones(max_n_modalities))
-        else:  # cell-specific weights
-            self.mod_weights = torch.nn.Parameter(torch.ones(n_obs, max_n_modalities))
+        # ---- Per-modality library encoders (variational, low-capacity) ----
+        self.l_encoders = nn.ModuleDict()
+        if not self.use_observed_lib_size:
+            for name in self.modality_names:
+                n_in = n_input_per_modality[name] + n_continuous_cov * encode_covariates
+                self.l_encoders[name] = RegularizedEncoder(
+                    n_input=n_in,
+                    n_output=1,
+                    n_layers=1,
+                    n_cat_list=encoder_cat_list,
+                    n_hidden=library_n_hidden,
+                    dropout_rate=dropout_rate,
+                    inject_covariates=deeply_inject_covariates,
+                    use_batch_norm=use_batch_norm_encoder,
+                    use_layer_norm=use_layer_norm_encoder,
+                    return_dist=True,
+                    **_extra_encoder_kwargs,
+                )
 
-    def _get_inference_input(self, tensors):
-        """Get input tensors for the inference model."""
-        x = tensors.get(REGISTRY_KEYS.X_KEY, None)
-        x_atac = tensors.get(REGISTRY_KEYS.ATAC_X_KEY, None)
-        if x is not None and x_atac is not None:
-            x = torch.cat((x, x_atac), dim=-1)
-        elif x is None:
-            x = x_atac
-        if self.n_input_proteins == 0:
-            y = torch.zeros(x.shape[0], 1, device=x.device, requires_grad=False)
-        else:
-            y = tensors[REGISTRY_KEYS.PROTEIN_EXP_KEY]
-        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
-        cell_idx = tensors.get(REGISTRY_KEYS.INDICES_KEY).long().ravel()
-        cont_covs = tensors.get(REGISTRY_KEYS.CONT_COVS_KEY)
-        cat_covs = tensors.get(REGISTRY_KEYS.CAT_COVS_KEY)
-        label = tensors[REGISTRY_KEYS.LABELS_KEY]
-        size_factor = tensors.get(REGISTRY_KEYS.SIZE_FACTOR_KEY, None)
-        input_dict = {
-            "x": x,
-            "y": y,
-            "batch_index": batch_index,
-            "cont_covs": cont_covs,
-            "cat_covs": cat_covs,
-            "label": label,
-            "cell_idx": cell_idx,
-            "size_factor": size_factor,
+        # ---- Per-modality library priors ----
+        if not self.use_observed_lib_size:
+            library_log_means = library_log_means or {}
+            library_log_vars = library_log_vars or {}
+            for name in self.modality_names:
+                if name in library_log_means and name in library_log_vars:
+                    means = torch.from_numpy(library_log_means[name]).float()
+                    vars_ = torch.from_numpy(library_log_vars[name]).float()
+                    if library_log_vars_weight is not None:
+                        vars_ = vars_ * library_log_vars_weight
+                    self.register_buffer(f"library_log_means_{name}", means)
+                    self.register_buffer(f"library_log_vars_{name}", vars_)
+
+        # ---- Per-modality dispersion parameters ----
+        self.px_r = nn.ParameterDict()
+        for name in self.modality_names:
+            n_feat = n_input_per_modality[name]
+            disp = dispersion_dict[name]
+            if disp in ("gene", "region"):
+                self.px_r[name] = nn.Parameter(torch.randn(n_feat))
+            elif disp in ("gene-batch", "region-batch"):
+                self.px_r[name] = nn.Parameter(torch.randn(n_feat, n_batch))
+            elif disp in ("gene-label", "region-label"):
+                self.px_r[name] = nn.Parameter(torch.randn(n_feat, n_labels))
+
+        # ---- Learnable dispersion prior rates (per modality) ----
+        if self.regularise_dispersion:
+            _raw_init = torch.log(torch.expm1(torch.tensor(regularise_dispersion_prior)))
+            self.dispersion_prior_rate_raw = nn.ParameterDict()
+            for name in self.modality_names:
+                disp = dispersion_dict[name]
+                if disp in ("gene-batch", "region-batch"):
+                    self.dispersion_prior_rate_raw[name] = nn.Parameter(_raw_init.expand(n_batch).clone())
+                elif disp in ("gene-label", "region-label"):
+                    self.dispersion_prior_rate_raw[name] = nn.Parameter(_raw_init.expand(n_labels).clone())
+                else:
+                    self.dispersion_prior_rate_raw[name] = nn.Parameter(_raw_init.unsqueeze(0).clone())
+
+        # ---- Additive background (per selected modality) ----
+        self.additive_background = nn.ParameterDict()
+        for name in additive_background_modalities:
+            n_feat = n_input_per_modality[name]
+            self.additive_background[name] = nn.Parameter(torch.randn(n_feat, n_batch))
+
+        # ---- Region factors (per selected modality) ----
+        self.region_factors = nn.ParameterDict()
+        for name in region_factors_modalities:
+            n_feat = n_input_per_modality[name]
+            self.region_factors[name] = nn.Parameter(torch.zeros(n_feat))
+
+    def _get_inference_input(
+        self,
+        tensors: dict[str, torch.Tensor | None],
+    ) -> dict[str, torch.Tensor | None]:
+        """Get input tensors for inference."""
+        result = {
+            "batch_index": tensors[REGISTRY_KEYS.BATCH_KEY],
+            "cont_covs": tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
+            "cat_covs": tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
         }
-        return input_dict
+        for name in self.modality_names:
+            key = f"X_{name}"
+            result[f"x_{name}"] = tensors.get(key, None)
+        return result
+
+    def _get_generative_input(
+        self,
+        tensors: dict[str, torch.Tensor],
+        inference_outputs: dict[str, torch.Tensor | Distribution | None],
+    ) -> dict[str, torch.Tensor | None]:
+        """Get input tensors for the generative process."""
+        return {
+            "z": inference_outputs["z"],
+            "library": inference_outputs["library"],
+            "batch_index": tensors[REGISTRY_KEYS.BATCH_KEY],
+            "cont_covs": tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
+            "cat_covs": tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
+        }
 
     @auto_move_data
     def inference(
         self,
-        x,
-        y,
-        batch_index,
-        cont_covs,
-        cat_covs,
-        label,
-        cell_idx,
-        size_factor,
-        n_samples=1,
-    ) -> dict[str, torch.Tensor]:
-        """Run the inference model."""
-        # Get Data and Additional Covs
-        if self.n_input_genes == 0:
-            x_rna = torch.zeros(x.shape[0], 1, device=x.device, requires_grad=False)
-        else:
-            x_rna = x[:, : self.n_input_genes]
-        if self.n_input_regions == 0:
-            x_atac = torch.zeros(x.shape[0], 1, device=x.device, requires_grad=False)
-        else:
-            x_atac = x[:, self.n_input_genes : (self.n_input_genes + self.n_input_regions)]
+        batch_index: torch.Tensor,
+        cont_covs: torch.Tensor | None = None,
+        cat_covs: torch.Tensor | None = None,
+        n_samples: int = 1,
+        **modality_inputs,
+    ) -> dict[str, torch.Tensor | Distribution | None]:
+        """Per-modality encoding and Z combination.
 
-        mask_expr = x_rna.sum(dim=1) > 0
-        mask_acc = x_atac.sum(dim=1) > 0
-        mask_pro = y.sum(dim=1) > 0
-
-        if cont_covs is not None and self.encode_covariates:
-            encoder_input_expression = torch.cat((x_rna, cont_covs), dim=-1)
-            encoder_input_accessibility = torch.cat((x_atac, cont_covs), dim=-1)
-            encoder_input_protein = torch.cat((y, cont_covs), dim=-1)
-        else:
-            encoder_input_expression = x_rna
-            encoder_input_accessibility = x_atac
-            encoder_input_protein = y
-
+        Parameters
+        ----------
+        batch_index
+            Batch indices.
+        cont_covs
+            Continuous covariates.
+        cat_covs
+            Categorical covariates.
+        n_samples
+            Number of samples from posterior.
+        **modality_inputs
+            Per-modality inputs as x_{modality_name} tensors.
+        """
         if cat_covs is not None and self.encode_covariates:
             categorical_input = torch.split(cat_covs, 1, dim=1)
         else:
             categorical_input = ()
 
-        # Z Encoders
-        qzm_acc, qzv_acc, z_acc = self.z_encoder_accessibility(
-            encoder_input_accessibility, batch_index, *categorical_input
-        )
-        qzm_expr, qzv_expr, z_expr = self.z_encoder_expression(
-            encoder_input_expression, batch_index, *categorical_input
-        )
-        qzm_pro, qzv_pro, z_pro = self.z_encoder_protein(encoder_input_protein, batch_index, *categorical_input)
+        # Detect which modalities are present per cell (for masking)
+        masks = {}
+        for name in self.modality_names:
+            x = modality_inputs.get(f"x_{name}")
+            if x is not None:
+                masks[name] = x.sum(dim=1) > 0  # (n_cells,)
+            else:
+                masks[name] = torch.zeros(batch_index.shape[0], dtype=torch.bool, device=batch_index.device)
 
-        # L encoders
-        if self.use_size_factor_key:
-            libsize_expr = torch.log(size_factor[:, [0]] + 1e-6)
-            libsize_acc = size_factor[:, [1]]
+        # Per-modality encoding
+        qz_per_modality = {}
+        z_per_modality = {}
+
+        if self.latent_mode == "single_encoder":
+            # Concatenate all modality inputs
+            inputs = []
+            for name in self.modality_names:
+                x = modality_inputs.get(f"x_{name}")
+                if x is None:
+                    x = torch.zeros(
+                        batch_index.shape[0],
+                        self.n_input_per_modality[name],
+                        device=batch_index.device,
+                    )
+                if self.log_variational:
+                    x = torch.log1p(x)
+                if cont_covs is not None and self.encode_covariates:
+                    x = torch.cat([x, cont_covs], dim=-1)
+                inputs.append(x)
+            joint_input = torch.cat(inputs, dim=-1)
+            qz, z = self.joint_encoder(joint_input, batch_index, *categorical_input)
+            # Store as single "joint" modality for KL computation
+            qz_per_modality["_joint"] = qz
+            z_per_modality["_joint"] = z
         else:
-            libsize_expr = self.l_encoder_expression(encoder_input_expression, batch_index, *categorical_input)
-            libsize_acc = self.l_encoder_accessibility(encoder_input_accessibility, batch_index, *categorical_input)
+            for name in self.modality_names:
+                x = modality_inputs.get(f"x_{name}")
+                if x is None:
+                    continue
+                x_ = torch.log1p(x) if self.log_variational else x
+                if cont_covs is not None and self.encode_covariates:
+                    x_ = torch.cat([x_, cont_covs], dim=-1)
+                qz, z = self.encoders[name](x_, batch_index, *categorical_input)
+                qz_per_modality[name] = qz
+                z_per_modality[name] = z
 
-        # mix representations
-        if self.modality_weights == "cell":
-            weights = self.mod_weights[cell_idx, :]
-        else:
-            weights = self.mod_weights.unsqueeze(0).expand(len(cell_idx), -1)
+        # Combine Z based on latent_mode
+        if self.latent_mode == "concatenation":
+            z_parts = []
+            for name in self.modality_names:
+                if name in z_per_modality:
+                    z_parts.append(z_per_modality[name])
+                else:
+                    # Missing modality: use zeros
+                    z_parts.append(
+                        torch.zeros(
+                            batch_index.shape[0],
+                            self.n_latent_dict[name],
+                            device=batch_index.device,
+                        )
+                    )
+            z = torch.cat(z_parts, dim=-1)
+        elif self.latent_mode == "single_encoder":
+            z = z_per_modality["_joint"]
+        elif self.latent_mode == "weighted_mean":
+            z = self._mix_modalities(z_per_modality, qz_per_modality, masks, batch_index)
 
-        qz_m = mix_modalities((qzm_expr, qzm_acc, qzm_pro), (mask_expr, mask_acc, mask_pro), weights)
-        qz_v = mix_modalities(
-            (qzv_expr, qzv_acc, qzv_pro),
-            (mask_expr, mask_acc, mask_pro),
-            weights,
-            torch.sqrt,
-        )
+        # Per-modality library encoding
+        library = {}
+        ql_per_modality = {}
+        for name in self.modality_names:
+            x = modality_inputs.get(f"x_{name}")
+            if x is None:
+                continue
+            if self.use_observed_lib_size:
+                library[name] = torch.log(x.sum(1)).unsqueeze(1)
+            else:
+                x_ = torch.log1p(x) if self.log_variational else x
+                if cont_covs is not None and self.encode_covariates:
+                    x_ = torch.cat([x_, cont_covs], dim=-1)
+                ql, lib = self.l_encoders[name](x_, batch_index, *categorical_input)
+                library[name] = lib
+                ql_per_modality[name] = ql
 
-        # sample
-        if n_samples > 1:
-
-            def unsqz(zt, n_s):
-                return zt.unsqueeze(0).expand((n_s, zt.size(0), zt.size(1)))
-
-            untran_za = Normal(qzm_acc, qzv_acc.sqrt()).sample((n_samples,))
-            z_acc = self.z_encoder_accessibility.z_transformation(untran_za)
-            untran_ze = Normal(qzm_expr, qzv_expr.sqrt()).sample((n_samples,))
-            z_expr = self.z_encoder_expression.z_transformation(untran_ze)
-            untran_zp = Normal(qzm_pro, qzv_pro.sqrt()).sample((n_samples,))
-            z_pro = self.z_encoder_protein.z_transformation(untran_zp)
-
-            libsize_expr = unsqz(libsize_expr, n_samples)
-            libsize_acc = unsqz(libsize_acc, n_samples)
-
-        # sample from the mixed representation
-        untran_z = Normal(qz_m, qz_v.sqrt()).rsample()
-        z = self.z_encoder_accessibility.z_transformation(untran_z)
-
-        outputs = {
-            "x": x,
+        return {
             "z": z,
-            "qz_m": qz_m,
-            "qz_v": qz_v,
-            "z_expr": z_expr,
-            "qzm_expr": qzm_expr,
-            "qzv_expr": qzv_expr,
-            "z_acc": z_acc,
-            "qzm_acc": qzm_acc,
-            "qzv_acc": qzv_acc,
-            "z_pro": z_pro,
-            "qzm_pro": qzm_pro,
-            "qzv_pro": qzv_pro,
-            "libsize_expr": libsize_expr,
-            "libsize_acc": libsize_acc,
+            "qz_per_modality": qz_per_modality,
+            "z_per_modality": z_per_modality,
+            "library": library,
+            "ql_per_modality": ql_per_modality,
+            "masks": masks,
         }
-        return outputs
 
-    def _get_generative_input(self, tensors, inference_outputs, transform_batch=None):
-        """Get the input for the generative model."""
-        z = inference_outputs["z"]
-        qz_m = inference_outputs["qz_m"]
-        libsize_expr = inference_outputs["libsize_expr"]
+    def _mix_modalities(
+        self,
+        z_per_modality: dict[str, torch.Tensor],
+        qz_per_modality: dict[str, Normal],
+        masks: dict[str, torch.Tensor],
+        batch_index: torch.Tensor,
+    ) -> torch.Tensor:
+        """Weighted mean mixing of per-modality latent representations."""
+        n_cells = batch_index.shape[0]
+        device = batch_index.device
+        n_latent = self.total_latent_dim
 
-        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
-        cont_key = REGISTRY_KEYS.CONT_COVS_KEY
-        cont_covs = tensors[cont_key] if cont_key in tensors.keys() else None
+        # Stack z values: (n_cells, n_modalities, n_latent)
+        z_stack = torch.zeros(n_cells, self.n_modalities, n_latent, device=device)
+        mask_stack = torch.zeros(n_cells, self.n_modalities, dtype=torch.bool, device=device)
 
-        cat_key = REGISTRY_KEYS.CAT_COVS_KEY
-        cat_covs = tensors[cat_key] if cat_key in tensors.keys() else None
+        for i, name in enumerate(self.modality_names):
+            if name in z_per_modality:
+                z_stack[:, i, :] = z_per_modality[name]
+                mask_stack[:, i] = masks.get(name, torch.ones(n_cells, dtype=torch.bool, device=device))
 
-        if transform_batch is not None:
-            batch_index = torch.ones_like(batch_index) * transform_batch
+        if self.modality_weights_mode == "equal":
+            # Equal weights, masked for missing modalities
+            weights = mask_stack.float()
+            weights = weights / weights.sum(dim=1, keepdim=True).clamp(min=1)
+        elif self.modality_weights_mode == "universal":
+            logits = self.modality_weight_params.unsqueeze(0).expand(n_cells, -1)
+            weights = masked_softmax(logits, mask_stack, dim=-1)
+        elif self.modality_weights_mode == "cell":
+            # Concatenate all z for weight prediction
+            z_cat = z_stack.view(n_cells, -1)
+            logits = self.modality_weight_net(z_cat)
+            weights = masked_softmax(logits, mask_stack, dim=-1)
 
-        label = tensors[REGISTRY_KEYS.LABELS_KEY]
-
-        input_dict = {
-            "z": z,
-            "qz_m": qz_m,
-            "batch_index": batch_index,
-            "cont_covs": cont_covs,
-            "cat_covs": cat_covs,
-            "libsize_expr": libsize_expr,
-            "label": label,
-        }
-        return input_dict
+        # Weighted mean: (n_cells, n_latent)
+        z = (z_stack * weights.unsqueeze(-1)).sum(dim=1)
+        return z
 
     @auto_move_data
     def generative(
         self,
-        z,
-        qz_m,
-        batch_index,
-        cont_covs=None,
-        cat_covs=None,
-        libsize_expr=None,
-        use_z_mean=False,
-        label: torch.Tensor = None,
-        transform_batch: int | None = None,
-    ):
-        """Runs the generative model."""
+        z: torch.Tensor,
+        library: dict[str, torch.Tensor],
+        batch_index: torch.Tensor,
+        cont_covs: torch.Tensor | None = None,
+        cat_covs: torch.Tensor | None = None,
+    ) -> dict[str, dict]:
+        """Per-modality decoding from shared Z.
+
+        Returns dict with keys per modality, each containing the distribution.
+        """
+        from scvi.distributions import NegativeBinomial
+        from torch.nn.functional import one_hot
+
+        from regularizedvi._module import GammaPoissonWithScale
+
+        if cont_covs is None:
+            decoder_input = z
+        elif z.dim() != cont_covs.dim():
+            decoder_input = torch.cat([z, cont_covs.unsqueeze(0).expand(z.size(0), -1, -1)], dim=-1)
+        else:
+            decoder_input = torch.cat([z, cont_covs], dim=-1)
+
         if cat_covs is not None:
             categorical_input = torch.split(cat_covs, 1, dim=1)
         else:
             categorical_input = ()
 
-        if transform_batch is not None:
-            batch_index = torch.ones_like(batch_index) * transform_batch
+        px_dict = {}
+        for name in self.modality_names:
+            if name not in library:
+                continue
 
-        latent = z if not use_z_mean else qz_m
-        if cont_covs is None:
-            decoder_input = latent
-        elif latent.dim() != cont_covs.dim():
-            decoder_input = torch.cat([latent, cont_covs.unsqueeze(0).expand(latent.size(0), -1, -1)], dim=-1)
-        else:
-            decoder_input = torch.cat([latent, cont_covs], dim=-1)
+            disp = self.dispersion_dict[name]
+            lib = library[name]
 
-        # Accessibility Decoder
-        p = self.z_decoder_accessibility(decoder_input, batch_index, *categorical_input)
+            # Compute additive background
+            bg = None
+            if name in self.additive_background:
+                bg = torch.matmul(
+                    one_hot(batch_index.squeeze(-1), self.n_batch).float(),
+                    torch.exp(self.additive_background[name]).T,
+                )
 
-        # Expression Decoder
-        px_scale, _, px_rate, px_dropout = self.z_decoder_expression(
-            self.gene_dispersion,
-            decoder_input,
-            libsize_expr,
-            batch_index,
-            *categorical_input,
-            label,
-        )
-        # Expression Dispersion
-        if self.gene_dispersion == "gene-label":
-            px_r = F.linear(
-                F.one_hot(label.squeeze(-1), self.n_labels).float(), self.px_r
-            )  # px_r gets transposed - last dimension is nb genes
-        elif self.gene_dispersion == "gene-batch":
-            px_r = F.linear(F.one_hot(batch_index.squeeze(-1), self.n_batch).float(), self.px_r)
-        elif self.gene_dispersion == "gene":
-            px_r = self.px_r
-        px_r = torch.exp(px_r)
+            # Decode
+            if self.use_batch_in_decoder:
+                px_scale, px_r_cell, px_rate, px_dropout = self.decoders[name](
+                    disp,
+                    decoder_input,
+                    lib,
+                    batch_index,
+                    *categorical_input,
+                    additive_background=bg,
+                )
+            else:
+                px_scale, px_r_cell, px_rate, px_dropout = self.decoders[name](
+                    disp,
+                    decoder_input,
+                    lib,
+                    *categorical_input,
+                    additive_background=bg,
+                )
 
-        # Protein Decoder
-        py_, log_pro_back_mean = self.z_decoder_pro(decoder_input, batch_index, *categorical_input)
-        # Protein Dispersion
-        if self.protein_dispersion == "protein-label":
-            # py_r gets transposed - last dimension is n_proteins
-            py_r = F.linear(F.one_hot(label.squeeze(-1), self.n_labels).float(), self.py_r)
-        elif self.protein_dispersion == "protein-batch":
-            py_r = F.linear(F.one_hot(batch_index.squeeze(-1), self.n_batch).float(), self.py_r)
-        elif self.protein_dispersion == "protein":
-            py_r = self.py_r
-        py_r = torch.exp(py_r)
-        py_["r"] = py_r
+            # Region factors
+            if name in self.region_factors:
+                px_rate = px_rate * torch.sigmoid(self.region_factors[name])
+
+            # Resolve dispersion
+            if disp in ("gene-batch", "region-batch"):
+                px_r = torch.nn.functional.linear(
+                    one_hot(batch_index.squeeze(-1), self.n_batch).float(),
+                    self.px_r[name],
+                )
+            elif disp in ("gene-label", "region-label"):
+                px_r = torch.nn.functional.linear(
+                    one_hot(batch_index.squeeze(-1), self.n_labels).float(),
+                    self.px_r[name],
+                )
+            elif disp in ("gene-cell", "region-cell"):
+                px_r = px_r_cell
+            else:
+                px_r = self.px_r[name]
+
+            px_r = torch.exp(px_r)
+
+            # Build distribution
+            if self.likelihood_distribution == "gamma_poisson":
+                px = GammaPoissonWithScale(concentration=px_r, rate=px_r / px_rate, scale=px_scale)
+            else:
+                px = NegativeBinomial(mu=px_rate, theta=px_r, scale=px_scale)
+
+            px_dict[name] = px
+
+        # Prior on z
+        pz = Normal(torch.zeros_like(z), torch.ones_like(z))
+
+        # Library priors
+        pl_dict = {}
+        if not self.use_observed_lib_size:
+            for name in self.modality_names:
+                if name not in library:
+                    continue
+                means_buf = getattr(self, f"library_log_means_{name}", None)
+                vars_buf = getattr(self, f"library_log_vars_{name}", None)
+                if means_buf is not None and vars_buf is not None:
+                    local_means = torch.nn.functional.linear(
+                        one_hot(batch_index.squeeze(-1), self.n_batch).float(),
+                        means_buf,
+                    )
+                    local_vars = torch.nn.functional.linear(
+                        one_hot(batch_index.squeeze(-1), self.n_batch).float(),
+                        vars_buf,
+                    )
+                    pl_dict[name] = Normal(local_means, local_vars.sqrt())
 
         return {
-            "p": p,
-            "px_scale": px_scale,
-            "px_r": torch.exp(self.px_r),
-            "px_rate": px_rate,
-            "px_dropout": px_dropout,
-            "py_": py_,
-            "log_pro_back_mean": log_pro_back_mean,
+            "px": px_dict,
+            "pz": pz,
+            "pl": pl_dict,
         }
 
-    def loss(self, tensors, inference_outputs, generative_outputs, kl_weight: float = 1.0):
-        """Computes the loss function for the model."""
-        # Get the data
-        x = inference_outputs["x"]
+    def loss(
+        self,
+        tensors: dict[str, torch.Tensor],
+        inference_outputs: dict[str, torch.Tensor | Distribution | None],
+        generative_outputs: dict[str, dict],
+        kl_weight: float = 1.0,
+    ) -> LossOutput:
+        """Compute multi-modal loss.
 
-        x_rna = x[:, : self.n_input_genes]
-        x_atac = x[:, self.n_input_genes : (self.n_input_genes + self.n_input_regions)]
-        if self.n_input_proteins == 0:
-            y = torch.zeros(x.shape[0], 1, device=x.device, requires_grad=False)
-        else:
-            y = tensors[REGISTRY_KEYS.PROTEIN_EXP_KEY]
+        Sum of per-modality reconstruction losses + KL divergence + hierarchical
+        dispersion priors.
+        """
+        masks = inference_outputs["masks"]
+        px_dict = generative_outputs["px"]
+        pz = generative_outputs["pz"]
+        pl_dict = generative_outputs.get("pl", {})
 
-        mask_expr = x_rna.sum(dim=1) > 0
-        mask_acc = x_atac.sum(dim=1) > 0
-        mask_pro = y.sum(dim=1) > 0
-
-        # Compute Accessibility loss
-        p = generative_outputs["p"]
-        libsize_acc = inference_outputs["libsize_acc"]
-        rl_accessibility = self.get_reconstruction_loss_accessibility(x_atac, p, libsize_acc)
-
-        # Compute Expression loss
-        px_rate = generative_outputs["px_rate"]
-        px_r = generative_outputs["px_r"]
-        px_dropout = generative_outputs["px_dropout"]
-        x_expression = x[:, : self.n_input_genes]
-        rl_expression = self.get_reconstruction_loss_expression(x_expression, px_rate, px_r, px_dropout)
-
-        # Compute Protein loss - No ability to mask minibatch (Param:None)
-        if mask_pro.sum().gt(0):
-            py_ = generative_outputs["py_"]
-            rl_protein = get_reconstruction_loss_protein(y, py_, None)
-        else:
-            rl_protein = torch.zeros(x.shape[0], device=x.device, requires_grad=False)
-
-        # calling without weights makes this act like a masked sum
-        recon_loss_expression = rl_expression * mask_expr
-        recon_loss_accessibility = rl_accessibility * mask_acc
-        recon_loss_protein = rl_protein * mask_pro
-        recon_loss = recon_loss_expression + recon_loss_accessibility + recon_loss_protein
-
-        # Compute KLD between Z and N(0,I)
-        qz_m = inference_outputs["qz_m"]
-        qz_v = inference_outputs["qz_v"]
-        kl_div_z = kld(
-            Normal(qz_m, torch.sqrt(qz_v)),
-            Normal(0, 1),
-        ).sum(dim=1)
-
-        # Compute KLD between distributions for paired data
-        kl_div_paired = self._compute_mod_penalty(
-            (inference_outputs["qzm_expr"], inference_outputs["qzv_expr"]),
-            (inference_outputs["qzm_acc"], inference_outputs["qzv_acc"]),
-            (inference_outputs["qzm_pro"], inference_outputs["qzv_pro"]),
-            mask_expr,
-            mask_acc,
-            mask_pro,
+        # ---- Reconstruction loss (per modality) ----
+        recon_loss = torch.zeros(
+            tensors[REGISTRY_KEYS.BATCH_KEY].shape[0], device=tensors[REGISTRY_KEYS.BATCH_KEY].device
         )
+        for name in self.modality_names:
+            if name not in px_dict:
+                continue
+            key = f"X_{name}"
+            x = tensors.get(key)
+            if x is None:
+                continue
+            px = px_dict[name]
+            rl = -px.log_prob(x).sum(-1)
+            # Mask: zero out loss for cells missing this modality
+            if name in masks:
+                rl = rl * masks[name].float()
+            recon_loss = recon_loss + rl
 
-        # KL WARMUP
-        kl_local_for_warmup = kl_div_z
-        weighted_kl_local = kl_weight * kl_local_for_warmup + kl_div_paired
+        # ---- KL divergence on Z ----
+        qz_per_modality = inference_outputs["qz_per_modality"]
+        if self.latent_mode == "single_encoder":
+            qz = qz_per_modality["_joint"]
+            kl_z = kld(qz, pz).sum(dim=-1)
+        elif self.latent_mode == "concatenation":
+            # Sum KL for each modality's encoder
+            kl_z = torch.zeros_like(recon_loss)
+            for name in self.modality_names:
+                if name not in qz_per_modality:
+                    continue
+                qz = qz_per_modality[name]
+                n_lat = self.n_latent_dict[name]
+                prior = Normal(
+                    torch.zeros(n_lat, device=recon_loss.device),
+                    torch.ones(n_lat, device=recon_loss.device),
+                )
+                kl_mod = kld(qz, prior).sum(dim=-1)
+                if name in masks:
+                    kl_mod = kl_mod * masks[name].float()
+                kl_z = kl_z + kl_mod
+        elif self.latent_mode == "weighted_mean":
+            # KL on the mixed z (approximate): penalise each modality's encoder
+            kl_z = torch.zeros_like(recon_loss)
+            for name in self.modality_names:
+                if name not in qz_per_modality:
+                    continue
+                qz = qz_per_modality[name]
+                prior = Normal(
+                    torch.zeros(self.total_latent_dim, device=recon_loss.device),
+                    torch.ones(self.total_latent_dim, device=recon_loss.device),
+                )
+                kl_mod = kld(qz, prior).sum(dim=-1)
+                if name in masks:
+                    kl_mod = kl_mod * masks[name].float()
+                kl_z = kl_z + kl_mod
 
-        # TOTAL LOSS
-        loss = torch.mean(recon_loss + weighted_kl_local)
+        # ---- KL divergence on library ----
+        kl_l = torch.zeros_like(recon_loss)
+        if not self.use_observed_lib_size:
+            ql_per_modality = inference_outputs.get("ql_per_modality", {})
+            for name in self.modality_names:
+                if name not in ql_per_modality or name not in pl_dict:
+                    continue
+                kl_lib = kld(ql_per_modality[name], pl_dict[name]).sum(dim=1)
+                if name in masks:
+                    kl_lib = kl_lib * masks[name].float()
+                kl_l = kl_l + kl_lib
 
-        recon_losses = {
-            "reconstruction_loss_expression": recon_loss_expression,
-            "reconstruction_loss_accessibility": recon_loss_accessibility,
-            "reconstruction_loss_protein": recon_loss_protein,
-        }
-        kl_local = {
-            "kl_divergence_z": kl_div_z,
-            "kl_divergence_paired": kl_div_paired,
-        }
+        # ---- Weighted loss ----
+        loss = torch.mean(recon_loss + kl_weight * kl_z + kl_l)
 
-        # a payload to be used during autotune
-        if self.extra_payload_autotune:
-            extra_metrics_payload = {
-                "z": inference_outputs["z"],
-                "batch": tensors[REGISTRY_KEYS.BATCH_KEY],
-                "labels": tensors[REGISTRY_KEYS.LABELS_KEY],
-            }
-        else:
-            extra_metrics_payload = {}
+        # ---- Hierarchical dispersion priors ----
+        if self.regularise_dispersion:
+            n_obs = recon_loss.shape[0]
+            dispersion_penalty = torch.tensor(0.0, device=recon_loss.device)
+
+            for name in self.modality_names:
+                if name not in self.px_r:
+                    continue
+                # Level 1: learned rate with Gamma hyper-prior
+                learned_rate = torch.nn.functional.softplus(self.dispersion_prior_rate_raw[name])
+                neg_log_hyper = (
+                    -Gamma(self.dispersion_hyper_prior_alpha, self.dispersion_hyper_prior_beta)
+                    .log_prob(learned_rate)
+                    .sum()
+                )
+
+                # Level 2: Exponential prior on dispersion
+                disp = self.dispersion_dict[name]
+                if disp in ("gene-batch", "region-batch"):
+                    rate = learned_rate.unsqueeze(0).expand_as(self.px_r[name])
+                elif disp in ("gene-label", "region-label"):
+                    rate = learned_rate.unsqueeze(0).expand_as(self.px_r[name])
+                else:
+                    rate = learned_rate.expand_as(self.px_r[name])
+
+                if self.likelihood_distribution == "gamma_poisson":
+                    px_r_transformed = torch.exp(-self.px_r[name]).pow(0.5)
+                else:
+                    px_r_transformed = torch.exp(self.px_r[name]).pow(0.5)
+
+                neg_log_prior = -Exponential(rate).log_prob(px_r_transformed).sum()
+                dispersion_penalty = dispersion_penalty + neg_log_prior + neg_log_hyper
+
+            loss = loss + dispersion_penalty / n_obs
 
         return LossOutput(
             loss=loss,
-            reconstruction_loss=recon_losses,
-            kl_local=kl_local,
-            extra_metrics=extra_metrics_payload,
+            reconstruction_loss=recon_loss,
+            kl_local={
+                "kl_divergence_z": kl_z,
+                "kl_divergence_l": kl_l,
+            },
         )
-
-    def get_reconstruction_loss_expression(self, x, px_rate, px_r, px_dropout):
-        """Computes the reconstruction loss for the expression data."""
-        rl = 0.0
-        if self.gene_likelihood == "zinb":
-            rl = -ZeroInflatedNegativeBinomial(mu=px_rate, theta=px_r, zi_logits=px_dropout).log_prob(x).sum(dim=-1)
-        elif self.gene_likelihood == "nb":
-            rl = -NegativeBinomial(mu=px_rate, theta=px_r).log_prob(x).sum(dim=-1)
-        elif self.gene_likelihood == "poisson":
-            rl = -Poisson(px_rate).log_prob(x).sum(dim=-1)
-        return rl
-
-    def get_reconstruction_loss_accessibility(self, x, p, d):
-        """Computes the reconstruction loss for the accessibility data."""
-        reg_factor = torch.sigmoid(self.region_factors) if self.region_factors is not None else 1
-        return torch.nn.BCELoss(reduction="none")(p * d * reg_factor, (x > 0).float()).sum(dim=-1)
-
-    def _compute_mod_penalty(self, mod_params1, mod_params2, mod_params3, mask1, mask2, mask3):
-        """Computes Similarity Penalty across modalities given selection (None, Jeffreys, MMD).
-
-        Parameters
-        ----------
-        mod_params1/2/3
-            Posterior parameters for for modality 1/2/3
-        mask1/2/3
-            mask for modality 1/2/3
-        """
-        mask12 = torch.logical_and(mask1, mask2)
-        mask13 = torch.logical_and(mask1, mask3)
-        mask23 = torch.logical_and(mask3, mask2)
-
-        if self.modality_penalty == "None":
-            return 0
-        elif self.modality_penalty == "Jeffreys":
-            pair_penalty = torch.zeros(mask1.shape[0], device=mask1.device, requires_grad=True)
-            if mask12.sum().gt(0):
-                penalty12 = sym_kld(
-                    mod_params1[0],
-                    mod_params1[1].sqrt(),
-                    mod_params2[0],
-                    mod_params2[1].sqrt(),
-                )
-                penalty12 = torch.where(mask12, penalty12.T, torch.zeros_like(penalty12).T).sum(dim=0)
-                pair_penalty = pair_penalty + penalty12
-            if mask13.sum().gt(0):
-                penalty13 = sym_kld(
-                    mod_params1[0],
-                    mod_params1[1].sqrt(),
-                    mod_params3[0],
-                    mod_params3[1].sqrt(),
-                )
-                penalty13 = torch.where(mask13, penalty13.T, torch.zeros_like(penalty13).T).sum(dim=0)
-                pair_penalty = pair_penalty + penalty13
-            if mask23.sum().gt(0):
-                penalty23 = sym_kld(
-                    mod_params2[0],
-                    mod_params2[1].sqrt(),
-                    mod_params3[0],
-                    mod_params3[1].sqrt(),
-                )
-                penalty23 = torch.where(mask23, penalty23.T, torch.zeros_like(penalty23).T).sum(dim=0)
-                pair_penalty = pair_penalty + penalty23
-
-        elif self.modality_penalty == "MMD":
-            pair_penalty = torch.zeros(mask1.shape[0], device=mask1.device, requires_grad=True)
-            if mask12.sum().gt(0):
-                penalty12 = torch.linalg.norm(mod_params1[0] - mod_params2[0], dim=1)
-                penalty12 = torch.where(mask12, penalty12.T, torch.zeros_like(penalty12).T).sum(dim=0)
-                pair_penalty = pair_penalty + penalty12
-            if mask13.sum().gt(0):
-                penalty13 = torch.linalg.norm(mod_params1[0] - mod_params3[0], dim=1)
-                penalty13 = torch.where(mask13, penalty13.T, torch.zeros_like(penalty13).T).sum(dim=0)
-                pair_penalty = pair_penalty + penalty13
-            if mask23.sum().gt(0):
-                penalty23 = torch.linalg.norm(mod_params2[0] - mod_params3[0], dim=1)
-                penalty23 = torch.where(mask23, penalty23.T, torch.zeros_like(penalty23).T).sum(dim=0)
-                pair_penalty = pair_penalty + penalty23
-        else:
-            raise ValueError("modality penalty not supported")
-
-        return pair_penalty
-
-
-@auto_move_data
-def mix_modalities(Xs, masks, weights, weight_transform: callable = None):
-    """Compute the weighted mean of the Xs while masking unmeasured modality values.
-
-    Parameters
-    ----------
-    Xs
-        Sequence of Xs to mix, each should be (N x D)
-    masks
-        Sequence of masks corresponding to the Xs, indicating whether the values
-        should be included in the mix or not (N)
-    weights
-        Weights for each modality (either K or N x K)
-    weight_transform
-        Transformation to apply to the weights before using them
-    """
-    # (batch_size x latent) -> (batch_size x modalities x latent)
-    Xs = torch.stack(Xs, dim=1)
-    # (batch_size) -> (batch_size x modalities)
-    masks = torch.stack(masks, dim=1).float()
-    weights = masked_softmax(weights, masks, dim=-1)
-
-    # (batch_size x modalities) -> (batch_size x modalities x latent)
-    weights = weights.unsqueeze(-1)
-    if weight_transform is not None:
-        weights = weight_transform(weights)
-
-    # sum over modalities, so output is (batch_size x latent)
-    return (weights * Xs).sum(1)
-
-
-@auto_move_data
-def sym_kld(qzm1, qzv1, qzm2, qzv2):
-    """Symmetric KL divergence between two Gaussians."""
-    rv1 = Normal(qzm1, qzv1.sqrt())
-    rv2 = Normal(qzm2, qzv2.sqrt())
-
-    return kld(rv1, rv2) + kld(rv2, rv1)
-
-
-@auto_move_data
-def get_reconstruction_loss_protein(y, py_, pro_batch_mask_minibatch=None):
-    """Get the reconstruction loss for protein data."""
-    py_conditional = NegativeBinomialMixture(
-        mu1=py_["rate_back"],
-        mu2=py_["rate_fore"],
-        theta1=py_["r"],
-        mixture_logits=py_["mixing"],
-    )
-
-    reconst_loss_protein_full = -py_conditional.log_prob(y)
-
-    if pro_batch_mask_minibatch is not None:
-        temp_pro_loss_full = pro_batch_mask_minibatch.bool() * reconst_loss_protein_full
-        rl_protein = temp_pro_loss_full.sum(dim=-1)
-    else:
-        rl_protein = reconst_loss_protein_full.sum(dim=-1)
-
-    return rl_protein

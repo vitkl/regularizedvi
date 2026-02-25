@@ -11,6 +11,8 @@ from regularizedvi._components import (
 )
 from regularizedvi._model import AmbientRegularizedSCVI
 from regularizedvi._module import RegularizedVAE
+from regularizedvi._multimodel import RegularizedMultimodalVI
+from regularizedvi._multimodule import RegularizedMultimodalVAE
 
 
 # Replace default exp positive transform with softplus (numerically more stable).
@@ -26,6 +28,8 @@ __all__ = [
     "RegularizedDecoderSCVI",
     "RegularizedEncoder",
     "RegularizedFCLayers",
+    "RegularizedMultimodalVAE",
+    "RegularizedMultimodalVI",
     "RegularizedVAE",
 ]
 

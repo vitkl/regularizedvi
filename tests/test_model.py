@@ -1,4 +1,4 @@
-"""Tests for AmbientRegularizedSCVI model."""
+"""Tests for AmbientRegularizedSCVI and RegularizedMultimodalVI models."""
 
 import torch
 
@@ -240,12 +240,13 @@ class TestRegularizedVAEModule:
             n_latent=4,
             regularise_dispersion=False,
         )
-        # Copy weights from reg to noreg so they're comparable
-        model_noreg.module.load_state_dict(model_reg.module.state_dict())
-
         # Both should have the regularise_dispersion attribute set correctly
         assert model_reg.module.regularise_dispersion is True
         assert model_noreg.module.regularise_dispersion is False
+
+        # Regularised model should have learnable prior rate parameter
+        assert hasattr(model_reg.module, "dispersion_prior_rate_raw")
+        assert isinstance(model_reg.module.dispersion_prior_rate_raw, torch.nn.Parameter)
 
 
 class TestGammaPoissonMode:
@@ -311,3 +312,192 @@ class TestGammaPoissonMode:
             n_latent=4,
         )
         assert model.module.likelihood_distribution == "gamma_poisson"
+
+
+class TestRegularizedMultimodalVI:
+    """Tests for the RegularizedMultimodalVI multi-modal model."""
+
+    def test_setup_mudata(self, mdata):
+        """Test that setup_mudata registers fields correctly."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        manager = regularizedvi.RegularizedMultimodalVI._get_most_recent_anndata_manager(mdata)
+        registry_keys = list(manager.data_registry.keys())
+        assert "X_rna" in registry_keys
+        assert "X_atac" in registry_keys
+        assert "batch" in registry_keys
+
+    def test_model_init(self, mdata):
+        """Test model initialisation with default parameters."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        assert model.module is not None
+        assert isinstance(model.module, regularizedvi.RegularizedMultimodalVAE)
+
+    def test_modality_discovery(self, mdata):
+        """Test that modality names are correctly discovered from registered data."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        assert set(model.module.modality_names) == {"rna", "atac"}
+
+    def test_per_modality_architecture(self, mdata):
+        """Test per-modality encoders, decoders, and dispersion parameters."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        module = model.module
+
+        assert set(module.encoders.keys()) == {"rna", "atac"}
+        assert set(module.decoders.keys()) == {"rna", "atac"}
+        assert set(module.px_r.keys()) == {"rna", "atac"}
+        assert module.px_r["rna"].shape == (50,)  # n_rna genes
+        assert module.px_r["atac"].shape == (30,)  # n_atac peaks
+
+    def test_default_additive_background_and_region_factors(self, mdata):
+        """Test default additive background on RNA, region factors on ATAC."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        module = model.module
+
+        assert "rna" in module.additive_background
+        assert "atac" not in module.additive_background
+        assert "atac" in module.region_factors
+        assert "rna" not in module.region_factors
+
+    def test_per_modality_n_hidden_n_latent(self, mdata):
+        """Test per-modality architecture sizes via dict config."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden={"rna": 32, "atac": 16},
+            n_latent={"rna": 8, "atac": 4},
+        )
+        module = model.module
+        assert module.n_hidden_dict == {"rna": 32, "atac": 16}
+        assert module.n_latent_dict == {"rna": 8, "atac": 4}
+        assert module.total_latent_dim == 12  # 8 + 4
+
+    def test_train_concatenation(self, mdata):
+        """Test training with concatenation latent mode (default)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, latent_mode="concatenation")
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+
+    def test_train_single_encoder(self, mdata):
+        """Test training with single_encoder latent mode."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, latent_mode="single_encoder")
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+
+    def test_train_weighted_mean(self, mdata):
+        """Test training with weighted_mean latent mode."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, latent_mode="weighted_mean")
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+
+    def test_latent_concatenation(self, mdata):
+        """Test latent representation shape for concatenation mode."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, latent_mode="concatenation")
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        latent = model.get_latent_representation()
+        assert latent.shape == (mdata.n_obs, 8)  # 4 + 4
+
+    def test_latent_single_encoder(self, mdata):
+        """Test latent representation shape for single_encoder mode."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, latent_mode="single_encoder")
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        latent = model.get_latent_representation()
+        assert latent.shape == (mdata.n_obs, 8)  # sum of per-modality n_latent
+
+    def test_latent_weighted_mean(self, mdata):
+        """Test latent representation shape for weighted_mean mode."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, latent_mode="weighted_mean")
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        latent = model.get_latent_representation()
+        assert latent.shape == (mdata.n_obs, 4)
+
+    def test_latent_per_modality_sizes(self, mdata):
+        """Test latent shape with per-modality n_latent in concatenation mode."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden={"rna": 32, "atac": 16},
+            n_latent={"rna": 8, "atac": 4},
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        latent = model.get_latent_representation()
+        assert latent.shape == (mdata.n_obs, 12)  # 8 + 4
+
+    def test_dispersion_regularisation(self, mdata):
+        """Test learnable dispersion prior is present."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, regularise_dispersion=True)
+        module = model.module
+        assert hasattr(module, "dispersion_prior_rate_raw")
+        assert "rna" in module.dispersion_prior_rate_raw
+        assert "atac" in module.dispersion_prior_rate_raw
+
+    def test_no_dispersion_regularisation(self, mdata):
+        """Test model works without dispersion regularisation."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, regularise_dispersion=False)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+    def test_nb_likelihood(self, mdata):
+        """Test model works with NB likelihood instead of default GammaPoisson."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, likelihood_distribution="nb")
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+    def test_custom_modality_flags(self, mdata):
+        """Test custom additive_background and region_factors modality lists."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        # Reverse the defaults: background on ATAC, region factors on RNA
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            additive_background_modalities=["atac"],
+            region_factors_modalities=["rna"],
+        )
+        module = model.module
+        assert "atac" in module.additive_background
+        assert "rna" not in module.additive_background
+        assert "rna" in module.region_factors
+        assert "atac" not in module.region_factors
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+    def test_weighted_mean_universal_weights(self, mdata):
+        """Test weighted_mean with universal weight mode."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            latent_mode="weighted_mean",
+            modality_weights="universal",
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+    def test_weighted_mean_cell_weights(self, mdata):
+        """Test weighted_mean with cell-level weight mode."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            latent_mode="weighted_mean",
+            modality_weights="cell",
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+    def test_gene_batch_dispersion(self, mdata):
+        """Test per-batch dispersion parameterization."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, dispersion="gene-batch")
+        module = model.module
+        n_batch = 3
+        assert module.px_r["rna"].shape == (50, n_batch)
+        assert module.px_r["atac"].shape == (30, n_batch)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
