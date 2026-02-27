@@ -267,14 +267,6 @@ class TestParameterInitialization:
         # Noise scale: std of px_r should be ~0.1
         assert model.module.px_r.detach().std().item() == pytest.approx(0.1, abs=0.05)
 
-    def test_px_r_init_at_prior_mean_nb(self, adata):
-        """px_r should be initialized near -log(rate^2) for NB."""
-        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
-        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, likelihood_distribution="nb")
-        # For NB: theta = 1/rate^2 = 1/9
-        theta = torch.exp(model.module.px_r).detach()
-        assert theta.mean().item() == pytest.approx(1.0 / 9.0, rel=0.2)
-
     def test_px_r_init_no_regularisation(self, adata):
         """Without regularisation, px_r uses standard randn init."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
@@ -308,14 +300,6 @@ class TestParameterInitialization:
         for name in model.module.modality_names:
             theta = torch.exp(model.module.px_r[name]).detach()
             assert theta.mean().item() == pytest.approx(9.0, rel=0.2), f"Failed for {name}"
-
-    def test_px_r_init_multimodal_nb(self, mdata):
-        """Multimodal px_r with NB likelihood: theta ≈ 1/9."""
-        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
-        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, likelihood_distribution="nb")
-        for name in model.module.modality_names:
-            theta = torch.exp(model.module.px_r[name]).detach()
-            assert theta.mean().item() == pytest.approx(1.0 / 9.0, rel=0.2), f"Failed for {name}"
 
     def test_additive_background_init_multimodal(self, mdata):
         """Multimodal additive background should be initialized near Gamma(1,100) mean=0.01."""
@@ -379,10 +363,10 @@ class TestParameterInitialization:
 
 
 class TestGammaPoissonMode:
-    """Tests for likelihood_distribution='gamma_poisson' mode."""
+    """Tests for GammaPoisson likelihood (the only supported mode)."""
 
     def test_gamma_poisson_init(self, adata):
-        """Test model initialisation with gamma_poisson mode."""
+        """Test model initialisation uses GammaPoisson distribution."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(
             adata,
             layer="counts",
@@ -392,12 +376,11 @@ class TestGammaPoissonMode:
             adata,
             n_hidden=16,
             n_latent=4,
-            likelihood_distribution="gamma_poisson",
         )
-        assert model.module.likelihood_distribution == "gamma_poisson"
+        assert model.module.gene_likelihood == "gamma_poisson"
 
     def test_gamma_poisson_train(self, adata):
-        """Test training with gamma_poisson mode runs without error."""
+        """Test training with GammaPoisson runs without error."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(
             adata,
             layer="counts",
@@ -407,12 +390,11 @@ class TestGammaPoissonMode:
             adata,
             n_hidden=16,
             n_latent=4,
-            likelihood_distribution="gamma_poisson",
         )
         model.train(max_epochs=3, train_size=1.0, batch_size=32)
 
     def test_gamma_poisson_latent(self, adata):
-        """Test latent representation with gamma_poisson mode."""
+        """Test latent representation with GammaPoisson."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(
             adata,
             layer="counts",
@@ -422,25 +404,10 @@ class TestGammaPoissonMode:
             adata,
             n_hidden=16,
             n_latent=4,
-            likelihood_distribution="gamma_poisson",
         )
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
         latent = model.get_latent_representation()
         assert latent.shape == (adata.n_obs, 4)
-
-    def test_default_is_gamma_poisson(self, adata):
-        """Test that the default likelihood_distribution is 'gamma_poisson'."""
-        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
-            adata,
-            layer="counts",
-            batch_key="batch",
-        )
-        model = regularizedvi.AmbientRegularizedSCVI(
-            adata,
-            n_hidden=16,
-            n_latent=4,
-        )
-        assert model.module.likelihood_distribution == "gamma_poisson"
 
 
 class TestRegularizedMultimodalVI:
@@ -572,12 +539,6 @@ class TestRegularizedMultimodalVI:
         """Test model works without dispersion regularisation."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, regularise_dispersion=False)
-        model.train(max_epochs=2, train_size=1.0, batch_size=32)
-
-    def test_nb_likelihood(self, mdata):
-        """Test model works with NB likelihood instead of default GammaPoisson."""
-        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
-        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, likelihood_distribution="nb")
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
 
     def test_custom_modality_flags(self, mdata):

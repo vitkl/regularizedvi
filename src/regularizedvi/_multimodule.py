@@ -137,9 +137,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
     regularise_dispersion
         Enable dispersion regularization.
     regularise_dispersion_prior
-        Initialization for the Exponential rate parameter.
-    likelihood_distribution
-        ``"gamma_poisson"`` (default) or ``"nb"``.
+        Initialization for the Exponential containment prior rate parameter.
     dispersion_hyper_prior_alpha
         Alpha for Gamma hyper-prior on learned rate.
     dispersion_hyper_prior_beta
@@ -186,7 +184,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         region_factors_modalities: list[str] | None = None,
         regularise_dispersion: bool = True,
         regularise_dispersion_prior: float = 3.0,
-        likelihood_distribution: Literal["nb", "gamma_poisson"] = "gamma_poisson",
         dispersion_hyper_prior_alpha: float = 9.0,
         dispersion_hyper_prior_beta: float = 3.0,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "none",
@@ -226,7 +223,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.use_observed_lib_size = False
         self.use_batch_in_decoder = use_batch_in_decoder
         self.regularise_dispersion = regularise_dispersion
-        self.likelihood_distribution = likelihood_distribution
         self.dispersion_hyper_prior_alpha = dispersion_hyper_prior_alpha
         self.dispersion_hyper_prior_beta = dispersion_hyper_prior_beta
         self.encode_covariates = encode_covariates
@@ -384,15 +380,11 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 self.register_buffer(f"library_log_vars_{name}", vars_)
 
         # ---- Per-modality dispersion parameters ----
-        # Initialize px_r at prior mean when regularisation is active.
-        # For gamma_poisson: Exp(rate) prior on 1/sqrt(theta) → theta = rate² at equilibrium.
-        # For NB: Exp(rate) prior on sqrt(theta) → theta = 1/rate² at equilibrium.
+        # Initialize px_r at prior equilibrium when regularisation is active.
+        # Containment prior: Exp(rate) on 1/sqrt(theta) → theta = rate² at equilibrium.
         if self.regularise_dispersion:
             _rate = regularise_dispersion_prior
-            if self.likelihood_distribution == "gamma_poisson":
-                _px_r_init = math.log(_rate**2)  # log(9) ≈ 2.197
-            else:
-                _px_r_init = -math.log(_rate**2)  # -log(9) ≈ -2.197
+            _px_r_init = math.log(_rate**2)  # log(9) ≈ 2.197
         else:
             _px_r_init = None
 
@@ -659,7 +651,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         Returns dict with keys per modality, each containing the distribution.
         """
-        from scvi.distributions import NegativeBinomial
         from torch.nn.functional import one_hot
 
         from regularizedvi._module import GammaPoissonWithScale
@@ -753,11 +744,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
             px_r = torch.exp(px_r)
 
-            # Build distribution
-            if self.likelihood_distribution == "gamma_poisson":
-                px = GammaPoissonWithScale(concentration=px_r, rate=px_r / px_rate, scale=px_scale)
-            else:
-                px = NegativeBinomial(mu=px_rate, theta=px_r, scale=px_scale)
+            # GammaPoisson (= NB): concentration=theta, rate=theta/mu
+            px = GammaPoissonWithScale(concentration=px_r, rate=px_r / px_rate, scale=px_scale)
 
             px_dict[name] = px
 
@@ -911,10 +899,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 else:
                     rate = learned_rate.expand_as(self.px_r[name])
 
-                if self.likelihood_distribution == "gamma_poisson":
-                    px_r_transformed = torch.exp(-self.px_r[name]).pow(0.5)
-                else:
-                    px_r_transformed = torch.exp(self.px_r[name]).pow(0.5)
+                # Containment prior: Exp on 1/sqrt(theta) (cell2location direction)
+                px_r_transformed = torch.exp(-self.px_r[name]).pow(0.5)
 
                 neg_log_prior = -Exponential(rate).log_prob(px_r_transformed).sum()
                 dispersion_penalty = dispersion_penalty + neg_log_prior + neg_log_hyper

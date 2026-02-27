@@ -34,27 +34,38 @@ The inference model uses amortised variational inference to fit all cell specifi
 
 ### regularizedvi generative model
 
-**regularizedvi** adapts [cell2location](https://doi.org/10.1038/s41587-021-01139-4)/[cell2fate](https://doi.org/10.1038/s41592-025-02608-3) modelling principles to scVI:
+**regularizedvi** adapts [cell2location](https://doi.org/10.1038/s41587-021-01139-4)/[cell2fate](https://doi.org/10.1038/s41592-025-02608-3) modelling principles to scVI. All learnable parameters are initialised at their prior means to improve training stability.
+
+**Latent variable and library size** — standard scVI structure with a constrained library prior ([`_module.py:267–272`](src/regularizedvi/_module.py#L267-L272)):
 
 $$z_n \sim \text{Normal}(0, I)$$
 $$\ell_n \sim \text{LogNormal}(\ell_\mu^\top s_n,\; 0.05 \cdot \ell_{\sigma^2}^\top s_n)$$
+
+**Decoder output** — batch-free decoder maps $z\_n$ and categorical covariates $c\_n$ (not batch $s\_n$) to non-negative gene expression via softplus ([`_module.py:638–645`](src/regularizedvi/_module.py#L638-L645), [`_components.py:461–462`](src/regularizedvi/_components.py#L461-L462)):
+
 $$\rho_{ng} = \text{softplus}\big(f_w(z_n, c_n)\big) \in \mathbb{R}_{\geq 0}^G$$
-$$b_{g,s_n} = \exp(\beta_{g,s_n})$$
-$$\sqrt{\theta_{g,s_n}} \sim \text{Exponential}(\lambda)$$
-$$x_{ng} \sim \text{GammaPoisson}\Big(\text{concentration} = \theta_{g,s_n}, \text{rate} = \frac{\theta_{g,s_n}}{\ell_n \cdot \big(\rho_{ng} + b_{g,s_n}\big)}\Big)$$
 
-or equivalently as negative binomial with mean $\mu = \ell_n \cdot \big(\rho_{ng} + b_{g,s_n}\big)$ and dispersion $\theta_{g,s_n}$.
+**Additive background** — per-gene, per-batch ambient RNA with Gamma prior pushing $b\_{g,s\_n}$ toward 0.01 ([`_module.py:327–331`](src/regularizedvi/_module.py#L327-L331) init, [`_module.py:608–613`](src/regularizedvi/_module.py#L608-L613) one-hot selection, [`_module.py:767–777`](src/regularizedvi/_module.py#L767-L777) prior penalty):
 
-where additionally:
-- $b\_{g,s\_n} = \exp(\beta\_{g,s\_n})$ — per-gene, per-batch additive ambient RNA background (learnable parameter)
-- $\beta\_{g,s\_n}$ — unconstrained ambient background parameter (code: `additive_background`), this is an implementational detail
+$$b_{g,s_n} = \exp(\beta_{g,s_n}), \qquad b_{g,s_n} \sim \text{Gamma}(1,\, 100)$$
+
+**Hierarchical dispersion prior** — two-level prior on inverse dispersion $\theta\_{g,s\_n} = \exp(\phi\_{g,s\_n})$ where `px_r` stores $\phi$. A learned rate $\lambda\_{s\_n}$ adapts regularisation strength per batch ([`_module.py:731–765`](src/regularizedvi/_module.py#L731-L765) full block, [`_module.py:737`](src/regularizedvi/_module.py#L737) Level 1 softplus, [`_module.py:758–764`](src/regularizedvi/_module.py#L758-L764) Level 2 transform):
+
+$$\lambda_{s_n} \sim \text{Gamma}(9,\, 3), \qquad 1/\sqrt{\theta_{g,s_n}} \sim \text{Exponential}(\lambda_{s_n})$$
+
+**Observation model** — GammaPoisson (= negative binomial) with mean $\mu\_{ng} = \ell\_n \cdot (\rho\_{ng} + b\_{g,s\_n})$ ([`_components.py:467`](src/regularizedvi/_components.py#L467) rate computation):
+
+$$x_{ng} \sim \text{GammaPoisson}\Big(\text{concentration} = \theta_{g,s_n},\;\; \text{rate} = \frac{\theta_{g,s_n}}{\ell_n \cdot \big(\rho_{ng} + b_{g,s_n}\big)}\Big)$$
+
+**Notation:**
+- $b\_{g,s\_n} = \exp(\beta\_{g,s\_n})$ — per-gene, per-batch ambient background; $\beta$ is the unconstrained parameter (code: `additive_background`)
 - $c\_n$ — categorical covariates only (site, donor, etc.), **not** batch $s\_n$ (batch-free decoder)
-- $\rho\_{ng} \in \mathbb{R}\_{\geq 0}^G$ — decoder output via softplus (no longer on the simplex), since $\rho\_{ng} + b\_{g,s\_n}$ need not sum to 1
-- $\theta\_{g,s\_n} = \exp(\phi\_{g,s\_n})$ — inverse dispersion, parameterised in log-space (code: `px\_r` stores $\phi$)
-- $\lambda = 3$ — rate for Exponential containment prior on $\sqrt{\theta\_{g,s\_n}}$
-- $0.05$ — library prior variance scaling factor (constraining library size)
+- $\rho\_{ng} \in \mathbb{R}\_{\geq 0}^G$ — decoder output via softplus (not on the simplex), since $\rho\_{ng} + b\_{g,s\_n}$ need not sum to 1
+- $\theta\_{g,s\_n} = \exp(\phi\_{g,s\_n})$ — inverse dispersion in log-space (code: `px_r` stores $\phi$); initialised at $\log(\lambda^2) \approx 2.2$ so $\theta \approx 9$ (equilibrium: $1/\sqrt{\theta} = 1/\lambda$) ([`_module.py:277–284`](src/regularizedvi/_module.py#L277-L284))
+- $\lambda\_{s\_n}$ — learned Exponential rate, one per batch; $\text{Gamma}(9, 3)$ hyper-prior has mean 3 ([`_module.py:314–322`](src/regularizedvi/_module.py#L314-L322))
+- $0.05$ — library prior variance scaling factor, preventing library size from absorbing biological signal
 
-The NB variance is $\text{Var}(x) = \mu + \mu^2/\theta$, where $\theta$ is the inverse dispersion (= `GammaPoisson` concentration parameter). Large $\theta$ means less overdispersion and less variance (variance approaching Poisson $\mu^2/\theta = 0$ -> $\text{Var}(x) = \mu$).
+The NB variance is $\text{Var}(x) = \mu + \mu^2/\theta$. Large $\theta$ → less overdispersion (Poisson limit). The Exponential prior on $1/\sqrt{\theta}$ is a containment prior (Simpson et al. 2017) that penalises large $1/\sqrt{\theta}$ (= small $\theta$, excessive overdispersion), regularising the NB toward the Poisson baseline. The data likelihood provides the opposing force, pulling $\theta$ toward values needed to explain observed count variance. At equilibrium $\theta \approx \lambda^2 = 9$, giving moderate overdispersion. This forces the decoder to capture biological signal through its mean structure rather than absorbing residuals via high variance.
 
 ### RegularizedMultimodalVI generative model
 
@@ -73,39 +84,45 @@ where $d\_m$ is the latent dimensionality assigned to modality $m$ (e.g. `n_late
 
 The following equations describe how observed counts $x^{(m)}\_{nf}$ — UMIs for RNA, fragment counts for ATAC — are generated for cell $n$ and feature $f$ (gene or chromatin peak). All modalities share this structure; the optional terms in the mean $\mu^{(m)}\_{nf}$ are selectively activated per modality.
 
-**Library size** — how many total counts a cell contributes in this modality. Always learned (observed total counts are never used as library size, since they include ambient contamination). A low-capacity encoder infers library size per cell, regularised by a tight LogNormal prior whose mean and variance are estimated per batch from the data:
+**Library size** — always learned (observed totals include ambient contamination). A low-capacity encoder infers library size per cell, regularised by a tight LogNormal prior estimated per batch ([`_multimodule.py:375–384`](src/regularizedvi/_multimodule.py#L375-L384) prior buffers, [`_multimodule.py:772–773`](src/regularizedvi/_multimodule.py#L772-L773) loss):
 
 $$\ell^{(m)}_n \sim \text{LogNormal}\big(\ell^{(m)}_{\mu}{}^\top s_n,\; 0.05 \cdot \ell^{(m)}_{\sigma^2}{}^\top s_n\big)$$
 
-**Decoder output** — the neural network maps the joint latent code $z\_n$ and categorical covariates $c\_n$ (donor, site, protocol — **not** batch $s\_n$) to a non-negative denoised feature signal. The softplus activation ensures non-negativity without forcing outputs to sum to 1:
+**Decoder output** — maps joint latent code $z\_n$ and categorical covariates $c\_n$ (not batch $s\_n$) to non-negative feature signal via softplus ([`_multimodule.py:717–724`](src/regularizedvi/_multimodule.py#L717-L724)):
 
 $$\rho^{(m)}_{nf} = \text{softplus}\big(f^{(m)}_w(z_n,\, c_n)\big) \in \mathbb{R}_{\geq 0}$$
 
-**Expected mean counts** — the predicted count mean for feature $f$ in cell $n$. Optional additive background $b^{(m)}\_{f,s\_n}$ and multiplicative region factor $\alpha^{(m)}\_f$ modify the decoder output before scaling by library size (see optional terms table):
+**Additive background** — per-feature, per-batch ambient contamination with Gamma prior ([`_multimodule.py:439–445`](src/regularizedvi/_multimodule.py#L439-L445) init, [`_multimodule.py:701–705`](src/regularizedvi/_multimodule.py#L701-L705) one-hot selection, [`_multimodule.py:943–955`](src/regularizedvi/_multimodule.py#L943-L955) prior penalty):
 
-$$\mu^{(m)}_{nf} = \ell^{(m)}_n \cdot \big(\rho^{(m)}_{nf} + b^{(m)}_{f,s_n}\big) \cdot \alpha^{(m)}_f$$
+$$b^{(m)}_{f,s_n} = \exp(\beta^{(m)}_{f,s_n}), \qquad b^{(m)}_{f,s_n} \sim \text{Gamma}(1,\, 100)$$
 
-**Dispersion** — how much the count variance exceeds the Poisson baseline. A hierarchical prior (Gamma hyper-prior on the learned rate $\lambda^{(m)}\_{s\_n}$, then Exponential prior on $\sqrt{\theta}$) prevents the model from setting dispersion near zero (NB → Poisson collapse) and adapts the regularisation strength to each batch and modality:
+**Region factors** — per-feature, per-covariate multiplicative scaling capturing systematic biases (GC content, mappability, peak caller sensitivity). Parameterised as $\text{softplus}(\gamma)/0.7$ with a tight Gamma prior centered at 1. When scaling covariates $t$ are registered, each covariate category gets its own factor; the per-cell scaling is selected via one-hot indicator ([`_multimodule.py:452–456`](src/regularizedvi/_multimodule.py#L452-L456) init, [`_multimodule.py:728–736`](src/regularizedvi/_multimodule.py#L728-L736) activation and selection, [`_multimodule.py:924–941`](src/regularizedvi/_multimodule.py#L924-L941) prior penalty):
 
-$$\lambda^{(m)}_{s_n} \sim \text{Gamma}(9, 3), \qquad \sqrt{\theta^{(m)}_{f,s_n}} \sim \text{Exponential}(\lambda^{(m)}_{s_n})$$
+$$\alpha^{(m)}_{t,f} = \text{softplus}(\gamma^{(m)}_{t,f})\,/\,0.7, \qquad \alpha^{(m)}_{t,f} \sim \text{Gamma}(200,\, 200)$$
 
-**Observation model** — counts are drawn from a GammaPoisson distribution (equivalent to negative binomial) parameterised by the predicted mean $\mu^{(m)}\_{nf}$ and inverse dispersion $\theta^{(m)}\_{f,s\_n}$:
+**Expected mean counts** — decoder output plus optional background, scaled by library size and region factor ([`_components.py:467`](src/regularizedvi/_components.py#L467), [`_multimodule.py:736`](src/regularizedvi/_multimodule.py#L736)):
+
+$$\mu^{(m)}_{nf} = \ell^{(m)}_n \cdot \big(\rho^{(m)}_{nf} + b^{(m)}_{f,s_n}\big) \cdot \alpha^{(m)}_{t_n,f}$$
+
+**Hierarchical dispersion prior** — same two-level structure as single-modality, per modality and batch ([`_multimodule.py:889–922`](src/regularizedvi/_multimodule.py#L889-L922)):
+
+$$\lambda^{(m)}_{s_n} \sim \text{Gamma}(9,\, 3), \qquad 1/\sqrt{\theta^{(m)}_{f,s_n}} \sim \text{Exponential}(\lambda^{(m)}_{s_n})$$
+
+**Observation model** — GammaPoisson (= negative binomial) with mean $\mu^{(m)}\_{nf}$ and inverse dispersion $\theta^{(m)}\_{f,s\_n}$:
 
 $$x^{(m)}_{nf} \sim \text{GammaPoisson}\!\Big(\text{concentration} = \theta^{(m)}_{f,s_n},\;\; \text{rate} = \frac{\theta^{(m)}_{f,s_n}}{\mu^{(m)}_{nf}}\Big)$$
 
-or equivalently NB with mean $\mu^{(m)}\_{nf}$ and dispersion $\theta^{(m)}\_{f,s\_n}$.
-
 #### Optional per-modality correction terms
 
-| Term | Symbol | What it captures | RNA default | ATAC default |
-|------|--------|-----------------|-------------|--------------|
-| Additive background | $b^{(m)}_{f,s_n} = \exp(\beta^{(m)}_{f,s_n})$ | Per-feature, per-batch ambient contamination or assay baseline; learnable parameter | **ON** | off |
-| Region/accessibility factor | $\alpha^{(m)}_f = \text{sigmoid}(\gamma^{(m)}_f) \in (0,1)$ | Per-feature multiplicative bias (GC content, mappability, peak caller sensitivity); learnable parameter | off | **ON** |
-| Learned library size | $\ell^{(m)}_n$ | Low-capacity encoder + tight LogNormal prior; observed totals include ambient so cannot be used directly | **always ON** | **always ON** |
-| Dispersion regularisation | $\lambda^{(m)}_{s_n}$ | Hierarchical prior preventing count model from becoming too certain (NB → Poisson) | ON | ON |
-| Batch-free decoder | — | Decoder conditioned only on categorical covariates $c_n$, not batch $s_n$ | ON | ON |
+| Term | Symbol | Prior | What it captures | RNA default | ATAC default |
+|------|--------|-------|-----------------|-------------|--------------|
+| Additive background | $b^{(m)}_{f,s_n} = \exp(\beta^{(m)}_{f,s_n})$ | $\text{Gamma}(1, 100)$, mean 0.01 | Per-feature, per-batch ambient contamination or assay baseline | **ON** | off |
+| Region factor | $\alpha^{(m)}_{t,f} = \text{softplus}(\gamma^{(m)}_{t,f})/0.7$ | $\text{Gamma}(200, 200)$, mean 1.0 | Per-feature, per-covariate multiplicative bias (GC content, mappability) | off | **ON** |
+| Learned library size | $\ell^{(m)}_n$ | $\text{LogNormal}$, 0.05 var scaling | Low-capacity encoder; observed totals include ambient | **always ON** | **always ON** |
+| Dispersion regularisation | $1/\sqrt{\theta^{(m)}_{f,s_n}}$ | $\text{Exp}(\lambda)$, $\lambda \sim \text{Gamma}(9,3)$ | Containment prior regularising against excessive overdispersion | ON | ON |
+| Batch-free decoder | — | — | Decoder conditioned only on categorical covariates $c_n$, not batch $s_n$ | ON | ON |
 
-Setting $b^{(m)}\_{f,s\_n} = 0$ (no ambient) and $\alpha^{(m)}\_f = 1$ (no region factor) recovers the standard regularizedvi single-modality model for that modality. The defaults reflect domain knowledge for snRNA+ATAC multiome: ambient RNA contamination is substantial in single-nucleus RNA-seq and well-captured by an additive term, while ATAC peaks have systematic per-peak biases from GC content, mappability and peak caller thresholds. See the [bone marrow multiome tutorial](docs/notebooks/bone_marrow_multimodal_tutorial.ipynb) for a worked RNA+ATAC example.
+Setting $b^{(m)}\_{f,s\_n} = 0$ (no ambient) and $\alpha^{(m)}\_{t,f} = 1$ (no region factor) recovers the standard regularizedvi single-modality model for that modality. The defaults reflect domain knowledge for snRNA+ATAC multiome: ambient RNA contamination is substantial in single-nucleus RNA-seq and well-captured by an additive term, while ATAC peaks have systematic per-peak biases from GC content, mappability and peak caller thresholds. See the [bone marrow multiome tutorial](docs/notebooks/bone_marrow_multimodal_tutorial.ipynb) for a worked RNA+ATAC example.
 
 #### Inference: per-modality encoders and posterior concatenation
 
@@ -133,11 +150,11 @@ This reveals the empirical partition of the latent space: even though concatenat
 
 ### Key modifications
 
-1. **Ambient RNA correction**: Per-gene, per-sample additive background $b\_{g,s\_n}$ captures ambient RNA contamination, mirroring cell2location's $(g\_{f,g} + b\_{e,g}) \cdot h\_e$ structure. Implemented as `nn.Parameter(torch.randn(n_genes, n_batch))` with per-batch selection via one-hot encoding.
+1. **Ambient RNA correction with Gamma prior**: Per-gene, per-batch additive background $b\_{g,s\_n} = \exp(\beta\_{g,s\_n})$ captures ambient RNA contamination, mirroring cell2location's $s\_g \cdot g\_{e,g}$ structure. A $\text{Gamma}(1, 100)$ prior pushes $b\_{g,s\_n}$ toward 0.01, keeping background small relative to biological signal. Initialised at `log(0.01)` (prior mean) with per-batch selection via one-hot encoding.
 
-2. **Dispersion regularisation**: Prior $\sqrt{\theta\_{g,s\_n}} \sim \text{Exponential}(\lambda)$ on the dispersion quantity (not overdispersion) penalises large $\theta$, preventing the NB from collapsing to Poisson during gradient-based training. Inspired by the containment prior of Simpson et al. (2017) as used in cell2location/cell2fate, but placed on the dispersion rather than overdispersion quantity — see comparison above.
+2. **Hierarchical dispersion regularisation**: Prior $1/\sqrt{\theta\_{g,s\_n}} \sim \text{Exponential}(\lambda)$ is a containment prior (Simpson et al. 2017) that penalises small $\theta$ (excessive overdispersion), regularising the NB toward the Poisson baseline during gradient-based training. The data likelihood provides the opposing force, pulling $\theta$ toward values that explain observed count variance. The rate $\lambda$ is learned per batch with a $\text{Gamma}(9, 3)$ hyper-prior (mean 3). Dispersion $\theta = \exp(\phi)$ is initialised at $\lambda^2 = 9$ (equilibrium). As used in cell2location/cell2fate.
 
-3. **Batch-free decoder with separated correction paths**: The decoder $f\_w(z\_n, c\_n)$ receives only categorical covariates $c\_n$ (site, donor, protocol), **not** the batch indicator $s\_n$. This separates batch correction into two structurally different paths: (a) a **constrained additive** path ($b\_{g,s\_n}$) for per-sample ambient RNA, and (b) a **flexible multiplicative** path through categorical covariates in the decoder for systematic differences between donors, protocols, or sites (e.g. PCR bias, RT efficiency, 10x chemistry versions). In standard scVI, the decoder handles all batch effects through a single flexible path, which can absorb biological variation. The separation is most beneficial when batches have high within-batch cell type diversity (e.g. whole-embryo samples), because the additive background can be cleanly identified as the baseline signal shared across all cells in a batch. Batch-specific dispersion $\theta\_{g,s\_n}$ provides a third correction path for per-batch variance differences.
+3. **Batch-free decoder with separated correction paths**: The decoder $f\_w(z\_n, c\_n)$ receives only categorical covariates $c\_n$ (site, donor, protocol), **not** the batch indicator $s\_n$. This separates batch correction into structurally different paths: (a) a **constrained additive** path ($b\_{g,s\_n}$ with Gamma prior) for per-sample ambient RNA, (b) a **flexible multiplicative** path through categorical covariates in the decoder for systematic differences between donors, protocols, or sites (e.g. PCR bias, RT efficiency, 10x chemistry versions), and (c) batch-specific dispersion $\theta\_{g,s\_n}$ for per-batch variance differences. In standard scVI, the decoder handles all batch effects through a single flexible path, which can absorb biological variation. The separation is most beneficial when batches have high within-batch cell type diversity (e.g. whole-embryo samples), because the additive background can be cleanly identified as the baseline signal shared across all cells in a batch.
 
 4. **Softplus activation**: Because $\rho\_{ng} + b\_{g,s\_n}$ must be non-negative but need not sum to 1 across genes, softmax is replaced with softplus. The library size $\ell\_n$ acts as a true normalisation factor.
 
@@ -157,7 +174,7 @@ This reveals the empirical partition of the latent space: even though concatenat
 
 - **Additivity in non-negative space**: The additive background operates in non-negative space ($b\_{g,s\_n} = \exp(\beta\_{g,s\_n})$), reflecting the ambient RNA correction mechanism. Without empty droplets data, the additive component can learn the minimal expression of each gene across cells — for many genes this reflects ambient levels, but for ubiquitously expressed genes it captures genuine baseline expression. The additive mechanism therefore works best when individual batches are composed of diverse cell types.
 
-- **Regularised overdispersion alone likely helps**: Overdispersion regularisation prevents the NB from collapsing to Poisson during training, keeping the likelihood appropriately "loose" so the decoder captures genuine biological signal rather than overfitting individual count values. This likely contributes to improved sensitivity, but needs more systematic testing.
+- **Regularised overdispersion alone likely helps**: The containment prior on overdispersion regularises the NB toward the Poisson baseline, preventing the model from absorbing residuals through excessive variance (small $\theta$). This forces the decoder to capture genuine biological signal through its mean structure rather than relying on high overdispersion to explain noise. This likely contributes to improved sensitivity, but needs more systematic testing.
 
 ## Installation
 
@@ -220,7 +237,7 @@ latent = model.get_latent_representation()
 
 ### Default configuration
 
-The model now uses **GammaPoisson likelihood** (cell2location-style) by default, which provides more flexible count modelling than NB and a regularised overdispersion prior to prevent overfitting. The default dispersion is `"gene-batch"`, providing per-gene, per-batch inverse dispersion parameters.
+The model now uses **GammaPoisson likelihood** (cell2location-style, mathematically equivalent to NB) by default with a containment prior on overdispersion to regularise the model. The default dispersion is `"gene-batch"`, providing per-gene, per-batch inverse dispersion parameters.
 
 ## Release notes
 

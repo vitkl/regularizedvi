@@ -28,7 +28,7 @@ from scvi.module.base import (
     LossOutput,
     auto_move_data,
 )
-from torch.distributions import Exponential
+from torch.distributions import Exponential, Normal
 from torch.nn.functional import one_hot
 
 if TYPE_CHECKING:
@@ -85,10 +85,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
       ``b_{g,s_n} = exp(beta_{g,s_n})``, mirroring cell2location's
       ``(g_fg + b_eg) * h_e`` structure :cite:p:`Kleshchevnikov22`
       and cell2fate's Bayesian modelling principles :cite:p:`Aivazidis25`.
-    - **Dispersion regularisation**: Exponential prior on the dispersion
-      quantity ``sqrt(exp(phi_g))`` (not overdispersion ``1/sqrt(exp(phi_g))``),
-      penalising large theta to prevent NB collapse to Poisson during
-      gradient-based training. Inspired by cell2location's containment prior
+    - **Dispersion regularisation**: Exponential containment prior on
+      ``1/sqrt(theta)`` regularising against excessive overdispersion
       :cite:p:`Simpson17` :cite:p:`Kleshchevnikov22` :cite:p:`Aivazidis25`.
     - **Batch-free decoder**: batch correction through additive background
       and categorical covariates rather than decoder conditioning.
@@ -166,17 +164,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         If False, remove batch info from decoder. Batch correction handled
         through additive background and categorical covariates.
     regularise_dispersion
-        If True, add Exponential prior on dispersion pushing NB toward Poisson.
+        If True, add Exponential containment prior on ``1/sqrt(theta)``.
     regularise_dispersion_prior
-        Rate parameter for the Exponential prior on sqrt(exp(phi_g)).
-    likelihood_distribution
-        Which distribution implementation to use for the reconstruction loss.
-        ``"nb"`` uses scvi-tools ``NegativeBinomial(mu, theta)`` with Exp prior
-        on ``sqrt(theta)`` (pushes theta small).
-        ``"gamma_poisson"`` uses Pyro ``GammaPoisson(concentration=theta, rate=theta/mu)``
-        with Exp prior on ``1/sqrt(theta)`` (pushes theta large, cell2location direction).
-        Both are mathematically equivalent NB distributions; the difference is only
-        in the prior direction on the dispersion parameter.
+        Rate parameter for the Exponential containment prior on ``1/sqrt(theta)``.
     dispersion_hyper_prior_alpha
         Alpha parameter for the Gamma hyper-prior on the learned dispersion
         rate parameter. Default ``9.0`` (from cell2location).
@@ -229,7 +219,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         use_batch_in_decoder: bool = True,
         regularise_dispersion: bool = False,
         regularise_dispersion_prior: float = 3.0,
-        likelihood_distribution: Literal["nb", "gamma_poisson"] = "gamma_poisson",
         dispersion_hyper_prior_alpha: float = 9.0,
         dispersion_hyper_prior_beta: float = 3.0,
         additive_bg_prior_alpha: float = 1.0,
@@ -254,7 +243,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.use_batch_in_decoder = use_batch_in_decoder
         self.regularise_dispersion = regularise_dispersion
         self.regularise_dispersion_prior = regularise_dispersion_prior
-        self.likelihood_distribution = likelihood_distribution
         self.dispersion_hyper_prior_alpha = dispersion_hyper_prior_alpha
         self.dispersion_hyper_prior_beta = dispersion_hyper_prior_beta
         self.additive_bg_prior_alpha = additive_bg_prior_alpha
@@ -271,15 +259,11 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 log_vars = log_vars * library_log_vars_weight
             self.register_buffer("library_log_vars", log_vars)
 
-        # Initialize px_r at prior mean when regularisation is active.
-        # For gamma_poisson: Exp(rate) prior on 1/sqrt(theta) → theta = rate² at equilibrium.
-        # For NB: Exp(rate) prior on sqrt(theta) → theta = 1/rate² at equilibrium.
+        # Initialize px_r at prior equilibrium when regularisation is active.
+        # Containment prior: Exp(rate) on 1/sqrt(theta) → theta = rate² at equilibrium.
         if self.regularise_dispersion:
             _rate = regularise_dispersion_prior
-            if self.likelihood_distribution == "gamma_poisson":
-                _px_r_init = math.log(_rate**2)  # log(9) ≈ 2.197
-            else:
-                _px_r_init = -math.log(_rate**2)  # -log(9) ≈ -2.197
+            _px_r_init = math.log(_rate**2)  # log(9) ≈ 2.197
         else:
             _px_r_init = None
 
@@ -576,12 +560,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         transform_batch: torch.Tensor | None = None,
     ) -> dict[str, Distribution | None]:
         """Run the generative process."""
-        from scvi.distributions import (
-            NegativeBinomial,
-            Normal,
-            Poisson,
-            ZeroInflatedNegativeBinomial,
-        )
         from torch.nn.functional import linear
 
         # Likelihood distribution
@@ -657,23 +635,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         px_r = torch.exp(px_r)
 
-        if self.likelihood_distribution == "gamma_poisson":
-            # Pyro GammaPoisson: concentration=theta, rate=theta/mu
-            # Mathematically identical to scvi-tools NB(mu, theta)
-            px = GammaPoissonWithScale(concentration=px_r, rate=px_r / px_rate, scale=px_scale)
-        elif self.gene_likelihood == "zinb":
-            px = ZeroInflatedNegativeBinomial(
-                mu=px_rate,
-                theta=px_r,
-                zi_logits=px_dropout,
-                scale=px_scale,
-            )
-        elif self.gene_likelihood == "nb":
-            px = NegativeBinomial(mu=px_rate, theta=px_r, scale=px_scale)
-        elif self.gene_likelihood == "poisson":
-            px = Poisson(rate=px_rate, scale=px_scale)
-        elif self.gene_likelihood == "normal":
-            px = Normal(px_rate, px_r, normal_mu=px_scale)
+        # GammaPoisson (= NB): concentration=theta, rate=theta/mu
+        px = GammaPoissonWithScale(concentration=px_r, rate=px_r / px_rate, scale=px_scale)
 
         # Priors
         if self.use_observed_lib_size:
@@ -755,12 +718,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 # learned_rate: (1,), px_r: (n_input,)
                 rate = learned_rate.expand_as(self.px_r)
 
-            if self.likelihood_distribution == "gamma_poisson":
-                # Cell2location direction: Exp on 1/sqrt(theta) → pushes theta large
-                px_r_transformed = torch.exp(-self.px_r).pow(0.5)
-            else:
-                # Current direction: Exp on sqrt(theta) → pushes theta small
-                px_r_transformed = torch.exp(self.px_r).pow(0.5)
+            # Containment prior: Exp on 1/sqrt(theta) (cell2location direction)
+            px_r_transformed = torch.exp(-self.px_r).pow(0.5)
             neg_log_prior = -Exponential(rate).log_prob(px_r_transformed).sum()
             loss = loss + (neg_log_prior + neg_log_hyper_prior) / n_obs
 

@@ -33,7 +33,6 @@ from regularizedvi._constants import (
     DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
     DEFAULT_LIBRARY_N_HIDDEN,
-    DEFAULT_LIKELIHOOD_DISTRIBUTION,
     DEFAULT_REGION_FACTORS_PRIOR_ALPHA,
     DEFAULT_REGION_FACTORS_PRIOR_BETA,
     DEFAULT_REGULARISE_DISPERSION,
@@ -102,9 +101,7 @@ class RegularizedMultimodalVI(
     regularise_dispersion
         Enable dispersion regularization. Default True.
     regularise_dispersion_prior
-        Initialization for Exponential rate. Default 3.0.
-    likelihood_distribution
-        ``"gamma_poisson"`` (default) or ``"nb"``.
+        Initialization for Exponential containment prior rate. Default 3.0.
     dispersion_hyper_prior_alpha
         Gamma hyper-prior alpha. Default 9.0.
     dispersion_hyper_prior_beta
@@ -147,7 +144,6 @@ class RegularizedMultimodalVI(
         region_factors_prior_beta: float = DEFAULT_REGION_FACTORS_PRIOR_BETA,
         regularise_dispersion: bool = DEFAULT_REGULARISE_DISPERSION,
         regularise_dispersion_prior: float = DEFAULT_REGULARISE_DISPERSION_PRIOR,
-        likelihood_distribution: Literal["nb", "gamma_poisson"] = DEFAULT_LIKELIHOOD_DISTRIBUTION,
         dispersion_hyper_prior_alpha: float = DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
         dispersion_hyper_prior_beta: float = DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
         additive_bg_prior_alpha: float = DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
@@ -188,7 +184,6 @@ class RegularizedMultimodalVI(
             "region_factors_prior_beta": region_factors_prior_beta,
             "regularise_dispersion": regularise_dispersion,
             "regularise_dispersion_prior": regularise_dispersion_prior,
-            "likelihood_distribution": likelihood_distribution,
             "dispersion_hyper_prior_alpha": dispersion_hyper_prior_alpha,
             "dispersion_hyper_prior_beta": dispersion_hyper_prior_beta,
             "additive_bg_prior_alpha": additive_bg_prior_alpha,

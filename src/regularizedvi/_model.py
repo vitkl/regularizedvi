@@ -50,7 +50,6 @@ from regularizedvi._constants import (
     DEFAULT_GENE_LIKELIHOOD,
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
     DEFAULT_LIBRARY_N_HIDDEN,
-    DEFAULT_LIKELIHOOD_DISTRIBUTION,
     DEFAULT_REGULARISE_DISPERSION,
     DEFAULT_REGULARISE_DISPERSION_PRIOR,
     DEFAULT_SCALE_ACTIVATION,
@@ -133,12 +132,7 @@ class AmbientRegularizedSCVI(
     regularise_dispersion
         Enable overdispersion regularisation. Default ``True``.
     regularise_dispersion_prior
-        Rate for Exponential prior on dispersion. Default ``3.0``.
-    likelihood_distribution
-        Distribution implementation for reconstruction loss.
-        ``"nb"`` (default): scvi-tools NegativeBinomial with Exp prior on sqrt(theta).
-        ``"gamma_poisson"``: Pyro GammaPoisson with Exp prior on 1/sqrt(theta)
-        (cell2location direction, pushes theta toward Poisson).
+        Rate for Exponential containment prior on ``1/sqrt(theta)``. Default ``3.0``.
     use_batch_norm
         Where to use BatchNorm. Default ``"none"``.
     use_layer_norm
@@ -192,7 +186,6 @@ class AmbientRegularizedSCVI(
         use_batch_in_decoder: bool = DEFAULT_USE_BATCH_IN_DECODER,
         regularise_dispersion: bool = DEFAULT_REGULARISE_DISPERSION,
         regularise_dispersion_prior: float = DEFAULT_REGULARISE_DISPERSION_PRIOR,
-        likelihood_distribution: Literal["nb", "gamma_poisson"] = DEFAULT_LIKELIHOOD_DISTRIBUTION,
         dispersion_hyper_prior_alpha: float = DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
         dispersion_hyper_prior_beta: float = DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
         additive_bg_prior_alpha: float = DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
@@ -220,7 +213,6 @@ class AmbientRegularizedSCVI(
             "use_batch_in_decoder": use_batch_in_decoder,
             "regularise_dispersion": regularise_dispersion,
             "regularise_dispersion_prior": regularise_dispersion_prior,
-            "likelihood_distribution": likelihood_distribution,
             "dispersion_hyper_prior_alpha": dispersion_hyper_prior_alpha,
             "dispersion_hyper_prior_beta": dispersion_hyper_prior_beta,
             "additive_bg_prior_alpha": additive_bg_prior_alpha,
@@ -232,7 +224,6 @@ class AmbientRegularizedSCVI(
             f"n_hidden: {n_hidden}, n_latent: {n_latent}, n_layers: {n_layers}, "
             f"dropout_rate: {dropout_rate}, dispersion: {dispersion}, "
             f"gene_likelihood: {gene_likelihood}, latent_distribution: {latent_distribution}, "
-            f"likelihood_distribution: {likelihood_distribution}, "
             f"use_additive_background: {use_additive_background}, "
             f"use_batch_in_decoder: {use_batch_in_decoder}, "
             f"regularise_dispersion: {regularise_dispersion}."
@@ -287,7 +278,6 @@ class AmbientRegularizedSCVI(
                 use_batch_in_decoder=use_batch_in_decoder,
                 regularise_dispersion=regularise_dispersion,
                 regularise_dispersion_prior=regularise_dispersion_prior,
-                likelihood_distribution=likelihood_distribution,
                 dispersion_hyper_prior_alpha=dispersion_hyper_prior_alpha,
                 dispersion_hyper_prior_beta=dispersion_hyper_prior_beta,
                 additive_bg_prior_alpha=additive_bg_prior_alpha,
