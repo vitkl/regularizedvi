@@ -69,7 +69,7 @@ jobs:
         with:
           python-version: ${{ matrix.env.python }}
       - name: create hatch environment
-        run: uvx hatch env create ${{ matrix.env.name }}
+        run: uvx --with "virtualenv<20.27" hatch env create ${{ matrix.env.name }}
       - name: list all all installed package versions
         run: uvx hatch run ${{ matrix.env.name }}:uv pip list
       - name: run tests using hatch
