@@ -1,6 +1,7 @@
 """Tests for AmbientRegularizedSCVI and RegularizedMultimodalVI models."""
 
 import numpy as np
+import pytest
 import torch
 
 import regularizedvi
@@ -248,6 +249,133 @@ class TestRegularizedVAEModule:
         # Regularised model should have learnable prior rate parameter
         assert hasattr(model_reg.module, "dispersion_prior_rate_raw")
         assert isinstance(model_reg.module.dispersion_prior_rate_raw, torch.nn.Parameter)
+
+
+class TestParameterInitialization:
+    """Tests that learnable parameters are initialized at their prior means."""
+
+    # --- RNA-only model (AmbientRegularizedSCVI) ---
+
+    def test_px_r_init_at_prior_mean_gamma_poisson(self, adata):
+        """px_r should be initialized near log(rate^2) for gamma_poisson."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        # Default: gamma_poisson, regularise_dispersion_prior=3.0
+        # Expected: px_r ≈ log(9) = 2.197, theta = exp(px_r) ≈ 9.0
+        theta = torch.exp(model.module.px_r).detach()
+        assert theta.mean().item() == pytest.approx(9.0, rel=0.2)
+        # Noise scale: std of px_r should be ~0.1
+        assert model.module.px_r.detach().std().item() == pytest.approx(0.1, abs=0.05)
+
+    def test_px_r_init_at_prior_mean_nb(self, adata):
+        """px_r should be initialized near -log(rate^2) for NB."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, likelihood_distribution="nb")
+        # For NB: theta = 1/rate^2 = 1/9
+        theta = torch.exp(model.module.px_r).detach()
+        assert theta.mean().item() == pytest.approx(1.0 / 9.0, rel=0.2)
+
+    def test_px_r_init_no_regularisation(self, adata):
+        """Without regularisation, px_r uses standard randn init."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, regularise_dispersion=False)
+        # randn init: theta = exp(randn) has median ~1.0
+        theta = torch.exp(model.module.px_r).detach()
+        assert theta.median().item() < 3.0
+
+    def test_additive_background_init_at_prior_mean(self, adata):
+        """Additive background should be initialized near Gamma(1,100) mean=0.01."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        bg = torch.exp(model.module.additive_background).detach()
+        assert bg.mean().item() == pytest.approx(0.01, rel=0.2)
+        # Noise is very small
+        assert model.module.additive_background.detach().std().item() < 0.05
+
+    def test_dispersion_prior_rate_init(self, adata):
+        """Dispersion prior rate should initialize at exactly regularise_dispersion_prior."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        rate = torch.nn.functional.softplus(model.module.dispersion_prior_rate_raw).detach()
+        assert rate.mean().item() == pytest.approx(3.0, rel=0.01)
+
+    # --- Multimodal model (RegularizedMultimodalVI) ---
+
+    def test_px_r_init_multimodal_gamma_poisson(self, mdata):
+        """Multimodal px_r should be initialized near log(rate^2) per modality."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        for name in model.module.modality_names:
+            theta = torch.exp(model.module.px_r[name]).detach()
+            assert theta.mean().item() == pytest.approx(9.0, rel=0.2), f"Failed for {name}"
+
+    def test_px_r_init_multimodal_nb(self, mdata):
+        """Multimodal px_r with NB likelihood: theta ≈ 1/9."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, likelihood_distribution="nb")
+        for name in model.module.modality_names:
+            theta = torch.exp(model.module.px_r[name]).detach()
+            assert theta.mean().item() == pytest.approx(1.0 / 9.0, rel=0.2), f"Failed for {name}"
+
+    def test_additive_background_init_multimodal(self, mdata):
+        """Multimodal additive background should be initialized near Gamma(1,100) mean=0.01."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"]
+        )
+        bg = torch.exp(model.module.additive_background["rna"]).detach()
+        assert bg.mean().item() == pytest.approx(0.01, rel=0.2)
+
+    def test_region_factors_init_at_prior_mean(self, mdata):
+        """Region factors softplus(0)/0.7 ≈ 0.99 should match Gamma(200,200) mean=1.0."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata, n_hidden=16, n_latent=4, region_factors_modalities=["atac"]
+        )
+        rf = torch.nn.functional.softplus(model.module.region_factors["atac"]).detach() / 0.7
+        assert rf.mean().item() == pytest.approx(1.0, rel=0.02)
+
+    def test_dispersion_prior_rate_init_multimodal(self, mdata):
+        """Multimodal dispersion prior rate should initialize at 3.0."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        for name in model.module.modality_names:
+            rate = torch.nn.functional.softplus(model.module.dispersion_prior_rate_raw[name]).detach()
+            assert rate.mean().item() == pytest.approx(3.0, rel=0.01), f"Failed for {name}"
+
+    def test_px_r_init_custom_prior(self, adata):
+        """px_r initialization adapts to custom regularise_dispersion_prior."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, regularise_dispersion_prior=5.0)
+        # rate=5 → theta = 25 → px_r ≈ log(25) = 3.219
+        theta = torch.exp(model.module.px_r).detach()
+        assert theta.mean().item() == pytest.approx(25.0, rel=0.2)
+
+    def test_additive_bg_prior_stored(self, adata):
+        """Additive background prior hyperparameters should be stored on module."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        assert model.module.additive_bg_prior_alpha == 1.0
+        assert model.module.additive_bg_prior_beta == 100.0
+
+    def test_additive_bg_custom_prior(self, adata):
+        """Additive background init adapts to custom prior."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata, n_hidden=16, n_latent=4, additive_bg_prior_alpha=2.0, additive_bg_prior_beta=50.0
+        )
+        # Gamma(2, 50) → mean = 0.04
+        bg = torch.exp(model.module.additive_background).detach()
+        assert bg.mean().item() == pytest.approx(0.04, rel=0.2)
+
+    def test_additive_bg_prior_multimodal_stored(self, mdata):
+        """Multimodal additive background prior hyperparameters should be stored."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"]
+        )
+        assert model.module.additive_bg_prior_alpha == 1.0
+        assert model.module.additive_bg_prior_beta == 100.0
 
 
 class TestGammaPoissonMode:

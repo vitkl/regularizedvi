@@ -14,6 +14,7 @@ Modified from scvi-tools VAE (scvi.module._vae) with the following changes:
 from __future__ import annotations
 
 import logging
+import math
 import warnings
 from typing import TYPE_CHECKING
 
@@ -183,6 +184,12 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         Beta parameter for the Gamma hyper-prior on the learned dispersion
         rate parameter. Default ``3.0`` (from cell2location).
         Together with alpha, gives Gamma(9, 3) with mean=3.0.
+    additive_bg_prior_alpha
+        Alpha parameter for the Gamma prior on ``exp(additive_background)``.
+        Default ``1.0`` (cell2location-style ``gene_add_mean_hyp_prior``).
+    additive_bg_prior_beta
+        Beta parameter for the Gamma prior. Default ``100.0``.
+        Together with alpha, gives Gamma(1, 100) with mean=0.01.
     """
 
     def __init__(
@@ -225,6 +232,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         likelihood_distribution: Literal["nb", "gamma_poisson"] = "gamma_poisson",
         dispersion_hyper_prior_alpha: float = 9.0,
         dispersion_hyper_prior_beta: float = 3.0,
+        additive_bg_prior_alpha: float = 1.0,
+        additive_bg_prior_beta: float = 100.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -248,6 +257,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.likelihood_distribution = likelihood_distribution
         self.dispersion_hyper_prior_alpha = dispersion_hyper_prior_alpha
         self.dispersion_hyper_prior_beta = dispersion_hyper_prior_beta
+        self.additive_bg_prior_alpha = additive_bg_prior_alpha
+        self.additive_bg_prior_beta = additive_bg_prior_beta
 
         if not self.use_observed_lib_size:
             if library_log_means is None or library_log_vars is None:
@@ -260,12 +271,37 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 log_vars = log_vars * library_log_vars_weight
             self.register_buffer("library_log_vars", log_vars)
 
+        # Initialize px_r at prior mean when regularisation is active.
+        # For gamma_poisson: Exp(rate) prior on 1/sqrt(theta) → theta = rate² at equilibrium.
+        # For NB: Exp(rate) prior on sqrt(theta) → theta = 1/rate² at equilibrium.
+        if self.regularise_dispersion:
+            _rate = regularise_dispersion_prior
+            if self.likelihood_distribution == "gamma_poisson":
+                _px_r_init = math.log(_rate**2)  # log(9) ≈ 2.197
+            else:
+                _px_r_init = -math.log(_rate**2)  # -log(9) ≈ -2.197
+        else:
+            _px_r_init = None
+
         if self.dispersion == "gene":
-            self.px_r = torch.nn.Parameter(torch.randn(n_input))
+            if _px_r_init is not None:
+                self.px_r = torch.nn.Parameter(torch.full((n_input,), _px_r_init) + 0.1 * torch.randn(n_input))
+            else:
+                self.px_r = torch.nn.Parameter(torch.randn(n_input))
         elif self.dispersion == "gene-batch":
-            self.px_r = torch.nn.Parameter(torch.randn(n_input, n_batch))
+            if _px_r_init is not None:
+                self.px_r = torch.nn.Parameter(
+                    torch.full((n_input, n_batch), _px_r_init) + 0.1 * torch.randn(n_input, n_batch)
+                )
+            else:
+                self.px_r = torch.nn.Parameter(torch.randn(n_input, n_batch))
         elif self.dispersion == "gene-label":
-            self.px_r = torch.nn.Parameter(torch.randn(n_input, n_labels))
+            if _px_r_init is not None:
+                self.px_r = torch.nn.Parameter(
+                    torch.full((n_input, n_labels), _px_r_init) + 0.1 * torch.randn(n_input, n_labels)
+                )
+            else:
+                self.px_r = torch.nn.Parameter(torch.randn(n_input, n_labels))
         elif self.dispersion == "gene-cell":
             pass
         else:
@@ -286,8 +322,13 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.unsqueeze(0).clone())
 
         # Additive background: per-gene, per-batch learnable parameter
+        # Initialized at log(prior_mean) = log(alpha/beta) so exp(init) matches prior mean.
+        # Default Gamma(1, 100) → mean = 0.01, small relative to px_scale.
         if self.use_additive_background:
-            self.additive_background = torch.nn.Parameter(torch.randn(n_input, n_batch))
+            _bg_init = math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
+            self.additive_background = torch.nn.Parameter(
+                torch.full((n_input, n_batch), _bg_init) + 0.01 * torch.randn(n_input, n_batch)
+            )
 
         self.batch_representation = batch_representation
         if self.batch_representation == "embedding":
@@ -722,6 +763,18 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 px_r_transformed = torch.exp(self.px_r).pow(0.5)
             neg_log_prior = -Exponential(rate).log_prob(px_r_transformed).sum()
             loss = loss + (neg_log_prior + neg_log_hyper_prior) / n_obs
+
+        # Additive background Gamma prior (cell2location-style s_g_gene_add).
+        # Gamma(alpha, beta) on exp(additive_background) pushes background small.
+        if self.use_additive_background:
+            from torch.distributions import Gamma
+
+            n_obs = x.shape[0]
+            bg_transformed = torch.exp(self.additive_background)
+            neg_log_bg_prior = (
+                -Gamma(self.additive_bg_prior_alpha, self.additive_bg_prior_beta).log_prob(bg_transformed).sum()
+            )
+            loss = loss + neg_log_bg_prior / n_obs
 
         # a payload to be used during autotune
         if self.extra_payload_autotune:

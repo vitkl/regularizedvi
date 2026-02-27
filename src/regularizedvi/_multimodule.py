@@ -18,6 +18,7 @@ Supports three latent combination strategies:
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -126,6 +127,11 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         If False, batch-free decoder.
     additive_background_modalities
         List of modality names that get additive ambient background.
+    additive_bg_prior_alpha
+        Alpha for Gamma prior on ``exp(additive_background)``. Default ``1.0``.
+    additive_bg_prior_beta
+        Beta for Gamma prior on ``exp(additive_background)``. Default ``100.0``.
+        Together gives Gamma(1, 100) with mean=0.01 (cell2location-style).
     region_factors_modalities
         List of modality names that get per-feature region factors.
     regularise_dispersion
@@ -193,6 +199,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         n_cats_per_scaling_cov: list[int] | None = None,
         region_factors_prior_alpha: float = 200.0,
         region_factors_prior_beta: float = 200.0,
+        additive_bg_prior_alpha: float = 1.0,
+        additive_bg_prior_beta: float = 100.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -228,6 +236,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.n_total_scaling_cats = sum(self.n_cats_per_scaling_cov) if self.n_cats_per_scaling_cov else 0
         self.region_factors_prior_alpha = region_factors_prior_alpha
         self.region_factors_prior_beta = region_factors_prior_beta
+        self.additive_bg_prior_alpha = additive_bg_prior_alpha
+        self.additive_bg_prior_beta = additive_bg_prior_beta
 
         additive_background_modalities = additive_background_modalities or []
         region_factors_modalities = region_factors_modalities or []
@@ -374,16 +384,41 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 self.register_buffer(f"library_log_vars_{name}", vars_)
 
         # ---- Per-modality dispersion parameters ----
+        # Initialize px_r at prior mean when regularisation is active.
+        # For gamma_poisson: Exp(rate) prior on 1/sqrt(theta) → theta = rate² at equilibrium.
+        # For NB: Exp(rate) prior on sqrt(theta) → theta = 1/rate² at equilibrium.
+        if self.regularise_dispersion:
+            _rate = regularise_dispersion_prior
+            if self.likelihood_distribution == "gamma_poisson":
+                _px_r_init = math.log(_rate**2)  # log(9) ≈ 2.197
+            else:
+                _px_r_init = -math.log(_rate**2)  # -log(9) ≈ -2.197
+        else:
+            _px_r_init = None
+
         self.px_r = nn.ParameterDict()
         for name in self.modality_names:
             n_feat = n_input_per_modality[name]
             disp = dispersion_dict[name]
             if disp in ("gene", "region"):
-                self.px_r[name] = nn.Parameter(torch.randn(n_feat))
+                if _px_r_init is not None:
+                    self.px_r[name] = nn.Parameter(torch.full((n_feat,), _px_r_init) + 0.1 * torch.randn(n_feat))
+                else:
+                    self.px_r[name] = nn.Parameter(torch.randn(n_feat))
             elif disp in ("gene-batch", "region-batch"):
-                self.px_r[name] = nn.Parameter(torch.randn(n_feat, n_batch))
+                if _px_r_init is not None:
+                    self.px_r[name] = nn.Parameter(
+                        torch.full((n_feat, n_batch), _px_r_init) + 0.1 * torch.randn(n_feat, n_batch)
+                    )
+                else:
+                    self.px_r[name] = nn.Parameter(torch.randn(n_feat, n_batch))
             elif disp in ("gene-label", "region-label"):
-                self.px_r[name] = nn.Parameter(torch.randn(n_feat, n_labels))
+                if _px_r_init is not None:
+                    self.px_r[name] = nn.Parameter(
+                        torch.full((n_feat, n_labels), _px_r_init) + 0.1 * torch.randn(n_feat, n_labels)
+                    )
+                else:
+                    self.px_r[name] = nn.Parameter(torch.randn(n_feat, n_labels))
 
         # ---- Learnable dispersion prior rates (per modality) ----
         if self.regularise_dispersion:
@@ -399,10 +434,15 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     self.dispersion_prior_rate_raw[name] = nn.Parameter(_raw_init.unsqueeze(0).clone())
 
         # ---- Additive background (per selected modality) ----
+        # Initialized at log(prior_mean) = log(alpha/beta) so exp(init) matches Gamma prior mean.
+        # Default Gamma(1, 100) → mean = 0.01, small relative to px_scale.
+        _bg_init = math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
         self.additive_background = nn.ParameterDict()
         for name in additive_background_modalities:
             n_feat = n_input_per_modality[name]
-            self.additive_background[name] = nn.Parameter(torch.randn(n_feat, n_batch))
+            self.additive_background[name] = nn.Parameter(
+                torch.full((n_feat, n_batch), _bg_init) + 0.01 * torch.randn(n_feat, n_batch)
+            )
 
         # ---- Region factors (cell2location-style per-covariate scaling) ----
         # Shape: (n_scaling_rows, n_features) where n_scaling_rows is either:
@@ -899,6 +939,20 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 )
                 rf_penalty = rf_penalty + neg_log_prior
             loss = loss + rf_penalty / n_obs
+
+        # ---- Additive background Gamma prior (cell2location-style s_g_gene_add) ----
+        if self.additive_background_modalities:
+            n_obs = recon_loss.shape[0]
+            bg_penalty = torch.tensor(0.0, device=recon_loss.device)
+            for name in self.additive_background_modalities:
+                if name not in self.additive_background:
+                    continue
+                bg_transformed = torch.exp(self.additive_background[name])
+                neg_log_prior = (
+                    -Gamma(self.additive_bg_prior_alpha, self.additive_bg_prior_beta).log_prob(bg_transformed).sum()
+                )
+                bg_penalty = bg_penalty + neg_log_prior
+            loss = loss + bg_penalty / n_obs
 
         return LossOutput(
             loss=loss,
