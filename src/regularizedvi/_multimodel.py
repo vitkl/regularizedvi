@@ -396,3 +396,190 @@ class RegularizedMultimodalVI(
             latent.append(z.cpu().numpy())
 
         return np.concatenate(latent, axis=0)
+
+    @torch.no_grad()
+    def get_modality_attribution(
+        self,
+        adata=None,
+        indices=None,
+        batch_size: int | None = None,
+        eps: float = 1e-3,
+    ) -> dict[str, dict[str, np.ndarray]]:
+        """Compute decoder Jacobian attribution per modality.
+
+        For each modality's decoder, computes the mean absolute Jacobian
+        ``|d(px_rate)/d(z)|`` per latent dimension via finite differences,
+        revealing which Z dimensions each decoder actually uses. This allows
+        creating modality-specific views of the shared latent space.
+
+        Uses forward finite differences with ``n_latent`` decoder forward passes
+        per modality (e.g. 192 passes for 192 latent dims).
+
+        Parameters
+        ----------
+        adata
+            MuData to use. Defaults to the MuData used to initialize the model.
+        indices
+            Indices of cells to use.
+        batch_size
+            Batch size for data loading.
+        eps
+            Finite difference step size for Jacobian approximation.
+
+        Returns
+        -------
+        dict mapping modality names to dicts with keys:
+            ``'attribution'``: np.ndarray (n_cells, n_latent) — mean |Jacobian| per dim
+            ``'weighted_z'``: np.ndarray (n_cells, n_latent) — z * attribution
+        """
+        from torch.nn.functional import one_hot
+
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+
+        self.module.eval()
+        n_latent = self.module.total_latent_dim
+
+        all_z = []
+        importances = {name: [] for name in self.module.modality_names}
+
+        for tensors in scdl:
+            # Run inference to get z (posterior means)
+            inference_inputs = self.module._get_inference_input(tensors)
+            outputs = self.module.inference(**inference_inputs)
+
+            # Use posterior means for stable Jacobian
+            qz = outputs["qz_per_modality"]
+            if self.module.latent_mode == "concatenation":
+                z_means = []
+                for name in self.module.modality_names:
+                    if name in qz:
+                        z_means.append(qz[name].loc)
+                    else:
+                        z_means.append(
+                            torch.zeros(
+                                outputs["z"].shape[0],
+                                self.module.n_latent_dict[name],
+                                device=outputs["z"].device,
+                            )
+                        )
+                z = torch.cat(z_means, dim=-1)
+            elif self.module.latent_mode == "single_encoder":
+                z = qz["_joint"].loc
+            else:
+                z = outputs["z"]
+
+            all_z.append(z.cpu().numpy())
+
+            library = outputs["library"]
+            batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
+            cont_covs = tensors.get(REGISTRY_KEYS.CONT_COVS_KEY)
+            cat_covs = tensors.get(REGISTRY_KEYS.CAT_COVS_KEY)
+
+            # Prepare categorical inputs (independent of z)
+            if cat_covs is not None:
+                categorical_input = torch.split(cat_covs, 1, dim=1)
+            else:
+                categorical_input = ()
+
+            def _make_decode_rate_fn(
+                module,
+                name,
+                disp,
+                lib,
+                batch_index,
+                categorical_input,
+                bg,
+                cont_covs,
+            ):
+                """Create a closure that computes decoder rate for a given z."""
+
+                def _decode_rate(z_input):
+                    if cont_covs is None:
+                        dec_input = z_input
+                    elif z_input.dim() != cont_covs.dim():
+                        dec_input = torch.cat(
+                            [z_input, cont_covs.unsqueeze(0).expand(z_input.size(0), -1, -1)],
+                            dim=-1,
+                        )
+                    else:
+                        dec_input = torch.cat([z_input, cont_covs], dim=-1)
+
+                    if module.use_batch_in_decoder:
+                        _, _, px_rate, _ = module.decoders[name](
+                            disp,
+                            dec_input,
+                            lib,
+                            batch_index,
+                            *categorical_input,
+                            additive_background=bg,
+                        )
+                    else:
+                        _, _, px_rate, _ = module.decoders[name](
+                            disp,
+                            dec_input,
+                            lib,
+                            *categorical_input,
+                            additive_background=bg,
+                        )
+
+                    if name in module.region_factors:
+                        px_rate = px_rate * torch.sigmoid(module.region_factors[name])
+
+                    return px_rate
+
+                return _decode_rate
+
+            for name in self.module.modality_names:
+                if name not in library:
+                    continue
+
+                disp = self.module.dispersion_dict[name]
+                lib = library[name]
+
+                # Additive background (independent of z)
+                bg = None
+                if name in self.module.additive_background:
+                    bg = torch.matmul(
+                        one_hot(batch_index.squeeze(-1), self.module.n_batch).float(),
+                        torch.exp(self.module.additive_background[name]).T,
+                    )
+
+                decode_rate = _make_decode_rate_fn(
+                    self.module,
+                    name,
+                    disp,
+                    lib,
+                    batch_index,
+                    categorical_input,
+                    bg,
+                    cont_covs,
+                )
+
+                # Baseline decoder rate
+                base_rate = decode_rate(z)
+
+                # Jacobian column-wise via finite differences
+                importance = torch.zeros(z.shape[0], n_latent, device=z.device)
+                for j in range(n_latent):
+                    z_perturbed = z.clone()
+                    z_perturbed[:, j] += eps
+                    rate_perturbed = decode_rate(z_perturbed)
+                    jac_col = (rate_perturbed - base_rate) / eps
+                    importance[:, j] = jac_col.abs().mean(dim=-1)
+
+                importances[name].append(importance.cpu().numpy())
+
+        z_all = np.concatenate(all_z, axis=0)
+
+        result = {}
+        for name in self.module.modality_names:
+            if importances[name]:
+                attr = np.concatenate(importances[name], axis=0)
+                result[name] = {
+                    "attribution": attr,
+                    "weighted_z": z_all * attr,
+                }
+
+        return result

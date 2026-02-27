@@ -719,6 +719,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         px_dict = generative_outputs["px"]
         pz = generative_outputs["pz"]
         pl_dict = generative_outputs.get("pl", {})
+        z_per_modality = inference_outputs.get("z_per_modality", {})
+
+        extra_metrics = {}
 
         # ---- Reconstruction loss (per modality) ----
         recon_loss = torch.zeros(
@@ -736,6 +739,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             # Mask: zero out loss for cells missing this modality
             if name in masks:
                 rl = rl * masks[name].float()
+            extra_metrics[f"recon_loss_{name}"] = rl.mean().detach()
             recon_loss = recon_loss + rl
 
         # ---- KL divergence on Z ----
@@ -758,6 +762,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 kl_mod = kld(qz, prior).sum(dim=-1)
                 if name in masks:
                     kl_mod = kl_mod * masks[name].float()
+                extra_metrics[f"kl_z_{name}"] = kl_mod.mean().detach()
                 kl_z = kl_z + kl_mod
         elif self.latent_mode == "weighted_mean":
             # KL on the mixed z (approximate): penalise each modality's encoder
@@ -773,7 +778,14 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 kl_mod = kld(qz, prior).sum(dim=-1)
                 if name in masks:
                     kl_mod = kl_mod * masks[name].float()
+                extra_metrics[f"kl_z_{name}"] = kl_mod.mean().detach()
                 kl_z = kl_z + kl_mod
+
+        # ---- Z variance per modality (latent utilization) ----
+        for name in self.modality_names:
+            if name in z_per_modality:
+                z_mod = z_per_modality[name]
+                extra_metrics[f"z_var_{name}"] = z_mod.var(dim=0).mean().detach()
 
         # ---- KL divergence on library ----
         kl_l = torch.zeros_like(recon_loss)
@@ -832,4 +844,5 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 "kl_divergence_z": kl_z,
                 "kl_divergence_l": kl_l,
             },
+            extra_metrics=extra_metrics,
         )

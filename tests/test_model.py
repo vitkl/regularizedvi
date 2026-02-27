@@ -1,5 +1,6 @@
 """Tests for AmbientRegularizedSCVI and RegularizedMultimodalVI models."""
 
+import numpy as np
 import torch
 
 import regularizedvi
@@ -61,7 +62,7 @@ class TestAmbientRegularizedSCVI:
         module = model.module
 
         # Check regularizedvi-specific defaults
-        assert module.gene_likelihood == "nb"
+        assert module.gene_likelihood == "gamma_poisson"
         assert module.dispersion == "gene-batch"
         assert module.use_observed_lib_size is False
         assert module.use_additive_background is True
@@ -348,8 +349,9 @@ class TestRegularizedMultimodalVI:
         assert set(module.encoders.keys()) == {"rna", "atac"}
         assert set(module.decoders.keys()) == {"rna", "atac"}
         assert set(module.px_r.keys()) == {"rna", "atac"}
-        assert module.px_r["rna"].shape == (50,)  # n_rna genes
-        assert module.px_r["atac"].shape == (30,)  # n_atac peaks
+        n_batch = 3
+        assert module.px_r["rna"].shape == (50, n_batch)  # n_rna genes × n_batch (gene-batch default)
+        assert module.px_r["atac"].shape == (30, n_batch)  # n_atac peaks × n_batch
 
     def test_default_additive_background_and_region_factors(self, mdata):
         """Test default additive background on RNA, region factors on ATAC."""
@@ -501,3 +503,87 @@ class TestRegularizedMultimodalVI:
         assert module.px_r["rna"].shape == (50, n_batch)
         assert module.px_r["atac"].shape == (30, n_batch)
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+    def test_extra_metrics_in_loss(self, mdata):
+        """Test that loss() returns per-modality extra_metrics."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+
+        # Run one forward pass through the module to get the LossOutput
+        module = model.module
+        module.eval()
+        scdl = model._make_data_loader(adata=mdata, batch_size=32)
+        tensors = next(iter(scdl))
+        inf_inputs = module._get_inference_input(tensors)
+        gen_inputs = module._get_generative_input(tensors, module.inference(**inf_inputs))
+        inf_outputs = module.inference(**inf_inputs)
+        gen_outputs = module.generative(**gen_inputs)
+        loss_output = module.loss(tensors, inf_outputs, gen_outputs)
+
+        em = loss_output.extra_metrics
+        # Check per-modality recon_loss
+        assert "recon_loss_rna" in em
+        assert "recon_loss_atac" in em
+        # Check per-modality kl_z (concatenation mode)
+        assert "kl_z_rna" in em
+        assert "kl_z_atac" in em
+        # Check per-modality z_var
+        assert "z_var_rna" in em
+        assert "z_var_atac" in em
+        # All should be 0-d tensors
+        for key, val in em.items():
+            assert val.dim() == 0, f"{key} should be a scalar tensor"
+
+    def test_extra_metrics_logged_in_history(self, mdata):
+        """Test that extra_metrics appear in model.history_ after training."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+
+        history = model.history_
+        # scvi-tools logs extra_metrics with _{mode} suffix
+        assert "recon_loss_rna_train" in history
+        assert "recon_loss_atac_train" in history
+        assert "kl_z_rna_train" in history
+        assert "kl_z_atac_train" in history
+        assert "z_var_rna_train" in history
+        assert "z_var_atac_train" in history
+
+    def test_get_modality_attribution(self, mdata):
+        """Test get_modality_attribution returns correct shapes."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+        result = model.get_modality_attribution(batch_size=32)
+
+        assert "rna" in result
+        assert "atac" in result
+
+        n_obs = mdata.n_obs
+        n_latent = model.module.total_latent_dim  # 4 + 4 = 8
+
+        for name in ["rna", "atac"]:
+            assert "attribution" in result[name]
+            assert "weighted_z" in result[name]
+            assert result[name]["attribution"].shape == (n_obs, n_latent)
+            assert result[name]["weighted_z"].shape == (n_obs, n_latent)
+            # Attribution values should be non-negative (mean of abs)
+            assert np.all(result[name]["attribution"] >= 0)
+
+    def test_get_modality_attribution_per_modality_latent(self, mdata):
+        """Test attribution with different per-modality latent sizes."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent={"rna": 6, "atac": 3},
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+        result = model.get_modality_attribution(batch_size=32)
+
+        n_latent = 6 + 3
+        for name in ["rna", "atac"]:
+            assert result[name]["attribution"].shape == (mdata.n_obs, n_latent)
