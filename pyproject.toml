@@ -27,6 +27,8 @@ classifiers = [
 ]
 dependencies = [
   "anndata",
+  "ipywidgets",
+  "mudata",
   "numpy",
   "scrublet",
   "scvi-tools>=1.2",
