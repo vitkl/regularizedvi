@@ -30,6 +30,15 @@ DEFAULT_LIKELIHOOD_DISTRIBUTION = "gamma_poisson"
 DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA = 9.0
 DEFAULT_DISPERSION_HYPER_PRIOR_BETA = 3.0
 
+# --- Region factors (cell2location-style detection_tech_gene) ---
+# Gamma(alpha, beta) prior on softplus(param)/0.7; mean = alpha/beta = 1.0.
+# High alpha (200) gives tight prior: factors stay near 1 unless data demands otherwise.
+DEFAULT_REGION_FACTORS_PRIOR_ALPHA = 200.0
+DEFAULT_REGION_FACTORS_PRIOR_BETA = 200.0
+
+# Registry key for modality scaling covariates (separate from encoder/decoder covariates)
+MODALITY_SCALING_COVS_KEY = "modality_scaling_covs"
+
 # --- Network architecture ---
 DEFAULT_USE_BATCH_NORM = "none"
 DEFAULT_USE_LAYER_NORM = "both"

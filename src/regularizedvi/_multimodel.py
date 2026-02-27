@@ -32,12 +32,15 @@ from regularizedvi._constants import (
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
     DEFAULT_LIBRARY_N_HIDDEN,
     DEFAULT_LIKELIHOOD_DISTRIBUTION,
+    DEFAULT_REGION_FACTORS_PRIOR_ALPHA,
+    DEFAULT_REGION_FACTORS_PRIOR_BETA,
     DEFAULT_REGULARISE_DISPERSION,
     DEFAULT_REGULARISE_DISPERSION_PRIOR,
     DEFAULT_SCALE_ACTIVATION,
     DEFAULT_USE_BATCH_IN_DECODER,
     DEFAULT_USE_BATCH_NORM,
     DEFAULT_USE_LAYER_NORM,
+    MODALITY_SCALING_COVS_KEY,
 )
 from regularizedvi._multimodule import RegularizedMultimodalVAE
 
@@ -90,6 +93,10 @@ class RegularizedMultimodalVI(
         Modalities with additive ambient background. Default ``["rna"]``.
     region_factors_modalities
         Modalities with per-feature region factors. Default ``["atac"]``.
+    region_factors_prior_alpha
+        Gamma prior alpha on region factors. Default 200 (tight prior, mean=1).
+    region_factors_prior_beta
+        Gamma prior beta on region factors. Default 200.
     regularise_dispersion
         Enable dispersion regularization. Default True.
     regularise_dispersion_prior
@@ -134,6 +141,8 @@ class RegularizedMultimodalVI(
         use_batch_in_decoder: bool = DEFAULT_USE_BATCH_IN_DECODER,
         additive_background_modalities: list[str] | None = None,
         region_factors_modalities: list[str] | None = None,
+        region_factors_prior_alpha: float = DEFAULT_REGION_FACTORS_PRIOR_ALPHA,
+        region_factors_prior_beta: float = DEFAULT_REGION_FACTORS_PRIOR_BETA,
         regularise_dispersion: bool = DEFAULT_REGULARISE_DISPERSION,
         regularise_dispersion_prior: float = DEFAULT_REGULARISE_DISPERSION_PRIOR,
         likelihood_distribution: Literal["nb", "gamma_poisson"] = DEFAULT_LIKELIHOOD_DISTRIBUTION,
@@ -171,6 +180,8 @@ class RegularizedMultimodalVI(
             "use_batch_in_decoder": use_batch_in_decoder,
             "additive_background_modalities": additive_background_modalities,
             "region_factors_modalities": region_factors_modalities,
+            "region_factors_prior_alpha": region_factors_prior_alpha,
+            "region_factors_prior_beta": region_factors_prior_beta,
             "regularise_dispersion": regularise_dispersion,
             "regularise_dispersion_prior": regularise_dispersion_prior,
             "likelihood_distribution": likelihood_distribution,
@@ -258,6 +269,10 @@ class RegularizedMultimodalVI(
         if REGISTRY_KEYS.CAT_COVS_KEY in self.adata_manager.data_registry:
             n_cats_per_cov = self.adata_manager.get_state_registry(REGISTRY_KEYS.CAT_COVS_KEY).n_cats_per_key
 
+        n_cats_per_scaling_cov = None
+        if MODALITY_SCALING_COVS_KEY in self.adata_manager.data_registry:
+            n_cats_per_scaling_cov = self.adata_manager.get_state_registry(MODALITY_SCALING_COVS_KEY).n_cats_per_key
+
         kwargs = dict(self._module_kwargs)
         # Remove keys that are passed separately
         for k in ["n_hidden", "n_latent", "n_layers", "dropout_rate"]:
@@ -276,6 +291,7 @@ class RegularizedMultimodalVI(
             dropout_rate=self._module_kwargs["dropout_rate"],
             library_log_means=library_log_means,
             library_log_vars=library_log_vars,
+            n_cats_per_scaling_cov=n_cats_per_scaling_cov,
             **kwargs,
         )
 
@@ -288,6 +304,7 @@ class RegularizedMultimodalVI(
         batch_key: str | None = None,
         categorical_covariate_keys: list[str] | None = None,
         continuous_covariate_keys: list[str] | None = None,
+        modality_scaling_covariate_keys: list[str] | None = None,
         **kwargs,
     ):
         """Set up MuData for RegularizedMultimodalVI.
@@ -303,6 +320,12 @@ class RegularizedMultimodalVI(
         %(param_batch_key)s
         %(param_cat_cov_keys)s
         %(param_cont_cov_keys)s
+        modality_scaling_covariate_keys
+            Optional list of categorical ``.obs`` keys whose categories define
+            per-feature scaling factors (cell2location-style ``y_{t,g}``).
+            Registered separately from ``categorical_covariate_keys`` — these
+            do NOT feed into encoder/decoder injection layers, they only
+            control the per-feature multiplicative region factor.
         """
         setup_method_args = cls._get_setup_method_args(**locals())
 
@@ -345,6 +368,16 @@ class RegularizedMultimodalVI(
                 fields.MuDataNumericalJointObsField(
                     REGISTRY_KEYS.CONT_COVS_KEY,
                     continuous_covariate_keys,
+                    mod_key=list(modalities.values())[0],
+                )
+            )
+
+        # Modality scaling covariates (separate from encoder/decoder covariates)
+        if modality_scaling_covariate_keys:
+            anndata_fields.append(
+                fields.MuDataCategoricalJointObsField(
+                    MODALITY_SCALING_COVS_KEY,
+                    modality_scaling_covariate_keys,
                     mod_key=list(modalities.values())[0],
                 )
             )
@@ -507,6 +540,19 @@ class RegularizedMultimodalVI(
             else:
                 categorical_input = ()
 
+            # Build scaling covariate indicator (cell2location obs2extra_categoricals)
+            scaling_covs = tensors.get(MODALITY_SCALING_COVS_KEY)
+            if scaling_covs is not None and self.module.n_total_scaling_cats > 0:
+                scaling_indicator = torch.cat(
+                    [
+                        one_hot(scaling_covs[:, i].long(), n_cats).float()
+                        for i, n_cats in enumerate(self.module.n_cats_per_scaling_cov)
+                    ],
+                    dim=-1,
+                )
+            else:
+                scaling_indicator = None
+
             def _make_decode_rate_fn(
                 module,
                 name,
@@ -516,6 +562,7 @@ class RegularizedMultimodalVI(
                 categorical_input,
                 bg,
                 cont_covs,
+                scaling_indicator,
             ):
                 """Create a closure that computes decoder rate for a given z."""
 
@@ -549,7 +596,12 @@ class RegularizedMultimodalVI(
                         )
 
                     if name in module.region_factors:
-                        px_rate = px_rate * torch.sigmoid(module.region_factors[name])
+                        rf_transformed = torch.nn.functional.softplus(module.region_factors[name]) / 0.7
+                        if scaling_indicator is not None:
+                            scaling = torch.matmul(scaling_indicator, rf_transformed)
+                        else:
+                            scaling = rf_transformed
+                        px_rate = px_rate * scaling
 
                     return px_rate
 
@@ -579,6 +631,7 @@ class RegularizedMultimodalVI(
                     categorical_input,
                     bg,
                     cont_covs,
+                    scaling_indicator,
                 )
 
                 # Baseline decoder rate

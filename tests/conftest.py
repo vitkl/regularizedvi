@@ -59,4 +59,9 @@ def mdata():
     adata_atac.obs["batch"] = [f"batch_{i % n_batches}" for i in range(n_obs)]
     adata_atac.obs["batch"] = adata_atac.obs["batch"].astype("category")
 
+    # Scaling covariate for testing (shared across modalities)
+    for adata in [adata_rna, adata_atac]:
+        adata.obs["technology"] = [f"tech_{i % 2}" for i in range(n_obs)]
+        adata.obs["technology"] = adata.obs["technology"].astype("category")
+
     return mu.MuData({"rna": adata_rna, "atac": adata_atac})

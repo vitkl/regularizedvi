@@ -587,3 +587,93 @@ class TestRegularizedMultimodalVI:
         n_latent = 6 + 3
         for name in ["rna", "atac"]:
             assert result[name]["attribution"].shape == (mdata.n_obs, n_latent)
+
+    # --- Region factors: shape, activation, prior, scaling covariates ---
+
+    def test_region_factors_shape_no_scaling_covs(self, mdata):
+        """Test region factors shape without scaling covariates (backward compat)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        module = model.module
+        # Default: ATAC gets region factors, shape (1, n_atac_features) without scaling covs
+        assert "atac" in module.region_factors
+        assert module.region_factors["atac"].shape == (1, 30)
+
+    def test_region_factors_shape_with_scaling_covs(self, mdata):
+        """Test region factors shape with scaling covariates."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            batch_key="batch",
+            modality_scaling_covariate_keys=["technology"],
+        )
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        module = model.module
+        n_tech = 2  # tech_0, tech_1
+        assert module.region_factors["atac"].shape == (n_tech, 30)
+
+    def test_region_factors_softplus_activation(self, mdata):
+        """Test that region factors use softplus/0.7 activation (centered at ~1)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        module = model.module
+        # At initialization (param=0), softplus(0)/0.7 ~ 0.693/0.7 ~ 0.99
+        rf_val = torch.nn.functional.softplus(module.region_factors["atac"]) / 0.7
+        assert torch.allclose(rf_val, torch.ones_like(rf_val), atol=0.02)
+
+    def test_train_with_scaling_covs(self, mdata):
+        """Test training with modality scaling covariates."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            batch_key="batch",
+            modality_scaling_covariate_keys=["technology"],
+        )
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+
+    def test_region_factors_prior_in_loss(self, mdata):
+        """Test that Gamma prior on region factors contributes to finite loss."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        module = model.module
+        module.eval()
+        scdl = model._make_data_loader(adata=mdata, batch_size=32)
+        tensors = next(iter(scdl))
+        inf_inputs = module._get_inference_input(tensors)
+        inf_outputs = module.inference(**inf_inputs)
+        gen_inputs = module._get_generative_input(tensors, inf_outputs)
+        gen_outputs = module.generative(**gen_inputs)
+        loss_output = module.loss(tensors, inf_outputs, gen_outputs)
+        assert loss_output.loss.isfinite()
+
+    def test_region_factors_with_multiple_scaling_covs(self, mdata):
+        """Test region factors with multiple scaling covariates."""
+        # Add a second covariate
+        for mod_key in mdata.mod:
+            mdata[mod_key].obs["site"] = [f"site_{i % 3}" for i in range(mdata.n_obs)]
+            mdata[mod_key].obs["site"] = mdata[mod_key].obs["site"].astype("category")
+
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            batch_key="batch",
+            modality_scaling_covariate_keys=["technology", "site"],
+        )
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        module = model.module
+        # 2 tech + 3 sites = 5 total rows
+        assert module.region_factors["atac"].shape == (5, 30)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+    def test_attribution_with_scaling_covs(self, mdata):
+        """Test get_modality_attribution works with scaling covariates."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            batch_key="batch",
+            modality_scaling_covariate_keys=["technology"],
+        )
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        result = model.get_modality_attribution(batch_size=32)
+        n_latent = model.module.total_latent_dim
+        for name in ["rna", "atac"]:
+            assert result[name]["attribution"].shape == (mdata.n_obs, n_latent)
