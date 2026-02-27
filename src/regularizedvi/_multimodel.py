@@ -27,6 +27,8 @@ from scvi.model.base import (
 from scvi.utils import setup_anndata_dsp
 
 from regularizedvi._constants import (
+    DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
+    DEFAULT_ADDITIVE_BG_PRIOR_BETA,
     DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
     DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
@@ -148,6 +150,8 @@ class RegularizedMultimodalVI(
         likelihood_distribution: Literal["nb", "gamma_poisson"] = DEFAULT_LIKELIHOOD_DISTRIBUTION,
         dispersion_hyper_prior_alpha: float = DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
         dispersion_hyper_prior_beta: float = DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
+        additive_bg_prior_alpha: float = DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
+        additive_bg_prior_beta: float = DEFAULT_ADDITIVE_BG_PRIOR_BETA,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_BATCH_NORM,
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
         **kwargs,
@@ -187,6 +191,8 @@ class RegularizedMultimodalVI(
             "likelihood_distribution": likelihood_distribution,
             "dispersion_hyper_prior_alpha": dispersion_hyper_prior_alpha,
             "dispersion_hyper_prior_beta": dispersion_hyper_prior_beta,
+            "additive_bg_prior_alpha": additive_bg_prior_alpha,
+            "additive_bg_prior_beta": additive_bg_prior_beta,
             "use_batch_norm": use_batch_norm,
             "use_layer_norm": use_layer_norm,
             **kwargs,

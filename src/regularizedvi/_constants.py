@@ -30,6 +30,12 @@ DEFAULT_LIKELIHOOD_DISTRIBUTION = "gamma_poisson"
 DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA = 9.0
 DEFAULT_DISPERSION_HYPER_PRIOR_BETA = 3.0
 
+# --- Additive background prior (cell2location-style s_g_gene_add) ---
+# Gamma(alpha, beta) prior on exp(additive_background); mean = alpha/beta = 0.01.
+# Pushes ambient/background contribution to be small relative to biological signal.
+DEFAULT_ADDITIVE_BG_PRIOR_ALPHA = 1.0
+DEFAULT_ADDITIVE_BG_PRIOR_BETA = 100.0
+
 # --- Region factors (cell2location-style detection_tech_gene) ---
 # Gamma(alpha, beta) prior on softplus(param)/0.7; mean = alpha/beta = 1.0.
 # High alpha (200) gives tight prior: factors stay near 1 unless data demands otherwise.
