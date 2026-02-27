@@ -227,9 +227,32 @@ class RegularizedMultimodalVI(
                 if reg_key in self.adata_manager.data_registry:
                     n_input_per_modality[name] = self.adata_manager.get_from_registry(reg_key).shape[1]
 
-        # For now, use observed library size (simplest)
-        # TODO: implement per-modality learned library with _init_library_size
-        use_observed_lib_size = True
+        # Compute per-modality library size priors (log-scale mean and variance per batch)
+        library_log_means = {}
+        library_log_vars = {}
+        batch_indices = self.adata_manager.get_from_registry(REGISTRY_KEYS.BATCH_KEY)
+        for name in modality_names:
+            reg_key = f"X_{name}"
+            data = self.adata_manager.get_from_registry(reg_key)
+            log_means = np.zeros(n_batch)
+            log_vars = np.ones(n_batch)
+            for i_batch in np.unique(batch_indices):
+                idx_batch = np.squeeze(batch_indices == i_batch)
+                batch_data = data[idx_batch.nonzero()[0]]
+                sum_counts = batch_data.sum(axis=1)
+                masked_log_sum = np.ma.log(sum_counts)
+                if np.ma.is_masked(masked_log_sum):
+                    logger.warning(
+                        "Modality '%s' has cells with zero total counts in batch %d. "
+                        "Consider filtering with scanpy.pp.filter_cells().",
+                        name,
+                        i_batch,
+                    )
+                log_counts = masked_log_sum.filled(0)
+                log_means[i_batch] = np.mean(log_counts).astype(np.float32)
+                log_vars[i_batch] = np.var(log_counts).astype(np.float32)
+            library_log_means[name] = log_means.reshape(1, -1)
+            library_log_vars[name] = log_vars.reshape(1, -1)
 
         n_cats_per_cov = None
         if REGISTRY_KEYS.CAT_COVS_KEY in self.adata_manager.data_registry:
@@ -251,7 +274,8 @@ class RegularizedMultimodalVI(
             n_continuous_cov=self.summary_stats.get("n_extra_continuous_covs", 0),
             n_cats_per_cov=n_cats_per_cov,
             dropout_rate=self._module_kwargs["dropout_rate"],
-            use_observed_lib_size=use_observed_lib_size,
+            library_log_means=library_log_means,
+            library_log_vars=library_log_vars,
             **kwargs,
         )
 

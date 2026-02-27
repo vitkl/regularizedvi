@@ -106,9 +106,10 @@ class RegularizedMultimodalVAE(BaseModuleClass):
     log_variational
         If True, use log1p on input before encoding.
     use_size_factor_key
-        If True, use size_factor from anndata.
+        Not supported for multimodal model. Must be False.
     use_observed_lib_size
-        If True, use observed library size (sum of counts).
+        Not supported for multimodal model. Must be False.
+        Library size is always learned with a constrained LogNormal prior.
     library_log_means
         Prior means for log library sizes, dict per modality.
     library_log_vars
@@ -166,7 +167,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         dispersion: dict[str, str] | str = "gene-batch",
         log_variational: bool = True,
         use_size_factor_key: bool = False,
-        use_observed_lib_size: bool = True,
+        use_observed_lib_size: bool = False,
         library_log_means: dict[str, np.ndarray] | None = None,
         library_log_vars: dict[str, np.ndarray] | None = None,
         library_log_vars_weight: float | None = None,
@@ -199,8 +200,16 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.log_variational = log_variational
         self.latent_mode = latent_mode
         self.modality_weights_mode = modality_weights
-        self.use_size_factor_key = use_size_factor_key
-        self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
+        if use_size_factor_key:
+            raise ValueError(
+                "use_size_factor_key=True is not supported for RegularizedMultimodalVAE. Library size must be learned."
+            )
+        if use_observed_lib_size:
+            raise ValueError(
+                "use_observed_lib_size=True is not supported for RegularizedMultimodalVAE. "
+                "Library size must be learned with a constrained LogNormal prior."
+            )
+        self.use_observed_lib_size = False
         self.use_batch_in_decoder = use_batch_in_decoder
         self.regularise_dispersion = regularise_dispersion
         self.likelihood_distribution = likelihood_distribution
@@ -324,35 +333,33 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         # ---- Per-modality library encoders (variational, low-capacity) ----
         self.l_encoders = nn.ModuleDict()
-        if not self.use_observed_lib_size:
-            for name in self.modality_names:
-                n_in = n_input_per_modality[name] + n_continuous_cov * encode_covariates
-                self.l_encoders[name] = RegularizedEncoder(
-                    n_input=n_in,
-                    n_output=1,
-                    n_layers=1,
-                    n_cat_list=encoder_cat_list,
-                    n_hidden=library_n_hidden,
-                    dropout_rate=dropout_rate,
-                    inject_covariates=deeply_inject_covariates,
-                    use_batch_norm=use_batch_norm_encoder,
-                    use_layer_norm=use_layer_norm_encoder,
-                    return_dist=True,
-                    **_extra_encoder_kwargs,
-                )
+        for name in self.modality_names:
+            n_in = n_input_per_modality[name] + n_continuous_cov * encode_covariates
+            self.l_encoders[name] = RegularizedEncoder(
+                n_input=n_in,
+                n_output=1,
+                n_layers=1,
+                n_cat_list=encoder_cat_list,
+                n_hidden=library_n_hidden,
+                dropout_rate=dropout_rate,
+                inject_covariates=deeply_inject_covariates,
+                use_batch_norm=use_batch_norm_encoder,
+                use_layer_norm=use_layer_norm_encoder,
+                return_dist=True,
+                **_extra_encoder_kwargs,
+            )
 
         # ---- Per-modality library priors ----
-        if not self.use_observed_lib_size:
-            library_log_means = library_log_means or {}
-            library_log_vars = library_log_vars or {}
-            for name in self.modality_names:
-                if name in library_log_means and name in library_log_vars:
-                    means = torch.from_numpy(library_log_means[name]).float()
-                    vars_ = torch.from_numpy(library_log_vars[name]).float()
-                    if library_log_vars_weight is not None:
-                        vars_ = vars_ * library_log_vars_weight
-                    self.register_buffer(f"library_log_means_{name}", means)
-                    self.register_buffer(f"library_log_vars_{name}", vars_)
+        library_log_means = library_log_means or {}
+        library_log_vars = library_log_vars or {}
+        for name in self.modality_names:
+            if name in library_log_means and name in library_log_vars:
+                means = torch.from_numpy(library_log_means[name]).float()
+                vars_ = torch.from_numpy(library_log_vars[name]).float()
+                if library_log_vars_weight is not None:
+                    vars_ = vars_ * library_log_vars_weight
+                self.register_buffer(f"library_log_means_{name}", means)
+                self.register_buffer(f"library_log_vars_{name}", vars_)
 
         # ---- Per-modality dispersion parameters ----
         self.px_r = nn.ParameterDict()
@@ -516,22 +523,22 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         elif self.latent_mode == "weighted_mean":
             z = self._mix_modalities(z_per_modality, qz_per_modality, masks, batch_index)
 
-        # Per-modality library encoding
+        # Per-modality library encoding (always learned, never observed)
+        assert not self.use_observed_lib_size, (
+            "use_observed_lib_size=True is not supported. Library size must be learned."
+        )
         library = {}
         ql_per_modality = {}
         for name in self.modality_names:
             x = modality_inputs.get(f"x_{name}")
             if x is None:
                 continue
-            if self.use_observed_lib_size:
-                library[name] = torch.log(x.sum(1)).unsqueeze(1)
-            else:
-                x_ = torch.log1p(x) if self.log_variational else x
-                if cont_covs is not None and self.encode_covariates:
-                    x_ = torch.cat([x_, cont_covs], dim=-1)
-                ql, lib = self.l_encoders[name](x_, batch_index, *categorical_input)
-                library[name] = lib
-                ql_per_modality[name] = ql
+            x_ = torch.log1p(x) if self.log_variational else x
+            if cont_covs is not None and self.encode_covariates:
+                x_ = torch.cat([x_, cont_covs], dim=-1)
+            ql, lib = self.l_encoders[name](x_, batch_index, *categorical_input)
+            library[name] = lib
+            ql_per_modality[name] = ql
 
         return {
             "z": z,
@@ -678,24 +685,23 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # Prior on z
         pz = Normal(torch.zeros_like(z), torch.ones_like(z))
 
-        # Library priors
+        # Library priors (always learned)
         pl_dict = {}
-        if not self.use_observed_lib_size:
-            for name in self.modality_names:
-                if name not in library:
-                    continue
-                means_buf = getattr(self, f"library_log_means_{name}", None)
-                vars_buf = getattr(self, f"library_log_vars_{name}", None)
-                if means_buf is not None and vars_buf is not None:
-                    local_means = torch.nn.functional.linear(
-                        one_hot(batch_index.squeeze(-1), self.n_batch).float(),
-                        means_buf,
-                    )
-                    local_vars = torch.nn.functional.linear(
-                        one_hot(batch_index.squeeze(-1), self.n_batch).float(),
-                        vars_buf,
-                    )
-                    pl_dict[name] = Normal(local_means, local_vars.sqrt())
+        for name in self.modality_names:
+            if name not in library:
+                continue
+            means_buf = getattr(self, f"library_log_means_{name}", None)
+            vars_buf = getattr(self, f"library_log_vars_{name}", None)
+            if means_buf is not None and vars_buf is not None:
+                local_means = torch.nn.functional.linear(
+                    one_hot(batch_index.squeeze(-1), self.n_batch).float(),
+                    means_buf,
+                )
+                local_vars = torch.nn.functional.linear(
+                    one_hot(batch_index.squeeze(-1), self.n_batch).float(),
+                    vars_buf,
+                )
+                pl_dict[name] = Normal(local_means, local_vars.sqrt())
 
         return {
             "px": px_dict,
@@ -787,17 +793,16 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 z_mod = z_per_modality[name]
                 extra_metrics[f"z_var_{name}"] = z_mod.var(dim=0).mean().detach()
 
-        # ---- KL divergence on library ----
+        # ---- KL divergence on library (always learned) ----
         kl_l = torch.zeros_like(recon_loss)
-        if not self.use_observed_lib_size:
-            ql_per_modality = inference_outputs.get("ql_per_modality", {})
-            for name in self.modality_names:
-                if name not in ql_per_modality or name not in pl_dict:
-                    continue
-                kl_lib = kld(ql_per_modality[name], pl_dict[name]).sum(dim=1)
-                if name in masks:
-                    kl_lib = kl_lib * masks[name].float()
-                kl_l = kl_l + kl_lib
+        ql_per_modality = inference_outputs.get("ql_per_modality", {})
+        for name in self.modality_names:
+            if name not in ql_per_modality or name not in pl_dict:
+                continue
+            kl_lib = kld(ql_per_modality[name], pl_dict[name]).sum(dim=1)
+            if name in masks:
+                kl_lib = kl_lib * masks[name].float()
+            kl_l = kl_l + kl_lib
 
         # ---- Weighted loss ----
         loss = torch.mean(recon_loss + kl_weight * kl_z + kl_l)

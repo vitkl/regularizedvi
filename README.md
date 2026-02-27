@@ -56,6 +56,81 @@ where additionally:
 
 The NB variance is $\text{Var}(x) = \mu + \mu^2/\theta$, where $\theta$ is the inverse dispersion (= `GammaPoisson` concentration parameter). Large $\theta$ means less overdispersion and less variance (variance approaching Poisson $\mu^2/\theta = 0$ -> $\text{Var}(x) = \mu$).
 
+### RegularizedMultimodalVI generative model
+
+**RegularizedMultimodalVI** extends regularizedvi to $M$ paired modalities (e.g., RNA + ATAC from 10x Multiome). Each modality has its own dedicated encoder and decoder, but all decoders share a single joint latent space formed by concatenating per-modality codes ("symmetric concatenation"). The generative model for every modality follows the same structure — only which optional correction terms are active differs between modalities.
+
+#### Latent space
+
+Each modality $m$ contributes a private slice of the joint latent space. These slices are independently drawn from a standard normal prior and concatenated to form the full cell representation $z\_n$ that is fed to all decoders:
+
+$$z^{(m)}_n \sim \text{Normal}(0, I_{d_m})$$
+$$z_n = [\,z^{(1)}_n;\; z^{(2)}_n;\; \ldots;\; z^{(M)}_n\,] \in \mathbb{R}^{\sum_m d_m}$$
+
+where $d\_m$ is the latent dimensionality assigned to modality $m$ (e.g. `n_latent={"rna": 96, "atac": 32}`). Because every decoder receives the full $z\_n$, signals across modalities can interact through the decoders even though each encoder sees only its own modality.
+
+#### Generative model (per modality $m$)
+
+The following equations describe how observed counts $x^{(m)}\_{nf}$ — UMIs for RNA, fragment counts for ATAC — are generated for cell $n$ and feature $f$ (gene or chromatin peak). All modalities share this structure; the optional terms in the mean $\mu^{(m)}\_{nf}$ are selectively activated per modality.
+
+**Library size** — how many total counts a cell contributes in this modality. Always learned (observed total counts are never used as library size, since they include ambient contamination). A low-capacity encoder infers library size per cell, regularised by a tight LogNormal prior whose mean and variance are estimated per batch from the data:
+
+$$\ell^{(m)}_n \sim \text{LogNormal}\big(\ell^{(m)}_{\mu}{}^\top s_n,\; 0.05 \cdot \ell^{(m)}_{\sigma^2}{}^\top s_n\big)$$
+
+**Decoder output** — the neural network maps the joint latent code $z\_n$ and categorical covariates $c\_n$ (donor, site, protocol — **not** batch $s\_n$) to a non-negative denoised feature signal. The softplus activation ensures non-negativity without forcing outputs to sum to 1:
+
+$$\rho^{(m)}_{nf} = \text{softplus}\big(f^{(m)}_w(z_n,\, c_n)\big) \in \mathbb{R}_{\geq 0}$$
+
+**Expected mean counts** — the predicted count mean for feature $f$ in cell $n$. Optional additive background $b^{(m)}\_{f,s\_n}$ and multiplicative region factor $\alpha^{(m)}\_f$ modify the decoder output before scaling by library size (see optional terms table):
+
+$$\mu^{(m)}_{nf} = \ell^{(m)}_n \cdot \big(\rho^{(m)}_{nf} + b^{(m)}_{f,s_n}\big) \cdot \alpha^{(m)}_f$$
+
+**Dispersion** — how much the count variance exceeds the Poisson baseline. A hierarchical prior (Gamma hyper-prior on the learned rate $\lambda^{(m)}\_{s\_n}$, then Exponential prior on $\sqrt{\theta}$) prevents the model from setting dispersion near zero (NB → Poisson collapse) and adapts the regularisation strength to each batch and modality:
+
+$$\lambda^{(m)}_{s_n} \sim \text{Gamma}(9, 3), \qquad \sqrt{\theta^{(m)}_{f,s_n}} \sim \text{Exponential}(\lambda^{(m)}_{s_n})$$
+
+**Observation model** — counts are drawn from a GammaPoisson distribution (equivalent to negative binomial) parameterised by the predicted mean $\mu^{(m)}\_{nf}$ and inverse dispersion $\theta^{(m)}\_{f,s\_n}$:
+
+$$x^{(m)}_{nf} \sim \text{GammaPoisson}\!\Big(\text{concentration} = \theta^{(m)}_{f,s_n},\;\; \text{rate} = \frac{\theta^{(m)}_{f,s_n}}{\mu^{(m)}_{nf}}\Big)$$
+
+or equivalently NB with mean $\mu^{(m)}\_{nf}$ and dispersion $\theta^{(m)}\_{f,s\_n}$.
+
+#### Optional per-modality correction terms
+
+| Term | Symbol | What it captures | RNA default | ATAC default |
+|------|--------|-----------------|-------------|--------------|
+| Additive background | $b^{(m)}_{f,s_n} = \exp(\beta^{(m)}_{f,s_n})$ | Per-feature, per-batch ambient contamination or assay baseline; learnable parameter | **ON** | off |
+| Region/accessibility factor | $\alpha^{(m)}_f = \text{sigmoid}(\gamma^{(m)}_f) \in (0,1)$ | Per-feature multiplicative bias (GC content, mappability, peak caller sensitivity); learnable parameter | off | **ON** |
+| Learned library size | $\ell^{(m)}_n$ | Low-capacity encoder + tight LogNormal prior; observed totals include ambient so cannot be used directly | **always ON** | **always ON** |
+| Dispersion regularisation | $\lambda^{(m)}_{s_n}$ | Hierarchical prior preventing count model from becoming too certain (NB → Poisson) | ON | ON |
+| Batch-free decoder | — | Decoder conditioned only on categorical covariates $c_n$, not batch $s_n$ | ON | ON |
+
+Setting $b^{(m)}\_{f,s\_n} = 0$ (no ambient) and $\alpha^{(m)}\_f = 1$ (no region factor) recovers the standard regularizedvi single-modality model for that modality. The defaults reflect domain knowledge for snRNA+ATAC multiome: ambient RNA contamination is substantial in single-nucleus RNA-seq and well-captured by an additive term, while ATAC peaks have systematic per-peak biases from GC content, mappability and peak caller thresholds. See the [bone marrow multiome tutorial](docs/notebooks/bone_marrow_multimodal_tutorial.ipynb) for a worked RNA+ATAC example.
+
+#### Inference: per-modality encoders and posterior concatenation
+
+**Per-modality encoder** — each modality's encoder takes its own observed counts as input and independently constructs a Gaussian posterior over its private latent slice. The RNA encoder sees only RNA counts; the ATAC encoder sees only ATAC counts. This forces the model to build a dedicated representation for each modality before combining them:
+
+$$q_\eta(z^{(m)}_n \mid x^{(m)}_n, s_n, c_n) = \text{Normal}\!\big(\mu^{(m)}_\eta(x^{(m)}_n),\; (\sigma^{(m)}_\eta)^2(x^{(m)}_n)\big)$$
+
+**Posterior concatenation** — samples from the per-modality posteriors are concatenated to form the joint representation fed to all decoders. Because every decoder $f^{(m)}\_w$ receives the full $z\_n$, cross-modal coupling can emerge through the decoders during training. The training objective (ELBO) penalises each encoder's KL divergence independently:
+
+$$z_n = [z^{(1)}_n;\; \ldots;\; z^{(M)}_n], \quad z^{(m)}_n \sim q_\eta(z^{(m)}_n \mid x^{(m)}_n)$$
+$$\text{KL} = \sum_m \text{KL}\big[q_\eta(z^{(m)}_n \mid x^{(m)}_n)\;\|\;\mathcal{N}(0, I_{d_m})\big]$$
+
+**Alternative latent strategies** (selectable via `latent_mode`):
+- `"concatenation"` (default) — per-modality encoders, posteriors concatenated; total latent dim $= \sum_m d_m$
+- `"weighted_mean"` — per-modality encoders, posteriors mixed into a single shared latent by learned scalar weights (MultiVI-style); requires equal $d\_m$ across modalities
+- `"single_encoder"` — one joint encoder on all concatenated inputs, producing a single shared latent; simplest but loses per-modality interpretability
+
+#### Latent-to-modality mapping via decoder attribution
+
+With a concatenated latent space it is useful to know which latent dimensions each decoder actually uses. `get_modality_attribution()` computes the mean absolute Jacobian of each decoder's predicted mean $\mu^{(m)}\_{nf}$ with respect to each latent dimension $j$, using forward finite differences over the full cell population:
+
+$$\text{attribution}^{(m)}_j = \frac{1}{N \cdot F_m} \sum_{n,f} \left| \frac{\partial \mu^{(m)}_{nf}}{\partial z_j} \right|$$
+
+This reveals the empirical partition of the latent space: even though concatenation assigns each slice to a modality by construction, decoders can learn to cross-use other modalities' slices. The weighted representation `weighted_z` $= z\_n \times \text{attribution}^{(m)}$ provides a modality-specific view of cell state for downstream analysis (e.g. a separate UMAP per modality), as demonstrated in the [tutorial notebook](docs/notebooks/bone_marrow_multimodal_tutorial.ipynb).
+
 ### Key modifications
 
 1. **Ambient RNA correction**: Per-gene, per-sample additive background $b\_{g,s\_n}$ captures ambient RNA contamination, mirroring cell2location's $(g\_{f,g} + b\_{e,g}) \cdot h\_e$ structure. Implemented as `nn.Parameter(torch.randn(n_genes, n_batch))` with per-batch selection via one-hot encoding.
