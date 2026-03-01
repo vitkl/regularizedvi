@@ -151,13 +151,13 @@ This reveals the empirical partition of the latent space: even though concatenat
 
 ### Key modifications
 
-1. **Ambient RNA correction with Gamma prior**: Per-gene, per-batch additive background $b\_{g,s\_n} = \exp(\beta\_{g,s\_n})$ captures ambient RNA contamination, mirroring cell2location's $s\_g \cdot g\_{e,g}$ structure. A $\text{Gamma}(1, 100)$ prior pushes $b\_{g,s\_n}$ toward 0.01, keeping background small relative to biological signal. Initialised at `log(0.01)` (prior mean) with per-batch selection via one-hot encoding.
+1. **Ambient RNA correction with Gamma prior**: Per-gene, per-ambient-category additive background $s\_{e,g} = \exp(\beta\_{e,g})$ captures ambient RNA contamination, mirroring cell2location's $s\_g \cdot g\_{e,g}$ structure. A $\text{Gamma}(1, 100)$ prior pushes $s\_{e,g}$ toward 0.01, keeping background small relative to biological signal. Initialised at `log(0.01)` (prior mean) with per-category selection via concatenated one-hot encoding across all `ambient_covariate_keys`.
 
-2. **Hierarchical dispersion regularisation**: Prior $1/\sqrt{\theta\_{g,s\_n}} \sim \text{Exponential}(\lambda)$ is a containment prior (Simpson et al. 2017) that penalises small $\theta$ (excessive overdispersion), regularising the NB toward the Poisson baseline during gradient-based training. The data likelihood provides the opposing force, pulling $\theta$ toward values that explain observed count variance. The rate $\lambda$ is learned per batch with a $\text{Gamma}(9, 3)$ hyper-prior (mean 3). Dispersion $\theta = \exp(\phi)$ is initialised at $\lambda^2 = 9$ (equilibrium). As used in cell2location/cell2fate.
+2. **Hierarchical dispersion regularisation**: Prior $1/\sqrt{\theta\_{g,d}} \sim \text{Exponential}(\lambda\_d)$ is a containment prior (Simpson et al. 2017) that penalises small $\theta$ (excessive overdispersion), regularising the NB toward the Poisson baseline during gradient-based training. The data likelihood provides the opposing force, pulling $\theta$ toward values that explain observed count variance. The rate $\lambda\_d$ is learned per dispersion group (selected by `dispersion_key`) with a $\text{Gamma}(9, 3)$ hyper-prior (mean 3). Dispersion $\theta = \exp(\phi)$ is initialised at $\lambda^2 = 9$ (equilibrium). As used in cell2location/cell2fate.
 
-3. **Batch-free decoder with separated correction paths**: The decoder $f\_w(z\_n, c\_n)$ receives only categorical covariates $c\_n$ (site, donor, protocol), **not** the batch indicator $s\_n$. This separates batch correction into structurally different paths: (a) a **constrained additive** path ($b\_{g,s\_n}$ with Gamma prior) for per-sample ambient RNA, (b) a **flexible multiplicative** path through categorical covariates in the decoder for systematic differences between donors, protocols, or sites (e.g. PCR bias, RT efficiency, 10x chemistry versions), and (c) batch-specific dispersion $\theta\_{g,s\_n}$ for per-batch variance differences. In standard scVI, the decoder handles all batch effects through a single flexible path, which can absorb biological variation. The separation is most beneficial when batches have high within-batch cell type diversity (e.g. whole-embryo samples), because the additive background can be cleanly identified as the baseline signal shared across all cells in a batch.
+3. **Batch-free decoder with separated correction paths**: The decoder $f\_w(z\_n, c\_{k,n})$ receives only categorical covariates $c\_{k,n}$ (site, donor, protocol via `categorical_covariate_keys`), **not** the ambient or dispersion covariates. This separates batch correction into structurally different paths: (a) a **constrained additive** path ($s\_{e,g}$ with Gamma prior, selected by `ambient_covariate_keys`) for per-sample ambient RNA, (b) a **flexible multiplicative** path through categorical covariates in the decoder for systematic differences between donors, protocols, or sites (e.g. PCR bias, RT efficiency, 10x chemistry versions), and (c) per-group dispersion $\theta\_{g,d}$ (selected by `dispersion_key`) for variance differences. In standard scVI, the decoder handles all batch effects through a single flexible path, which can absorb biological variation. The separation is most beneficial when batches have high within-batch cell type diversity (e.g. whole-embryo samples), because the additive background can be cleanly identified as the baseline signal shared across all cells in a batch.
 
-4. **Softplus activation**: Because $\rho\_{ng} + b\_{g,s\_n}$ must be non-negative but need not sum to 1 across genes, softmax is replaced with softplus. The library size $\ell\_n$ acts as a true normalisation factor.
+4. **Softplus activation**: Because $\rho\_{ng} + s\_{e\_n,g}$ must be non-negative but need not sum to 1 across genes, softmax is replaced with softplus. The library size $\ell\_n$ acts as a true normalisation factor.
 
 5. **Learned library size with constrained prior**: The observed total counts include ambient RNA, so library size must be learned (not observed). Prior variance is scaled by 0.05 to prevent the library size from absorbing biological signal. Library encoder has low capacity (`n_hidden=16`).
 
@@ -173,7 +173,7 @@ This reveals the empirical partition of the latent space: even though concatenat
 
 - **Not a strict ambient correction model**: Unlike CellBender (Fleming et al. 2023), this model is not constrained by the ambient count distribution from empty droplets. However, because it does not require empty droplets data, it can be more easily applied to integration of published datasets where empty droplet profiles are unavailable.
 
-- **Additivity in non-negative space**: The additive background operates in non-negative space ($b\_{g,s\_n} = \exp(\beta\_{g,s\_n})$), reflecting the ambient RNA correction mechanism. Without empty droplets data, the additive component can learn the minimal expression of each gene across cells — for many genes this reflects ambient levels, but for ubiquitously expressed genes it captures genuine baseline expression. The additive mechanism therefore works best when individual batches are composed of diverse cell types.
+- **Additivity in non-negative space**: The additive background operates in non-negative space ($s\_{e,g} = \exp(\beta\_{e,g})$), reflecting the ambient RNA correction mechanism. Without empty droplets data, the additive component can learn the minimal expression of each gene across cells — for many genes this reflects ambient levels, but for ubiquitously expressed genes it captures genuine baseline expression. The additive mechanism therefore works best when individual batches are composed of diverse cell types.
 
 - **Regularised overdispersion alone likely helps**: The containment prior on overdispersion regularises the NB toward the Poisson baseline, preventing the model from absorbing residuals through excessive variance (small $\theta$). This forces the decoder to capture genuine biological signal through its mean structure rather than relying on high overdispersion to explain noise. This likely contributes to improved sensitivity, but needs more systematic testing.
 
@@ -199,15 +199,15 @@ Using a single `batch_key` forces all components to share the same granularity, 
 
 | Parameter | Model component | Encoder | Decoder | Shape per modality |
 |-----------|----------------|---------|---------|-------------------|
-| `ambient_covariate_keys` | Additive background $b\_{g}$: one `(n\_features, n\_cats\_i)` parameter per covariate, summed | Yes (one-hot) | No | `ParameterList[(n_feat, n_cats_i), ...]` |
-| `categorical_covariate_keys` | Standard scVI-style injection into encoder/decoder | Yes (one-hot) | Yes (one-hot) | Standard |
-| `modality_scaling_covariate_keys` | Region factors $\alpha\_{t,f}$: multiplicative per-feature scaling | No | Multiplicative on rate | `(sum(n_cats), n_feat)` |
-| `dispersion_key` | Inverse dispersion $\theta\_{g,s}$: per-gene, per-group | No | Indexing | `(n_feat, n_disp_cats)` |
-| `library_size_key` | Library prior $\mathcal{N}(\mu\_s, \sigma\_s)$: per-group mean/var | Yes (one-hot) | No | `(1, n_lib_cats)` |
+| `ambient_covariate_keys` | Additive background $s\_{e,g} = \exp(\beta\_{e,g})$: single parameter with concatenated one-hot across all ambient keys | Yes (concat one-hot) | No | `(n_feat, sum(n_cats))` |
+| `categorical_covariate_keys` | Standard scVI-style injection $c\_{k,n}$ into encoder/decoder | Yes (one-hot) | Yes (one-hot) | Standard |
+| `modality_scaling_covariate_keys` | Region factors $y\_{t,g}$: multiplicative per-feature scaling | No | Multiplicative on rate | `(sum(n_cats), n_feat)` |
+| `dispersion_key` | Inverse dispersion $\theta\_{g,d}$: per-gene, per-group | No | Indexing | `(n_feat, n_disp_cats)` |
+| `library_size_key` | Library prior $\ell\_n \sim \text{LogNormal}(\ell\_p^{\mu}, 0.05 \cdot \ell\_p^{\sigma})$: per-group mean/var | Yes (one-hot) | No | `(1, n_lib_cats)` |
 
 ### Default behaviour and backward compatibility
 
-- **`batch_key` alone** (backward compatible): Automatically fans out to `ambient_covariate_keys=[batch_key]`, `dispersion_key=batch_key`, `library_size_key=batch_key`. Equivalent to the original single-batch design.
+- **`batch_key` alone** (backward compatible): Automatically fans out to `ambient_covariate_keys=[batch_key]`, `dispersion_key=batch_key`, `library_size_key=batch_key`. Equivalent to the original single-batch design — in the notation above, $e = d = p$ (same batch groups) and $t = k$ (same categorical groups).
 
 - **`batch_key` + purpose-specific keys**: Raises `ValueError`. These are mutually exclusive — use one approach or the other.
 
