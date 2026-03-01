@@ -323,20 +323,19 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         # Ambient covariates (for additive background, decoupled from batch_key)
         self.n_cats_per_ambient_cov = list(n_cats_per_ambient_cov) if n_cats_per_ambient_cov is not None else []
 
-        # Additive background: per-gene, per-ambient-covariate learnable parameters.
-        # Each ambient covariate gets a (n_input, n_cats_i) parameter.
-        # Per-cell background is the sum across all covariates.
+        # Additive background: per-gene learnable parameter with concatenated ambient covariates.
+        # Shape: (n_input, sum(n_cats_per_ambient_cov)) — single parameter, one-hot covariates
+        # are concatenated and multiplied in one matmul.
         # Initialized at log(prior_mean) = log(alpha/beta) so exp(init) matches prior mean.
         # Default Gamma(1, 100) → mean = 0.01, small relative to px_scale.
-        if self.use_additive_background and self.n_cats_per_ambient_cov:
+        self.n_total_ambient_cats = (
+            sum(int(c) for c in self.n_cats_per_ambient_cov) if self.n_cats_per_ambient_cov else 0
+        )
+        if self.use_additive_background and self.n_total_ambient_cats > 0:
             _bg_init = math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
-            self.additive_background = torch.nn.ParameterList(
-                [
-                    torch.nn.Parameter(
-                        torch.full((n_input, int(n_cats_i)), _bg_init) + 0.01 * torch.randn(n_input, int(n_cats_i))
-                    )
-                    for n_cats_i in self.n_cats_per_ambient_cov
-                ]
+            self.additive_background = torch.nn.Parameter(
+                torch.full((n_input, self.n_total_ambient_cats), _bg_init)
+                + 0.01 * torch.randn(n_input, self.n_total_ambient_cats)
             )
 
         self.batch_representation = batch_representation
@@ -356,11 +355,11 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             n_input_encoder += batch_dim * encode_covariates
 
         # Encoder/decoder covariate composition (purpose-driven keys)
-        # Encoder sees: [ambient_covs...] + [cat_covs...] + [library_size]
+        # Encoder sees: [concat_ambient] + [cat_covs...] + [library_size]
         # ambient_covs and library_size are always injected (purpose-specific)
         # cat_covs only if encode_covariates=True
         # Decoder sees: [cat_covs...] only (no batch injection by default)
-        _ambient_cats = list(self.n_cats_per_ambient_cov) if self.n_cats_per_ambient_cov else []
+        _ambient_cats = [self.n_total_ambient_cats] if self.n_total_ambient_cats > 0 else []
         _cat_cats = list(n_cats_per_cov or [])
         _lib_cats = [self.n_library_cats]
         encoder_cat_list = _ambient_cats + (_cat_cats if encode_covariates else []) + _lib_cats
@@ -526,13 +525,19 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         else:
             encoder_input = x_
 
-        # Build encoder categorical inputs: [ambient_covs...] + [cat_covs...] + [library_size]
+        # Build encoder categorical inputs: [concat_ambient] + [cat_covs...] + [library_size]
         # ambient_covs and library_size are always injected (purpose-specific)
         # cat_covs only if encode_covariates=True
-        # Cast to long for one_hot in FCLayers
         encoder_categorical_input = ()
-        if ambient_covs is not None:
-            encoder_categorical_input += tuple(c.long() for c in torch.split(ambient_covs, 1, dim=1))
+        if ambient_covs is not None and self.n_cats_per_ambient_cov:
+            concat_ambient = torch.cat(
+                [
+                    one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float()
+                    for i, n_cats_i in enumerate(self.n_cats_per_ambient_cov)
+                ],
+                dim=-1,
+            )
+            encoder_categorical_input += (concat_ambient,)
         if cat_covs is not None and self.encode_covariates:
             encoder_categorical_input += torch.split(cat_covs, 1, dim=1)
         _lib_idx = library_size_index if library_size_index is not None else batch_index
@@ -631,16 +636,17 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         if not self.use_size_factor_key:
             size_factor = library
 
-        # Compute additive background if enabled (sum over ambient covariates)
+        # Compute additive background if enabled (concatenated one-hot @ single parameter)
         bg = None
         if self.use_additive_background and self.n_cats_per_ambient_cov and ambient_covs is not None:
-            bg = sum(
-                torch.matmul(
-                    one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float(),
-                    torch.exp(self.additive_background[i]).T,
-                )
-                for i, n_cats_i in enumerate(self.n_cats_per_ambient_cov)
+            concat_ambient = torch.cat(
+                [
+                    one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float()
+                    for i, n_cats_i in enumerate(self.n_cats_per_ambient_cov)
+                ],
+                dim=-1,
             )
+            bg = torch.matmul(concat_ambient, torch.exp(self.additive_background).T)
 
         # Decoder call: batch-free or with batch
         if self.use_batch_in_decoder:
@@ -779,17 +785,14 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         # Additive background Gamma prior (cell2location-style s_g_gene_add).
         # Gamma(alpha, beta) on exp(additive_background) pushes background small.
-        # Iterates over per-covariate background parameters.
-        if self.use_additive_background and self.n_cats_per_ambient_cov:
+        if self.use_additive_background and self.n_total_ambient_cats > 0:
             from torch.distributions import Gamma
 
             n_obs = x.shape[0]
-            bg_penalty = torch.tensor(0.0, device=x.device)
-            for bg_param in self.additive_background:
-                bg_transformed = torch.exp(bg_param)
-                bg_penalty = bg_penalty + (
-                    -Gamma(self.additive_bg_prior_alpha, self.additive_bg_prior_beta).log_prob(bg_transformed).sum()
-                )
+            bg_transformed = torch.exp(self.additive_background)
+            bg_penalty = (
+                -Gamma(self.additive_bg_prior_alpha, self.additive_bg_prior_beta).log_prob(bg_transformed).sum()
+            )
             loss = loss + bg_penalty / n_obs
 
         # a payload to be used during autotune

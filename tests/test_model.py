@@ -71,7 +71,7 @@ class TestAmbientRegularizedSCVI:
         assert module.regularise_dispersion is True
 
     def test_additive_background_shape(self, adata):
-        """Test additive_background ParameterList has correct shape."""
+        """Test additive_background parameter has correct shape."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(
             adata,
             layer="counts",
@@ -85,8 +85,8 @@ class TestAmbientRegularizedSCVI:
 
         assert hasattr(module, "additive_background")
         # With batch_key backward compat, one ambient covariate = batch_key
-        assert len(module.additive_background) == 1
-        assert module.additive_background[0].shape == (n_vars, n_batch)
+        # Single parameter with concatenated ambient categories
+        assert module.additive_background.shape == (n_vars, n_batch)
 
     def test_dispersion_shape_gene_batch(self, adata):
         """Test dispersion parameter shape with gene-batch mode."""
@@ -164,9 +164,7 @@ class TestAmbientRegularizedSCVI:
             n_latent=4,
             use_additive_background=False,
         )
-        assert not hasattr(model.module, "additive_background") or not isinstance(
-            getattr(model.module, "additive_background", None), torch.nn.Parameter
-        )
+        assert not hasattr(model.module, "additive_background") or model.module.n_total_ambient_cats == 0
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
 
     def test_with_batch_in_decoder(self, adata):
@@ -238,10 +236,8 @@ class TestAmbientRegularizedSCVI:
         assert len(module.n_cats_per_ambient_cov) == 2
         assert module.n_cats_per_ambient_cov[0] == 3  # batch
         assert module.n_cats_per_ambient_cov[1] == 2  # site
-        # 2 params in ParameterList
-        assert len(module.additive_background) == 2
-        assert module.additive_background[0].shape[1] == 3
-        assert module.additive_background[1].shape[1] == 2
+        # Single parameter with concatenated ambient categories (3 + 2 = 5)
+        assert module.additive_background.shape == (adata.shape[1], 5)
         # Training should work
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
 
@@ -321,7 +317,7 @@ class TestAmbientRegularizedSCVI:
         assert z.shape == (adata.n_obs, 4)
 
     def test_new_style_api_multiple_ambient_covs(self, adata):
-        """Test multiple ambient covariates produce summed background."""
+        """Test multiple ambient covariates produce concatenated background."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(
             adata,
             layer="counts",
@@ -335,11 +331,8 @@ class TestAmbientRegularizedSCVI:
             n_latent=4,
         )
         module = model.module
-        # 3 ambient covariates: batch(3) + site(2) + donor(4)
-        assert len(module.additive_background) == 3
-        assert module.additive_background[0].shape[1] == 3  # batch
-        assert module.additive_background[1].shape[1] == 2  # site
-        assert module.additive_background[2].shape[1] == 4  # donor
+        # 3 ambient covariates: batch(3) + site(2) + donor(4) = 9 total
+        assert module.additive_background.shape == (adata.shape[1], 9)
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
 
 
@@ -404,11 +397,10 @@ class TestParameterInitialization:
         """Additive background should be initialized near Gamma(1,100) mean=0.01."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
         model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
-        # With batch_key backward compat, one ambient covariate param in ParameterList
-        bg = torch.exp(model.module.additive_background[0]).detach()
+        bg = torch.exp(model.module.additive_background).detach()
         assert bg.mean().item() == pytest.approx(0.01, rel=0.2)
         # Noise is very small
-        assert model.module.additive_background[0].detach().std().item() < 0.05
+        assert model.module.additive_background.detach().std().item() < 0.05
 
     def test_dispersion_prior_rate_init(self, adata):
         """Dispersion prior rate should initialize at exactly regularise_dispersion_prior."""
@@ -479,7 +471,7 @@ class TestParameterInitialization:
             adata, n_hidden=16, n_latent=4, additive_bg_prior_alpha=2.0, additive_bg_prior_beta=50.0
         )
         # Gamma(2, 50) → mean = 0.04
-        bg = torch.exp(model.module.additive_background[0]).detach()
+        bg = torch.exp(model.module.additive_background).detach()
         assert bg.mean().item() == pytest.approx(0.04, rel=0.2)
 
     def test_additive_bg_prior_multimodal_stored(self, mdata):
