@@ -31,7 +31,7 @@ from scvi.module.base import (
 from torch.distributions import Exponential, Normal
 from torch.nn.functional import one_hot
 
-from regularizedvi._constants import AMBIENT_COVS_KEY, DISPERSION_KEY
+from regularizedvi._constants import AMBIENT_COVS_KEY, DISPERSION_KEY, LIBRARY_SIZE_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -229,6 +229,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         n_cats_per_ambient_cov: list[int] | None = None,
         # Dispersion covariate (controls per-group px_r, decoupled from batch_key)
         n_dispersion_cats: int | None = None,
+        # Library size covariate (controls per-group library prior, decoupled from batch_key)
+        n_library_cats: int | None = None,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -256,6 +258,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
         self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
+        # Library size covariate (decoupled from batch_key, fallback to n_batch)
+        self.n_library_cats = n_library_cats if n_library_cats is not None else n_batch
 
         if not self.use_observed_lib_size:
             if library_log_means is None or library_log_vars is None:
@@ -435,6 +439,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 MODULE_KEYS.CONT_COVS_KEY: tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
                 MODULE_KEYS.CAT_COVS_KEY: tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
                 "ambient_covs": tensors.get(AMBIENT_COVS_KEY, None),
+                "library_size_index": tensors.get(LIBRARY_SIZE_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
             }
         elif self.minified_data_type == ADATA_MINIFY_TYPE.LATENT_POSTERIOR:
             return {
@@ -465,24 +470,29 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             MODULE_KEYS.SIZE_FACTOR_KEY: size_factor,
             "ambient_covs": tensors.get(AMBIENT_COVS_KEY, None),
             "dispersion_index": tensors.get(DISPERSION_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
+            "library_size_index": tensors.get(LIBRARY_SIZE_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
         }
 
     def _compute_local_library_params(
         self,
-        batch_index: torch.Tensor,
+        library_size_index: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Computes local library parameters.
 
-        Compute two tensors of shape (batch_index.shape[0], 1) where each
+        Compute two tensors of shape (library_size_index.shape[0], 1) where each
         element corresponds to the mean and variances, respectively, of the
-        log library sizes in the batch the cell corresponds to.
+        log library sizes in the library_size_key group the cell corresponds to.
         """
         from torch.nn.functional import linear
 
-        n_batch = self.library_log_means.shape[1]
-        local_library_log_means = linear(one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means)
-
-        local_library_log_vars = linear(one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars)
+        local_library_log_means = linear(
+            one_hot(library_size_index.squeeze(-1).long(), self.n_library_cats).float(),
+            self.library_log_means,
+        )
+        local_library_log_vars = linear(
+            one_hot(library_size_index.squeeze(-1).long(), self.n_library_cats).float(),
+            self.library_log_vars,
+        )
 
         return local_library_log_means, local_library_log_vars
 
@@ -494,6 +504,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         cont_covs: torch.Tensor | None = None,
         cat_covs: torch.Tensor | None = None,
         ambient_covs: torch.Tensor | None = None,
+        library_size_index: torch.Tensor | None = None,
         n_samples: int = 1,
     ) -> dict[str, torch.Tensor | Distribution | None]:
         """Run the regular inference process."""
@@ -585,6 +596,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         transform_batch: torch.Tensor | None = None,
         ambient_covs: torch.Tensor | None = None,
         dispersion_index: torch.Tensor | None = None,
+        library_size_index: torch.Tensor | None = None,
     ) -> dict[str, Distribution | None]:
         """Run the generative process."""
         from torch.nn.functional import linear
@@ -672,10 +684,11 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         if self.use_observed_lib_size:
             pl = None
         else:
+            _lib_idx = library_size_index if library_size_index is not None else batch_index
             (
                 local_library_log_means,
                 local_library_log_vars,
-            ) = self._compute_local_library_params(batch_index)
+            ) = self._compute_local_library_params(_lib_idx)
             pl = Normal(local_library_log_means, local_library_log_vars.sqrt())
         pz = Normal(torch.zeros_like(z), torch.ones_like(z))
 
@@ -838,7 +851,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         from torch import logsumexp
         from torch.distributions import Normal
 
-        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
+        library_size_index = tensors.get(LIBRARY_SIZE_KEY, tensors[REGISTRY_KEYS.BATCH_KEY])
 
         to_sum = []
         if n_mc_samples_per_pass > n_mc_samples:
@@ -867,7 +880,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 (
                     local_library_log_means,
                     local_library_log_vars,
-                ) = self._compute_local_library_params(batch_index)
+                ) = self._compute_local_library_params(library_size_index)
 
                 p_l = Normal(local_library_log_means, local_library_log_vars.sqrt()).log_prob(library).sum(dim=-1)
                 q_l_x = ql.log_prob(library).sum(dim=-1)

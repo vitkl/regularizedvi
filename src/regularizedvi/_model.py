@@ -30,7 +30,6 @@ from scvi.data.fields import (
     ObsmField,
     StringUnsField,
 )
-from scvi.model._utils import _init_library_size
 from scvi.model.base import (
     ArchesMixin,
     BaseMinifiedModeModelClass,
@@ -59,6 +58,7 @@ from regularizedvi._constants import (
     DEFAULT_USE_BATCH_NORM,
     DEFAULT_USE_LAYER_NORM,
     DISPERSION_KEY,
+    LIBRARY_SIZE_KEY,
 )
 from regularizedvi._module import RegularizedVAE
 
@@ -256,10 +256,39 @@ class AmbientRegularizedSCVI(
                 else None
             )
             n_batch = self.summary_stats.n_batch
+            # Extract n_library_cats from LIBRARY_SIZE_KEY registry
+            if LIBRARY_SIZE_KEY in self.adata_manager.data_registry:
+                n_library_cats = len(self.adata_manager.get_state_registry(LIBRARY_SIZE_KEY).categorical_mapping)
+            else:
+                n_library_cats = n_batch
             use_size_factor_key = REGISTRY_KEYS.SIZE_FACTOR_KEY in self.adata_manager.data_registry
             library_log_means, library_log_vars = None, None
             if not use_size_factor_key and self.minified_data_type is None:
-                library_log_means, library_log_vars = _init_library_size(self.adata_manager, n_batch)
+                # Compute library priors per library_size_key group
+                lib_indices = (
+                    self.adata_manager.get_from_registry(LIBRARY_SIZE_KEY)
+                    if LIBRARY_SIZE_KEY in self.adata_manager.data_registry
+                    else self.adata_manager.get_from_registry(REGISTRY_KEYS.BATCH_KEY)
+                )
+                data = self.adata_manager.get_from_registry(REGISTRY_KEYS.X_KEY)
+                library_log_means_arr = np.zeros(n_library_cats)
+                library_log_vars_arr = np.ones(n_library_cats)
+                for i_group in np.unique(lib_indices):
+                    idx_group = np.squeeze(lib_indices == i_group)
+                    group_data = data[idx_group.nonzero()[0]]
+                    sum_counts = group_data.sum(axis=1)
+                    masked_log_sum = np.ma.log(sum_counts)
+                    if np.ma.is_masked(masked_log_sum):
+                        logger.warning(
+                            "Cells with zero total counts in library group %d. "
+                            "Consider filtering with scanpy.pp.filter_cells().",
+                            i_group,
+                        )
+                    log_counts = masked_log_sum.filled(0)
+                    library_log_means_arr[i_group] = np.mean(log_counts).astype(np.float32)
+                    library_log_vars_arr[i_group] = np.var(log_counts).astype(np.float32)
+                library_log_means = library_log_means_arr.reshape(1, -1)
+                library_log_vars = library_log_vars_arr.reshape(1, -1)
             # Determine use_observed_lib_size:
             # If library_log_means/vars are provided (computed above), learn library size.
             # This is a key regularizedvi default — observed totals include ambient RNA.
@@ -272,6 +301,7 @@ class AmbientRegularizedSCVI(
                 n_cats_per_cov=n_cats_per_cov,
                 n_cats_per_ambient_cov=n_cats_per_ambient_cov,
                 n_dispersion_cats=n_dispersion_cats,
+                n_library_cats=n_library_cats,
                 n_hidden=n_hidden,
                 n_latent=n_latent,
                 n_layers=n_layers,
@@ -315,6 +345,7 @@ class AmbientRegularizedSCVI(
         continuous_covariate_keys: list[str] | None = None,
         ambient_covariate_keys: list[str] | None = None,
         dispersion_key: str | None = None,
+        library_size_key: str | None = None,
         **kwargs,
     ):
         """%(summary)s.
@@ -340,12 +371,19 @@ class AmbientRegularizedSCVI(
             is ``"gene-batch"``, the second dimension of ``px_r`` is sized by
             the number of categories in this key (instead of ``n_batch``).
             If None and ``batch_key`` is provided, defaults to ``batch_key``.
+        library_size_key
+            Optional categorical ``.obs`` key whose categories define groups
+            for the library size prior ``N(mu_s, sigma_s)``. The prior mean
+            and variance are computed per group from data at setup time.
+            If None and ``batch_key`` is provided, defaults to ``batch_key``.
         """
         # Backward compat: batch_key fans out to purpose-specific keys
         if batch_key is not None and ambient_covariate_keys is None:
             ambient_covariate_keys = [batch_key]
         if batch_key is not None and dispersion_key is None:
             dispersion_key = batch_key
+        if batch_key is not None and library_size_key is None:
+            library_size_key = batch_key
 
         # Validation: must have ambient covariate source
         if ambient_covariate_keys is None:
@@ -362,6 +400,13 @@ class AmbientRegularizedSCVI(
                 "batch_key is used as the default dispersion grouping."
             )
 
+        # Validation: must have library size covariate source
+        if library_size_key is None:
+            raise ValueError(
+                "Either batch_key or library_size_key must be provided. "
+                "batch_key is used as the default library size grouping."
+            )
+
         setup_method_args = cls._get_setup_method_args(**locals())
         anndata_fields = [
             LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
@@ -372,6 +417,7 @@ class AmbientRegularizedSCVI(
             NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
             CategoricalJointObsField(AMBIENT_COVS_KEY, ambient_covariate_keys),
             CategoricalObsField(DISPERSION_KEY, dispersion_key),
+            CategoricalObsField(LIBRARY_SIZE_KEY, library_size_key),
         ]
         # register new fields if the adata is minified
         adata_minify_type = _get_adata_minify_type(adata)
