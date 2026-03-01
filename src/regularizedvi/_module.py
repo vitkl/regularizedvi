@@ -354,11 +354,16 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         n_input_encoder = n_input + n_continuous_cov * encode_covariates
         if self.batch_representation == "embedding":
             n_input_encoder += batch_dim * encode_covariates
-            cat_list = list([] if n_cats_per_cov is None else n_cats_per_cov)
-        else:
-            cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
 
-        encoder_cat_list = cat_list if encode_covariates else None
+        # Encoder/decoder covariate composition (purpose-driven keys)
+        # Encoder sees: [ambient_covs...] + [cat_covs...] + [library_size]
+        # ambient_covs and library_size are always injected (purpose-specific)
+        # cat_covs only if encode_covariates=True
+        # Decoder sees: [cat_covs...] only (no batch injection by default)
+        _ambient_cats = list(self.n_cats_per_ambient_cov) if self.n_cats_per_ambient_cov else []
+        _cat_cats = list(n_cats_per_cov or [])
+        _lib_cats = [self.n_library_cats]
+        encoder_cat_list = _ambient_cats + (_cat_cats if encode_covariates else []) + _lib_cats
         _extra_encoder_kwargs = extra_encoder_kwargs or {}
         self.z_encoder = RegularizedEncoder(
             n_input_encoder,
@@ -398,10 +403,12 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         if self.use_batch_in_decoder:
             if self.batch_representation == "embedding":
                 n_input_decoder += batch_dim
-            decoder_cat_list = cat_list
+                decoder_cat_list = _cat_cats
+            else:
+                decoder_cat_list = [n_batch] + _cat_cats
         else:
             # Batch-free decoder: only categorical covariates, no batch
-            decoder_cat_list = list([] if n_cats_per_cov is None else n_cats_per_cov)
+            decoder_cat_list = _cat_cats
 
         # Determine scale activation
         if scale_activation is not None:
@@ -518,24 +525,28 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             encoder_input = torch.cat((x_, cont_covs), dim=-1)
         else:
             encoder_input = x_
+
+        # Build encoder categorical inputs: [ambient_covs...] + [cat_covs...] + [library_size]
+        # ambient_covs and library_size are always injected (purpose-specific)
+        # cat_covs only if encode_covariates=True
+        # Cast to long for one_hot in FCLayers
+        encoder_categorical_input = ()
+        if ambient_covs is not None:
+            encoder_categorical_input += tuple(c.long() for c in torch.split(ambient_covs, 1, dim=1))
         if cat_covs is not None and self.encode_covariates:
-            categorical_input = torch.split(cat_covs, 1, dim=1)
-        else:
-            categorical_input = ()
+            encoder_categorical_input += torch.split(cat_covs, 1, dim=1)
+        _lib_idx = library_size_index if library_size_index is not None else batch_index
+        encoder_categorical_input += (_lib_idx.long(),)
 
         if self.batch_representation == "embedding" and self.encode_covariates:
             batch_rep = self.compute_embedding(REGISTRY_KEYS.BATCH_KEY, batch_index)
             encoder_input = torch.cat([encoder_input, batch_rep], dim=-1)
-            qz, z = self.z_encoder(encoder_input, *categorical_input)
-        else:
-            qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input)
+
+        qz, z = self.z_encoder(encoder_input, *encoder_categorical_input)
 
         ql = None
         if not self.use_observed_lib_size:
-            if self.batch_representation == "embedding":
-                ql, library_encoded = self.l_encoder(encoder_input, *categorical_input)
-            else:
-                ql, library_encoded = self.l_encoder(encoder_input, batch_index, *categorical_input)
+            ql, library_encoded = self.l_encoder(encoder_input, *encoder_categorical_input)
             library = library_encoded
 
         if n_samples > 1:
