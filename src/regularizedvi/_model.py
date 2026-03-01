@@ -58,6 +58,7 @@ from regularizedvi._constants import (
     DEFAULT_USE_BATCH_IN_DECODER,
     DEFAULT_USE_BATCH_NORM,
     DEFAULT_USE_LAYER_NORM,
+    DISPERSION_KEY,
 )
 from regularizedvi._module import RegularizedVAE
 
@@ -249,6 +250,11 @@ class AmbientRegularizedSCVI(
                 if AMBIENT_COVS_KEY in self.adata_manager.data_registry
                 else None
             )
+            n_dispersion_cats = (
+                len(self.adata_manager.get_state_registry(DISPERSION_KEY).categorical_mapping)
+                if DISPERSION_KEY in self.adata_manager.data_registry
+                else None
+            )
             n_batch = self.summary_stats.n_batch
             use_size_factor_key = REGISTRY_KEYS.SIZE_FACTOR_KEY in self.adata_manager.data_registry
             library_log_means, library_log_vars = None, None
@@ -265,6 +271,7 @@ class AmbientRegularizedSCVI(
                 n_continuous_cov=self.summary_stats.get("n_extra_continuous_covs", 0),
                 n_cats_per_cov=n_cats_per_cov,
                 n_cats_per_ambient_cov=n_cats_per_ambient_cov,
+                n_dispersion_cats=n_dispersion_cats,
                 n_hidden=n_hidden,
                 n_latent=n_latent,
                 n_layers=n_layers,
@@ -307,6 +314,7 @@ class AmbientRegularizedSCVI(
         categorical_covariate_keys: list[str] | None = None,
         continuous_covariate_keys: list[str] | None = None,
         ambient_covariate_keys: list[str] | None = None,
+        dispersion_key: str | None = None,
         **kwargs,
     ):
         """%(summary)s.
@@ -326,10 +334,18 @@ class AmbientRegularizedSCVI(
             Each key produces a separate ``(n_features, n_cats)`` parameter.
             The per-cell background is the sum across all covariates.
             If None and ``batch_key`` is provided, defaults to ``[batch_key]``.
+        dispersion_key
+            Optional categorical ``.obs`` key whose categories define the
+            per-group dispersion parameter ``px_r[g, s]``. When ``dispersion``
+            is ``"gene-batch"``, the second dimension of ``px_r`` is sized by
+            the number of categories in this key (instead of ``n_batch``).
+            If None and ``batch_key`` is provided, defaults to ``batch_key``.
         """
-        # Backward compat: batch_key fans out to ambient_covariate_keys
+        # Backward compat: batch_key fans out to purpose-specific keys
         if batch_key is not None and ambient_covariate_keys is None:
             ambient_covariate_keys = [batch_key]
+        if batch_key is not None and dispersion_key is None:
+            dispersion_key = batch_key
 
         # Validation: must have ambient covariate source
         if ambient_covariate_keys is None:
@@ -337,6 +353,13 @@ class AmbientRegularizedSCVI(
                 "Either batch_key or ambient_covariate_keys must be provided. "
                 "batch_key is used as the default ambient covariate for additive "
                 "background correction."
+            )
+
+        # Validation: must have dispersion covariate source
+        if dispersion_key is None:
+            raise ValueError(
+                "Either batch_key or dispersion_key must be provided. "
+                "batch_key is used as the default dispersion grouping."
             )
 
         setup_method_args = cls._get_setup_method_args(**locals())
@@ -348,6 +371,7 @@ class AmbientRegularizedSCVI(
             CategoricalJointObsField(REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariate_keys),
             NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
             CategoricalJointObsField(AMBIENT_COVS_KEY, ambient_covariate_keys),
+            CategoricalObsField(DISPERSION_KEY, dispersion_key),
         ]
         # register new fields if the adata is minified
         adata_minify_type = _get_adata_minify_type(adata)

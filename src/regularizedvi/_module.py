@@ -31,7 +31,7 @@ from scvi.module.base import (
 from torch.distributions import Exponential, Normal
 from torch.nn.functional import one_hot
 
-from regularizedvi._constants import AMBIENT_COVS_KEY
+from regularizedvi._constants import AMBIENT_COVS_KEY, DISPERSION_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -227,6 +227,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         additive_bg_prior_beta: float = 100.0,
         # Ambient covariates (for additive background, decoupled from batch_key)
         n_cats_per_ambient_cov: list[int] | None = None,
+        # Dispersion covariate (controls per-group px_r, decoupled from batch_key)
+        n_dispersion_cats: int | None = None,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -251,6 +253,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.dispersion_hyper_prior_beta = dispersion_hyper_prior_beta
         self.additive_bg_prior_alpha = additive_bg_prior_alpha
         self.additive_bg_prior_beta = additive_bg_prior_beta
+
+        # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
+        self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
 
         if not self.use_observed_lib_size:
             if library_log_means is None or library_log_vars is None:
@@ -277,12 +282,13 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             else:
                 self.px_r = torch.nn.Parameter(torch.randn(n_input))
         elif self.dispersion == "gene-batch":
+            n_disp = self.n_dispersion_cats
             if _px_r_init is not None:
                 self.px_r = torch.nn.Parameter(
-                    torch.full((n_input, n_batch), _px_r_init) + 0.1 * torch.randn(n_input, n_batch)
+                    torch.full((n_input, n_disp), _px_r_init) + 0.1 * torch.randn(n_input, n_disp)
                 )
             else:
-                self.px_r = torch.nn.Parameter(torch.randn(n_input, n_batch))
+                self.px_r = torch.nn.Parameter(torch.randn(n_input, n_disp))
         elif self.dispersion == "gene-label":
             if _px_r_init is not None:
                 self.px_r = torch.nn.Parameter(
@@ -303,9 +309,10 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             _init_rate = regularise_dispersion_prior
             # inverse softplus: log(exp(x) - 1)
             _raw_init = torch.log(torch.expm1(torch.tensor(_init_rate)))
-            if self.dispersion in ("gene-batch", "gene-label"):
-                n_rate = n_batch if self.dispersion == "gene-batch" else n_labels
-                self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.expand(n_rate).clone())
+            if self.dispersion == "gene-batch":
+                self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.expand(self.n_dispersion_cats).clone())
+            elif self.dispersion == "gene-label":
+                self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.expand(n_labels).clone())
             else:
                 self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.unsqueeze(0).clone())
 
@@ -457,6 +464,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             MODULE_KEYS.CAT_COVS_KEY: tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
             MODULE_KEYS.SIZE_FACTOR_KEY: size_factor,
             "ambient_covs": tensors.get(AMBIENT_COVS_KEY, None),
+            "dispersion_index": tensors.get(DISPERSION_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
         }
 
     def _compute_local_library_params(
@@ -576,6 +584,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         y: torch.Tensor | None = None,
         transform_batch: torch.Tensor | None = None,
         ambient_covs: torch.Tensor | None = None,
+        dispersion_index: torch.Tensor | None = None,
     ) -> dict[str, Distribution | None]:
         """Run the generative process."""
         from torch.nn.functional import linear
@@ -649,7 +658,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 one_hot(y.squeeze(-1), self.n_labels).float(), self.px_r
             )  # px_r gets transposed - last dimension is nb genes
         elif self.dispersion == "gene-batch":
-            px_r = linear(one_hot(batch_index.squeeze(-1), self.n_batch).float(), self.px_r)
+            _disp_idx = dispersion_index if dispersion_index is not None else batch_index
+            px_r = linear(one_hot(_disp_idx.squeeze(-1).long(), self.n_dispersion_cats).float(), self.px_r)
         elif self.dispersion == "gene":
             px_r = self.px_r
 
@@ -730,7 +740,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             # Level 2: Exponential prior on dispersion with learned rate
             # Broadcast rate to match px_r shape
             if self.dispersion == "gene-batch":
-                # learned_rate: (n_batch,), px_r: (n_input, n_batch)
+                # learned_rate: (n_dispersion_cats,), px_r: (n_input, n_dispersion_cats)
                 rate = learned_rate.unsqueeze(0).expand_as(self.px_r)
             elif self.dispersion == "gene-label":
                 rate = learned_rate.unsqueeze(0).expand_as(self.px_r)
