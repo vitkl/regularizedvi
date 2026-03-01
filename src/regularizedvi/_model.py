@@ -50,6 +50,7 @@ from regularizedvi._constants import (
     DEFAULT_GENE_LIKELIHOOD,
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
     DEFAULT_LIBRARY_N_HIDDEN,
+    DEFAULT_REGULARISE_BACKGROUND,
     DEFAULT_REGULARISE_DISPERSION,
     DEFAULT_REGULARISE_DISPERSION_PRIOR,
     DEFAULT_SCALE_ACTIVATION,
@@ -192,6 +193,7 @@ class AmbientRegularizedSCVI(
         dispersion_hyper_prior_beta: float = DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
         additive_bg_prior_alpha: float = DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
         additive_bg_prior_beta: float = DEFAULT_ADDITIVE_BG_PRIOR_BETA,
+        regularise_background: bool = DEFAULT_REGULARISE_BACKGROUND,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_BATCH_NORM,
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
         **kwargs,
@@ -219,6 +221,7 @@ class AmbientRegularizedSCVI(
             "dispersion_hyper_prior_beta": dispersion_hyper_prior_beta,
             "additive_bg_prior_alpha": additive_bg_prior_alpha,
             "additive_bg_prior_beta": additive_bg_prior_beta,
+            "regularise_background": regularise_background,
             **kwargs,
         }
         self._model_summary_string = (
@@ -326,6 +329,7 @@ class AmbientRegularizedSCVI(
                 dispersion_hyper_prior_beta=dispersion_hyper_prior_beta,
                 additive_bg_prior_alpha=additive_bg_prior_alpha,
                 additive_bg_prior_beta=additive_bg_prior_beta,
+                regularise_background=regularise_background,
                 **kwargs,
             )
             self.module.minified_data_type = self.minified_data_type

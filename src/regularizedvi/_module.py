@@ -225,6 +225,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         dispersion_hyper_prior_beta: float = 3.0,
         additive_bg_prior_alpha: float = 1.0,
         additive_bg_prior_beta: float = 100.0,
+        regularise_background: bool = True,
         # Ambient covariates (for additive background, decoupled from batch_key)
         n_cats_per_ambient_cov: list[int] | None = None,
         # Dispersion covariate (controls per-group px_r, decoupled from batch_key)
@@ -255,6 +256,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.dispersion_hyper_prior_beta = dispersion_hyper_prior_beta
         self.additive_bg_prior_alpha = additive_bg_prior_alpha
         self.additive_bg_prior_beta = additive_bg_prior_beta
+        self.regularise_background = regularise_background
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
         self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
@@ -785,7 +787,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         # Additive background Gamma prior (cell2location-style s_g_gene_add).
         # Gamma(alpha, beta) on exp(additive_background) pushes background small.
-        if self.use_additive_background and self.n_total_ambient_cats > 0:
+        if self.regularise_background and self.use_additive_background and self.n_total_ambient_cats > 0:
             from torch.distributions import Gamma
 
             n_obs = x.shape[0]

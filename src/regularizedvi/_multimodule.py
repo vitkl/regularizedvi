@@ -198,6 +198,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         region_factors_prior_beta: float = 200.0,
         additive_bg_prior_alpha: float = 1.0,
         additive_bg_prior_beta: float = 100.0,
+        regularise_background: bool = True,
         # Ambient covariates (for additive background, decoupled from batch_key)
         n_cats_per_ambient_cov: list[int] | None = None,
         # Dispersion covariate (controls per-group px_r, decoupled from batch_key)
@@ -240,6 +241,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.region_factors_prior_beta = region_factors_prior_beta
         self.additive_bg_prior_alpha = additive_bg_prior_alpha
         self.additive_bg_prior_beta = additive_bg_prior_beta
+        self.regularise_background = regularise_background
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
         self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
@@ -989,7 +991,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             loss = loss + rf_penalty / n_obs
 
         # ---- Additive background Gamma prior (cell2location-style s_g_gene_add) ----
-        if self.additive_background_modalities:
+        if self.regularise_background and self.additive_background_modalities:
             n_obs = recon_loss.shape[0]
             bg_penalty = torch.tensor(0.0, device=recon_loss.device)
             for name in self.additive_background_modalities:

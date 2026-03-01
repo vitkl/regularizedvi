@@ -484,6 +484,25 @@ class TestParameterInitialization:
         assert model.module.additive_bg_prior_alpha == 1.0
         assert model.module.additive_bg_prior_beta == 100.0
 
+    def test_regularise_background_false_single(self, adata):
+        """Single-modal: regularise_background=False keeps param but skips penalty."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, regularise_background=False)
+        assert model.module.regularise_background is False
+        assert model.module.use_additive_background is True
+        assert hasattr(model.module, "additive_background")
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+    def test_regularise_background_false_multimodal(self, mdata):
+        """Multimodal: regularise_background=False keeps param but skips penalty."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"], regularise_background=False
+        )
+        assert model.module.regularise_background is False
+        assert "rna" in model.module.additive_background
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
 
 class TestGammaPoissonMode:
     """Tests for GammaPoisson likelihood (the only supported mode)."""

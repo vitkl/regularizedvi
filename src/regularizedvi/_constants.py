@@ -34,6 +34,7 @@ DEFAULT_DISPERSION_HYPER_PRIOR_BETA = 3.0
 # Pushes ambient/background contribution to be small relative to biological signal.
 DEFAULT_ADDITIVE_BG_PRIOR_ALPHA = 1.0
 DEFAULT_ADDITIVE_BG_PRIOR_BETA = 100.0
+DEFAULT_REGULARISE_BACKGROUND = True
 
 # --- Region factors (cell2location-style detection_tech_gene) ---
 # Gamma(alpha, beta) prior on softplus(param)/0.7; mean = alpha/beta = 1.0.
