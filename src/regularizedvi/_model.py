@@ -42,6 +42,7 @@ from scvi.model.base import (
 from scvi.utils import setup_anndata_dsp
 
 from regularizedvi._constants import (
+    AMBIENT_COVS_KEY,
     DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
     DEFAULT_ADDITIVE_BG_PRIOR_BETA,
     DEFAULT_DISPERSION,
@@ -243,6 +244,11 @@ class AmbientRegularizedSCVI(
                 if REGISTRY_KEYS.CAT_COVS_KEY in self.adata_manager.data_registry
                 else None
             )
+            n_cats_per_ambient_cov = (
+                self.adata_manager.get_state_registry(AMBIENT_COVS_KEY).n_cats_per_key
+                if AMBIENT_COVS_KEY in self.adata_manager.data_registry
+                else None
+            )
             n_batch = self.summary_stats.n_batch
             use_size_factor_key = REGISTRY_KEYS.SIZE_FACTOR_KEY in self.adata_manager.data_registry
             library_log_means, library_log_vars = None, None
@@ -258,6 +264,7 @@ class AmbientRegularizedSCVI(
                 n_labels=self.summary_stats.n_labels,
                 n_continuous_cov=self.summary_stats.get("n_extra_continuous_covs", 0),
                 n_cats_per_cov=n_cats_per_cov,
+                n_cats_per_ambient_cov=n_cats_per_ambient_cov,
                 n_hidden=n_hidden,
                 n_latent=n_latent,
                 n_layers=n_layers,
@@ -299,6 +306,7 @@ class AmbientRegularizedSCVI(
         size_factor_key: str | None = None,
         categorical_covariate_keys: list[str] | None = None,
         continuous_covariate_keys: list[str] | None = None,
+        ambient_covariate_keys: list[str] | None = None,
         **kwargs,
     ):
         """%(summary)s.
@@ -312,7 +320,25 @@ class AmbientRegularizedSCVI(
         %(param_size_factor_key)s
         %(param_cat_cov_keys)s
         %(param_cont_cov_keys)s
+        ambient_covariate_keys
+            Optional list of categorical ``.obs`` keys whose categories define
+            per-covariate additive background terms (ambient RNA correction).
+            Each key produces a separate ``(n_features, n_cats)`` parameter.
+            The per-cell background is the sum across all covariates.
+            If None and ``batch_key`` is provided, defaults to ``[batch_key]``.
         """
+        # Backward compat: batch_key fans out to ambient_covariate_keys
+        if batch_key is not None and ambient_covariate_keys is None:
+            ambient_covariate_keys = [batch_key]
+
+        # Validation: must have ambient covariate source
+        if ambient_covariate_keys is None:
+            raise ValueError(
+                "Either batch_key or ambient_covariate_keys must be provided. "
+                "batch_key is used as the default ambient covariate for additive "
+                "background correction."
+            )
+
         setup_method_args = cls._get_setup_method_args(**locals())
         anndata_fields = [
             LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
@@ -321,6 +347,7 @@ class AmbientRegularizedSCVI(
             NumericalObsField(REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False),
             CategoricalJointObsField(REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariate_keys),
             NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
+            CategoricalJointObsField(AMBIENT_COVS_KEY, ambient_covariate_keys),
         ]
         # register new fields if the adata is minified
         adata_minify_type = _get_adata_minify_type(adata)

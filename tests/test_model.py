@@ -71,7 +71,7 @@ class TestAmbientRegularizedSCVI:
         assert module.regularise_dispersion is True
 
     def test_additive_background_shape(self, adata):
-        """Test additive_background parameter has correct shape."""
+        """Test additive_background ParameterList has correct shape."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(
             adata,
             layer="counts",
@@ -84,7 +84,9 @@ class TestAmbientRegularizedSCVI:
         n_batch = len(adata.obs["batch"].cat.categories)
 
         assert hasattr(module, "additive_background")
-        assert module.additive_background.shape == (n_vars, n_batch)
+        # With batch_key backward compat, one ambient covariate = batch_key
+        assert len(module.additive_background) == 1
+        assert module.additive_background[0].shape == (n_vars, n_batch)
 
     def test_dispersion_shape_gene_batch(self, adata):
         """Test dispersion parameter shape with gene-batch mode."""
@@ -217,6 +219,39 @@ class TestAmbientRegularizedSCVI:
         assert model.module.library_log_vars is not None
         assert model.module.library_log_means is not None
 
+    def test_ambient_covariate_keys(self, adata):
+        """Test setup_anndata with explicit ambient_covariate_keys."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+            ambient_covariate_keys=["batch", "site"],
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+        )
+        module = model.module
+        # 2 ambient covariates: batch (3 cats) + site (2 cats)
+        assert len(module.n_cats_per_ambient_cov) == 2
+        assert module.n_cats_per_ambient_cov[0] == 3  # batch
+        assert module.n_cats_per_ambient_cov[1] == 2  # site
+        # 2 params in ParameterList
+        assert len(module.additive_background) == 2
+        assert module.additive_background[0].shape[1] == 3
+        assert module.additive_background[1].shape[1] == 2
+        # Training should work
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+    def test_ambient_covariate_keys_required(self, adata):
+        """Test that either batch_key or ambient_covariate_keys must be provided."""
+        with pytest.raises(ValueError, match="Either batch_key or ambient_covariate_keys"):
+            regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+                adata,
+                layer="counts",
+            )
+
 
 class TestRegularizedVAEModule:
     """Tests for the RegularizedVAE module directly."""
@@ -279,10 +314,11 @@ class TestParameterInitialization:
         """Additive background should be initialized near Gamma(1,100) mean=0.01."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
         model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
-        bg = torch.exp(model.module.additive_background).detach()
+        # With batch_key backward compat, one ambient covariate param in ParameterList
+        bg = torch.exp(model.module.additive_background[0]).detach()
         assert bg.mean().item() == pytest.approx(0.01, rel=0.2)
         # Noise is very small
-        assert model.module.additive_background.detach().std().item() < 0.05
+        assert model.module.additive_background[0].detach().std().item() < 0.05
 
     def test_dispersion_prior_rate_init(self, adata):
         """Dispersion prior rate should initialize at exactly regularise_dispersion_prior."""
@@ -353,7 +389,7 @@ class TestParameterInitialization:
             adata, n_hidden=16, n_latent=4, additive_bg_prior_alpha=2.0, additive_bg_prior_beta=50.0
         )
         # Gamma(2, 50) → mean = 0.04
-        bg = torch.exp(model.module.additive_background).detach()
+        bg = torch.exp(model.module.additive_background[0]).detach()
         assert bg.mean().item() == pytest.approx(0.04, rel=0.2)
 
     def test_additive_bg_prior_multimodal_stored(self, mdata):

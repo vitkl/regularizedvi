@@ -31,6 +31,8 @@ from scvi.module.base import (
 from torch.distributions import Exponential, Normal
 from torch.nn.functional import one_hot
 
+from regularizedvi._constants import AMBIENT_COVS_KEY
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Literal
@@ -223,6 +225,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         dispersion_hyper_prior_beta: float = 3.0,
         additive_bg_prior_alpha: float = 1.0,
         additive_bg_prior_beta: float = 100.0,
+        # Ambient covariates (for additive background, decoupled from batch_key)
+        n_cats_per_ambient_cov: list[int] | None = None,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -305,13 +309,23 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             else:
                 self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.unsqueeze(0).clone())
 
-        # Additive background: per-gene, per-batch learnable parameter
+        # Ambient covariates (for additive background, decoupled from batch_key)
+        self.n_cats_per_ambient_cov = list(n_cats_per_ambient_cov) if n_cats_per_ambient_cov is not None else []
+
+        # Additive background: per-gene, per-ambient-covariate learnable parameters.
+        # Each ambient covariate gets a (n_input, n_cats_i) parameter.
+        # Per-cell background is the sum across all covariates.
         # Initialized at log(prior_mean) = log(alpha/beta) so exp(init) matches prior mean.
         # Default Gamma(1, 100) → mean = 0.01, small relative to px_scale.
-        if self.use_additive_background:
+        if self.use_additive_background and self.n_cats_per_ambient_cov:
             _bg_init = math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
-            self.additive_background = torch.nn.Parameter(
-                torch.full((n_input, n_batch), _bg_init) + 0.01 * torch.randn(n_input, n_batch)
+            self.additive_background = torch.nn.ParameterList(
+                [
+                    torch.nn.Parameter(
+                        torch.full((n_input, int(n_cats_i)), _bg_init) + 0.01 * torch.randn(n_input, int(n_cats_i))
+                    )
+                    for n_cats_i in self.n_cats_per_ambient_cov
+                ]
             )
 
         self.batch_representation = batch_representation
@@ -413,6 +427,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 MODULE_KEYS.BATCH_INDEX_KEY: tensors[REGISTRY_KEYS.BATCH_KEY],
                 MODULE_KEYS.CONT_COVS_KEY: tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
                 MODULE_KEYS.CAT_COVS_KEY: tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
+                "ambient_covs": tensors.get(AMBIENT_COVS_KEY, None),
             }
         elif self.minified_data_type == ADATA_MINIFY_TYPE.LATENT_POSTERIOR:
             return {
@@ -441,6 +456,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             MODULE_KEYS.CONT_COVS_KEY: tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
             MODULE_KEYS.CAT_COVS_KEY: tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
             MODULE_KEYS.SIZE_FACTOR_KEY: size_factor,
+            "ambient_covs": tensors.get(AMBIENT_COVS_KEY, None),
         }
 
     def _compute_local_library_params(
@@ -469,6 +485,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         batch_index: torch.Tensor,
         cont_covs: torch.Tensor | None = None,
         cat_covs: torch.Tensor | None = None,
+        ambient_covs: torch.Tensor | None = None,
         n_samples: int = 1,
     ) -> dict[str, torch.Tensor | Distribution | None]:
         """Run the regular inference process."""
@@ -558,6 +575,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         size_factor: torch.Tensor | None = None,
         y: torch.Tensor | None = None,
         transform_batch: torch.Tensor | None = None,
+        ambient_covs: torch.Tensor | None = None,
     ) -> dict[str, Distribution | None]:
         """Run the generative process."""
         from torch.nn.functional import linear
@@ -581,13 +599,15 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         if not self.use_size_factor_key:
             size_factor = library
 
-        # Compute additive background if enabled
+        # Compute additive background if enabled (sum over ambient covariates)
         bg = None
-        if self.use_additive_background:
-            # one_hot(batch_index) @ exp(self.additive_background).T -> (n_cells, n_genes)
-            bg = torch.matmul(
-                one_hot(batch_index.squeeze(-1), self.n_batch).float(),
-                torch.exp(self.additive_background).T,
+        if self.use_additive_background and self.n_cats_per_ambient_cov and ambient_covs is not None:
+            bg = sum(
+                torch.matmul(
+                    one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float(),
+                    torch.exp(self.additive_background[i]).T,
+                )
+                for i, n_cats_i in enumerate(self.n_cats_per_ambient_cov)
             )
 
         # Decoder call: batch-free or with batch
@@ -725,15 +745,18 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         # Additive background Gamma prior (cell2location-style s_g_gene_add).
         # Gamma(alpha, beta) on exp(additive_background) pushes background small.
-        if self.use_additive_background:
+        # Iterates over per-covariate background parameters.
+        if self.use_additive_background and self.n_cats_per_ambient_cov:
             from torch.distributions import Gamma
 
             n_obs = x.shape[0]
-            bg_transformed = torch.exp(self.additive_background)
-            neg_log_bg_prior = (
-                -Gamma(self.additive_bg_prior_alpha, self.additive_bg_prior_beta).log_prob(bg_transformed).sum()
-            )
-            loss = loss + neg_log_bg_prior / n_obs
+            bg_penalty = torch.tensor(0.0, device=x.device)
+            for bg_param in self.additive_background:
+                bg_transformed = torch.exp(bg_param)
+                bg_penalty = bg_penalty + (
+                    -Gamma(self.additive_bg_prior_alpha, self.additive_bg_prior_beta).log_prob(bg_transformed).sum()
+                )
+            loss = loss + bg_penalty / n_obs
 
         # a payload to be used during autotune
         if self.extra_payload_autotune:
