@@ -36,34 +36,35 @@ The inference model uses amortised variational inference to fit all cell specifi
 
 **regularizedvi** adapts [cell2location](https://doi.org/10.1038/s41587-021-01139-4)/[cell2fate](https://doi.org/10.1038/s41592-025-02608-3) modelling principles to scVI. All learnable parameters are initialised at their prior means to improve training stability.
 
-**Latent variable and library size** — standard scVI structure with a constrained library prior ([`_module.py:267–272`](src/regularizedvi/_module.py#L267-L272)):
+**Latent variable and library size** — standard scVI structure with a constrained library prior. Library prior parameters $\ell\_p^{\mu}$, $\ell\_p^{\sigma}$ are computed per `library_size_key` group $p$ (one key, [`_module.py:268–273`](src/regularizedvi/_module.py#L268-L273)):
 
 $$z_n \sim \text{Normal}(0, I)$$
-$$\ell_n \sim \text{LogNormal}(\ell_\mu^\top s_n,\; 0.05 \cdot \ell_{\sigma^2}^\top s_n)$$
+$$\ell_n \sim \text{LogNormal}(\ell_p^{\mu},\; 0.05 \cdot \ell_p^{\sigma})$$
 
-**Decoder output** — batch-free decoder maps $z\_n$ and categorical covariates $c\_n$ (not batch $s\_n$) to non-negative gene expression via softplus ([`_module.py:638–645`](src/regularizedvi/_module.py#L638-L645), [`_components.py:461–462`](src/regularizedvi/_components.py#L461-L462)):
+**Decoder output** — batch-free decoder maps $z\_n$ and categorical covariates $c\_{k,n}$ (not ambient/library covariates) to non-negative gene expression via softplus. Categorical covariates are selected by `categorical_covariate_keys` (many keys, [`_module.py:656–683`](src/regularizedvi/_module.py#L656-L683), [`_components.py:461–462`](src/regularizedvi/_components.py#L461-L462)):
 
-$$\rho_{ng} = \text{softplus}\big(f_w(z_n, c_n)\big) \in \mathbb{R}_{\geq 0}^G$$
+$$\rho_{ng} = \text{softplus}\big(f_w(z_n, c_{k,n})\big) \in \mathbb{R}_{\geq 0}^G$$
 
-**Additive background** — per-gene, per-batch ambient RNA with Gamma prior pushing $b\_{g,s\_n}$ toward 0.01 ([`_module.py:327–331`](src/regularizedvi/_module.py#L327-L331) init, [`_module.py:608–613`](src/regularizedvi/_module.py#L608-L613) one-hot selection, [`_module.py:767–777`](src/regularizedvi/_module.py#L767-L777) prior penalty):
+**Additive background** — per-gene ambient RNA with Gamma prior pushing $s\_{e,g}$ toward 0.01. Background parameters are indexed by `ambient_covariate_keys` (many keys, concatenated one-hot, [`_module.py:334–339`](src/regularizedvi/_module.py#L334-L339) init, [`_module.py:641–649`](src/regularizedvi/_module.py#L641-L649) one-hot selection, [`_module.py:788–796`](src/regularizedvi/_module.py#L788-L796) prior penalty):
 
-$$b_{g,s_n} = \exp(\beta_{g,s_n}), \qquad b_{g,s_n} \sim \text{Gamma}(1,\, 100)$$
+$$s_{e,g} = \exp(\beta_{e,g}), \qquad s_{e,g} \sim \text{Gamma}(1,\, 100)$$
 
-**Hierarchical dispersion prior** — two-level prior on inverse dispersion $\theta\_{g,s\_n} = \exp(\phi\_{g,s\_n})$ where `px_r` stores $\phi$. A learned rate $\lambda\_{s\_n}$ adapts regularisation strength per batch ([`_module.py:731–765`](src/regularizedvi/_module.py#L731-L765) full block, [`_module.py:737`](src/regularizedvi/_module.py#L737) Level 1 softplus, [`_module.py:758–764`](src/regularizedvi/_module.py#L758-L764) Level 2 transform):
+**Hierarchical dispersion prior** — two-level prior on inverse dispersion $\theta\_{g,d} = \exp(\phi\_{g,d})$ where `px_r` stores $\phi$. Dispersion groups $d$ are selected by `dispersion_key` (one key). A learned rate $\lambda\_d$ adapts regularisation strength per group ([`_module.py:748–784`](src/regularizedvi/_module.py#L748-L784) full block, [`_module.py:760`](src/regularizedvi/_module.py#L760) Level 1 softplus, [`_module.py:782–783`](src/regularizedvi/_module.py#L782-L783) Level 2 transform):
 
-$$\lambda_{s_n} \sim \text{Gamma}(9,\, 3), \qquad 1/\sqrt{\theta_{g,s_n}} \sim \text{Exponential}(\lambda_{s_n})$$
+$$\lambda_d \sim \text{Gamma}(9,\, 3), \qquad 1/\sqrt{\theta_{g,d}} \sim \text{Exponential}(\lambda_d)$$
 
-**Observation model** — GammaPoisson (= negative binomial) with mean $\mu\_{ng} = \ell\_n \cdot (\rho\_{ng} + b\_{g,s\_n})$ ([`_components.py:467`](src/regularizedvi/_components.py#L467) rate computation):
+**Observation model** — GammaPoisson (= negative binomial) with mean $\mu\_{ng} = \ell\_n \cdot (\rho\_{ng} + s\_{e\_n,g})$ ([`_components.py:467`](src/regularizedvi/_components.py#L467) rate computation):
 
-$$x_{ng} \sim \text{GammaPoisson}\Big(\text{concentration} = \theta_{g,s_n},\;\; \text{rate} = \frac{\theta_{g,s_n}}{\ell_n \cdot \big(\rho_{ng} + b_{g,s_n}\big)}\Big)$$
+$$x_{ng} \sim \text{GammaPoisson}\Big(\text{concentration} = \theta_{g,d_n},\;\; \text{rate} = \frac{\theta_{g,d_n}}{\ell_n \cdot \big(\rho_{ng} + s_{e_n,g}\big)}\Big)$$
 
 **Notation:**
-- $b\_{g,s\_n} = \exp(\beta\_{g,s\_n})$ — per-gene, per-batch ambient background; $\beta$ is the unconstrained parameter (code: `additive_background`)
-- $c\_n$ — categorical covariates only (site, donor, etc.), **not** batch $s\_n$ (batch-free decoder)
-- $\rho\_{ng} \in \mathbb{R}\_{\geq 0}^G$ — decoder output via softplus (not on the simplex), since $\rho\_{ng} + b\_{g,s\_n}$ need not sum to 1
-- $\theta\_{g,s\_n} = \exp(\phi\_{g,s\_n})$ — inverse dispersion in log-space (code: `px_r` stores $\phi$); initialised at $\log(\lambda^2) \approx 2.2$ so $\theta \approx 9$ (equilibrium: $1/\sqrt{\theta} = 1/\lambda$) ([`_module.py:277–284`](src/regularizedvi/_module.py#L277-L284))
-- $\lambda\_{s\_n}$ — learned Exponential rate, one per batch; $\text{Gamma}(9, 3)$ hyper-prior has mean 3 ([`_module.py:314–322`](src/regularizedvi/_module.py#L314-L322))
-- $0.05$ — library prior variance scaling factor, preventing library size from absorbing biological signal
+- $s\_{e,g} = \exp(\beta\_{e,g})$ — per-gene ambient background indexed by `ambient_covariate_keys` (many keys); $\beta$ is the unconstrained parameter (code: `additive_background`). When `batch_key` is used alone, $e$ = batch group.
+- $c\_{k,n}$ — categorical covariates (site, donor, etc.), selected by `categorical_covariate_keys` (many keys). Injected into encoder and decoder.
+- $\rho\_{ng} \in \mathbb{R}\_{\geq 0}^G$ — decoder output via softplus (not on the simplex), since $\rho\_{ng} + s\_{e,g}$ need not sum to 1
+- $\theta\_{g,d} = \exp(\phi\_{g,d})$ — inverse dispersion indexed by `dispersion_key` (one key); initialised at $\log(\lambda^2) \approx 2.2$ so $\theta \approx 9$ (equilibrium: $1/\sqrt{\theta} = 1/\lambda$) ([`_module.py:288–295`](src/regularizedvi/_module.py#L288-L295))
+- $\lambda\_d$ — learned Exponential rate, one per dispersion group; $\text{Gamma}(9, 3)$ hyper-prior has mean 3 ([`_module.py:312–321`](src/regularizedvi/_module.py#L312-L321))
+- $\ell\_p^{\mu}$, $\ell\_p^{\sigma}$ — library prior mean and variance per `library_size_key` group $p$ (one key). $0.05$ scaling factor prevents library size from absorbing biological signal.
+- **Backward compat**: When `batch_key` is used alone, $e = d = p$ (all index the same batch groups) and $t = k$ (categorical and scaling covariates share groups).
 
 The NB variance is $\text{Var}(x) = \mu + \mu^2/\theta$. Large $\theta$ → less overdispersion (Poisson limit). The Exponential prior on $1/\sqrt{\theta}$ is a containment prior (Simpson et al. 2017) that penalises large $1/\sqrt{\theta}$ (= small $\theta$, excessive overdispersion), regularising the NB toward the Poisson baseline. The data likelihood provides the opposing force, pulling $\theta$ toward values needed to explain observed count variance. At equilibrium $\theta \approx \lambda^2 = 9$, giving moderate overdispersion. This forces the decoder to capture biological signal through its mean structure rather than absorbing residuals via high variance.
 
