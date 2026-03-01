@@ -27,6 +27,7 @@ from scvi.model.base import (
 from scvi.utils import setup_anndata_dsp
 
 from regularizedvi._constants import (
+    AMBIENT_COVS_KEY,
     DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
     DEFAULT_ADDITIVE_BG_PRIOR_BETA,
     DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
@@ -274,6 +275,10 @@ class RegularizedMultimodalVI(
         if MODALITY_SCALING_COVS_KEY in self.adata_manager.data_registry:
             n_cats_per_scaling_cov = self.adata_manager.get_state_registry(MODALITY_SCALING_COVS_KEY).n_cats_per_key
 
+        n_cats_per_ambient_cov = None
+        if AMBIENT_COVS_KEY in self.adata_manager.data_registry:
+            n_cats_per_ambient_cov = self.adata_manager.get_state_registry(AMBIENT_COVS_KEY).n_cats_per_key
+
         kwargs = dict(self._module_kwargs)
         # Remove keys that are passed separately
         for k in ["n_hidden", "n_latent", "n_layers", "dropout_rate"]:
@@ -293,6 +298,7 @@ class RegularizedMultimodalVI(
             library_log_means=library_log_means,
             library_log_vars=library_log_vars,
             n_cats_per_scaling_cov=n_cats_per_scaling_cov,
+            n_cats_per_ambient_cov=n_cats_per_ambient_cov,
             **kwargs,
         )
 
@@ -303,6 +309,7 @@ class RegularizedMultimodalVI(
         mdata: MuData,
         modalities: dict[str, str] | None = None,
         batch_key: str | None = None,
+        ambient_covariate_keys: list[str] | None = None,
         categorical_covariate_keys: list[str] | None = None,
         continuous_covariate_keys: list[str] | None = None,
         modality_scaling_covariate_keys: list[str] | None = None,
@@ -319,6 +326,12 @@ class RegularizedMultimodalVI(
             E.g., ``{"rna": "rna", "atac": "atac"}``.
             If None, uses all modalities in the MuData.
         %(param_batch_key)s
+        ambient_covariate_keys
+            Optional list of categorical ``.obs`` keys whose categories define
+            per-covariate additive background terms (ambient RNA correction).
+            Each key produces a separate ``(n_features, n_cats)`` parameter.
+            The per-cell background is the sum across all covariates.
+            If None and ``batch_key`` is provided, defaults to ``[batch_key]``.
         %(param_cat_cov_keys)s
         %(param_cont_cov_keys)s
         modality_scaling_covariate_keys
@@ -333,6 +346,10 @@ class RegularizedMultimodalVI(
         if modalities is None:
             modalities = {key: key for key in mdata.mod.keys()}
 
+        # Backward compat: batch_key fans out to ambient covariates
+        if batch_key is not None and ambient_covariate_keys is None:
+            ambient_covariate_keys = [batch_key]
+
         anndata_fields = []
 
         # Register each modality's data matrix
@@ -346,7 +363,7 @@ class RegularizedMultimodalVI(
                 )
             )
 
-        # Batch key (shared across modalities)
+        # Batch key (shared across modalities, still needed for dispersion/library)
         anndata_fields.append(
             fields.MuDataCategoricalObsField(
                 REGISTRY_KEYS.BATCH_KEY,
@@ -354,6 +371,16 @@ class RegularizedMultimodalVI(
                 mod_key=list(modalities.values())[0],
             )
         )
+
+        # Ambient covariates (for additive background)
+        if ambient_covariate_keys:
+            anndata_fields.append(
+                fields.MuDataCategoricalJointObsField(
+                    AMBIENT_COVS_KEY,
+                    ambient_covariate_keys,
+                    mod_key=list(modalities.values())[0],
+                )
+            )
 
         # Covariates
         if categorical_covariate_keys:
@@ -534,6 +561,7 @@ class RegularizedMultimodalVI(
             batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
             cont_covs = tensors.get(REGISTRY_KEYS.CONT_COVS_KEY)
             cat_covs = tensors.get(REGISTRY_KEYS.CAT_COVS_KEY)
+            ambient_covs = tensors.get(AMBIENT_COVS_KEY)
 
             # Prepare categorical inputs (independent of z)
             if cat_covs is not None:
@@ -617,10 +645,13 @@ class RegularizedMultimodalVI(
 
                 # Additive background (independent of z)
                 bg = None
-                if name in self.module.additive_background:
-                    bg = torch.matmul(
-                        one_hot(batch_index.squeeze(-1), self.module.n_batch).float(),
-                        torch.exp(self.module.additive_background[name]).T,
+                if name in self.module.additive_background and ambient_covs is not None:
+                    bg = sum(
+                        torch.matmul(
+                            one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float(),
+                            torch.exp(self.module.additive_background[name][i]).T,
+                        )
+                        for i, n_cats_i in enumerate(self.module.n_cats_per_ambient_cov)
                     )
 
                 decode_rate = _make_decode_rate_fn(

@@ -307,7 +307,11 @@ class TestParameterInitialization:
         model = regularizedvi.RegularizedMultimodalVI(
             mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"]
         )
-        bg = torch.exp(model.module.additive_background["rna"]).detach()
+        # additive_background["rna"] is a ParameterList (one param per ambient covariate).
+        # With batch_key backward compat, there is one ambient covariate = batch_key.
+        bg_params = model.module.additive_background["rna"]
+        assert len(bg_params) == 1, "Expected 1 ambient covariate param (from batch_key)"
+        bg = torch.exp(bg_params[0]).detach()
         assert bg.mean().item() == pytest.approx(0.01, rel=0.2)
 
     def test_region_factors_init_at_prior_mean(self, mdata):

@@ -29,7 +29,7 @@ from torch import nn
 from torch.distributions import Exponential, Gamma, Normal
 from torch.distributions import kl_divergence as kld
 
-from regularizedvi._constants import MODALITY_SCALING_COVS_KEY
+from regularizedvi._constants import AMBIENT_COVS_KEY, MODALITY_SCALING_COVS_KEY
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -198,6 +198,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         region_factors_prior_beta: float = 200.0,
         additive_bg_prior_alpha: float = 1.0,
         additive_bg_prior_beta: float = 100.0,
+        # Ambient covariates (for additive background, decoupled from batch_key)
+        n_cats_per_ambient_cov: list[int] | None = None,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -425,16 +427,27 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 else:
                     self.dispersion_prior_rate_raw[name] = nn.Parameter(_raw_init.unsqueeze(0).clone())
 
-        # ---- Additive background (per selected modality) ----
+        # ---- Ambient covariates (for additive background, decoupled from batch_key) ----
+        self.n_cats_per_ambient_cov = list(n_cats_per_ambient_cov) if n_cats_per_ambient_cov is not None else []
+
+        # ---- Additive background (per selected modality, per ambient covariate) ----
+        # Each modality gets a ParameterList with one (n_feat, n_cats_i) parameter
+        # per ambient covariate. The per-cell background is the sum across covariates.
         # Initialized at log(prior_mean) = log(alpha/beta) so exp(init) matches Gamma prior mean.
         # Default Gamma(1, 100) → mean = 0.01, small relative to px_scale.
         _bg_init = math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
-        self.additive_background = nn.ParameterDict()
+        self.additive_background = nn.ModuleDict()
         for name in additive_background_modalities:
             n_feat = n_input_per_modality[name]
-            self.additive_background[name] = nn.Parameter(
-                torch.full((n_feat, n_batch), _bg_init) + 0.01 * torch.randn(n_feat, n_batch)
-            )
+            if self.n_cats_per_ambient_cov:
+                self.additive_background[name] = nn.ParameterList(
+                    [
+                        nn.Parameter(
+                            torch.full((n_feat, int(n_cats_i)), _bg_init) + 0.01 * torch.randn(n_feat, int(n_cats_i))
+                        )
+                        for n_cats_i in self.n_cats_per_ambient_cov
+                    ]
+                )
 
         # ---- Region factors (cell2location-style per-covariate scaling) ----
         # Shape: (n_scaling_rows, n_features) where n_scaling_rows is either:
@@ -475,6 +488,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             "cont_covs": tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
             "cat_covs": tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
             "scaling_covs": tensors.get(MODALITY_SCALING_COVS_KEY, None),
+            "ambient_covs": tensors.get(AMBIENT_COVS_KEY, None),
         }
 
     @auto_move_data
@@ -646,6 +660,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         cont_covs: torch.Tensor | None = None,
         cat_covs: torch.Tensor | None = None,
         scaling_covs: torch.Tensor | None = None,
+        ambient_covs: torch.Tensor | None = None,
     ) -> dict[str, dict]:
         """Per-modality decoding from shared Z.
 
@@ -687,12 +702,15 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             disp = self.dispersion_dict[name]
             lib = library[name]
 
-            # Compute additive background
+            # Compute additive background (sum over ambient covariates)
             bg = None
-            if name in self.additive_background:
-                bg = torch.matmul(
-                    one_hot(batch_index.squeeze(-1), self.n_batch).float(),
-                    torch.exp(self.additive_background[name]).T,
+            if name in self.additive_background and ambient_covs is not None:
+                bg = sum(
+                    torch.matmul(
+                        one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float(),
+                        torch.exp(self.additive_background[name][i]).T,
+                    )
+                    for i, n_cats_i in enumerate(self.n_cats_per_ambient_cov)
                 )
 
             # Decode
@@ -933,11 +951,13 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             for name in self.additive_background_modalities:
                 if name not in self.additive_background:
                     continue
-                bg_transformed = torch.exp(self.additive_background[name])
-                neg_log_prior = (
-                    -Gamma(self.additive_bg_prior_alpha, self.additive_bg_prior_beta).log_prob(bg_transformed).sum()
-                )
-                bg_penalty = bg_penalty + neg_log_prior
+                # Iterate over per-covariate background parameters
+                for param in self.additive_background[name]:
+                    bg_transformed = torch.exp(param)
+                    neg_log_prior = (
+                        -Gamma(self.additive_bg_prior_alpha, self.additive_bg_prior_beta).log_prob(bg_transformed).sum()
+                    )
+                    bg_penalty = bg_penalty + neg_log_prior
             loss = loss + bg_penalty / n_obs
 
         return LossOutput(

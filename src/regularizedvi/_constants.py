@@ -44,6 +44,9 @@ DEFAULT_REGION_FACTORS_PRIOR_BETA = 200.0
 # Registry key for modality scaling covariates (separate from encoder/decoder covariates)
 MODALITY_SCALING_COVS_KEY = "modality_scaling_covs"
 
+# Registry key for ambient covariates (controls additive background, separate from batch_key)
+AMBIENT_COVS_KEY = "ambient_covs"
+
 # --- Network architecture ---
 DEFAULT_USE_BATCH_NORM = "none"
 DEFAULT_USE_LAYER_NORM = "both"

@@ -30,3 +30,6 @@ __pycache__/
 
 # Notebook outputs (papermill)
 *_out.ipynb
+
+# Local scripts
+run_tests.sh
