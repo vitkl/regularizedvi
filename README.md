@@ -176,6 +176,79 @@ This reveals the empirical partition of the latent space: even though concatenat
 
 - **Regularised overdispersion alone likely helps**: The containment prior on overdispersion regularises the NB toward the Poisson baseline, preventing the model from absorbing residuals through excessive variance (small $\theta$). This forces the decoder to capture genuine biological signal through its mean structure rather than relying on high overdispersion to explain noise. This likely contributes to improved sensitivity, but needs more systematic testing.
 
+## Covariate design
+
+### Why decouple batch_key?
+
+In standard scVI (and early regularizedvi), a single `batch_key` controls all batch-dependent model components: additive ambient background, dispersion, and library size prior. This works well for 10x Chromium experiments where one sample = one GEM well = one set of technical biases.
+
+However, in complex experimental designs — particularly combinatorial indexing protocols like sci-RNA-seq3 — different technical effects arise at different experimental granularities:
+
+| Technical effect | 10x Chromium source | sci-RNA-seq3 source | Model component |
+|-----------------|--------------------|--------------------|-----------------|
+| Ambient RNA contamination | GEM well | Embryo (lysis batch) | `ambient_covariate_keys` |
+| Library size distribution | GEM well | PCR well (amplification batch) | `library_size_key` |
+| Overdispersion profile | GEM well | Embryo or experiment | `dispersion_key` |
+| Multiplicative biases (RT, PCR) | Protocol version | Experiment batch | `categorical_covariate_keys` |
+| Per-feature scaling (region factors) | — | Experiment batch | `modality_scaling_covariate_keys` |
+
+Using a single `batch_key` forces all components to share the same granularity, which either under-corrects (too few groups) or over-parameterises (too many groups for components that don't need that resolution).
+
+### Purpose-driven covariate keys
+
+| Parameter | Model component | Encoder | Decoder | Shape per modality |
+|-----------|----------------|---------|---------|-------------------|
+| `ambient_covariate_keys` | Additive background $b\_{g}$: one `(n\_features, n\_cats\_i)` parameter per covariate, summed | Yes (one-hot) | No | `ParameterList[(n_feat, n_cats_i), ...]` |
+| `categorical_covariate_keys` | Standard scVI-style injection into encoder/decoder | Yes (one-hot) | Yes (one-hot) | Standard |
+| `modality_scaling_covariate_keys` | Region factors $\alpha\_{t,f}$: multiplicative per-feature scaling | No | Multiplicative on rate | `(sum(n_cats), n_feat)` |
+| `dispersion_key` | Inverse dispersion $\theta\_{g,s}$: per-gene, per-group | No | Indexing | `(n_feat, n_disp_cats)` |
+| `library_size_key` | Library prior $\mathcal{N}(\mu\_s, \sigma\_s)$: per-group mean/var | Yes (one-hot) | No | `(1, n_lib_cats)` |
+
+### Default behaviour and backward compatibility
+
+- **`batch_key` alone** (backward compatible): Automatically fans out to `ambient_covariate_keys=[batch_key]`, `dispersion_key=batch_key`, `library_size_key=batch_key`. Equivalent to the original single-batch design.
+
+- **`batch_key` + purpose-specific keys**: Raises `ValueError`. These are mutually exclusive — use one approach or the other.
+
+- **`modality_scaling_covariate_keys`**: If not specified but `categorical_covariate_keys` is provided, defaults to `categorical_covariate_keys` (multi-modal only).
+
+### Encoder/decoder composition
+
+The encoder and decoder receive different subsets of covariates:
+
+- **Encoder** receives: `[ambient_covs...] + [cat_covs (if encode_covariates)] + [library_size]` — ambient and library covariates are always injected, even when `encode_covariates=False`, because the encoder needs to know the expected background level and library size group.
+
+- **Decoder** receives: `[cat_covs...]` only (batch-free by default). When `use_batch_in_decoder=True`, batch is additionally included.
+
+### Example: 10x Chromium (simple)
+
+```python
+# batch_key fans out to all components — equivalent to original API
+regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+    adata,
+    layer="counts",
+    batch_key="sample",
+    categorical_covariate_keys=["donor", "site"],
+)
+```
+
+### Example: sci-RNA-seq3 (purpose-driven)
+
+```python
+regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+    adata,
+    layer="counts",
+    # Ambient RNA comes from lysis: each embryo has its own ambient profile
+    ambient_covariate_keys=["embryo_id", "pcr_well"],
+    # Multiplicative effects from experiment-level protocol differences
+    categorical_covariate_keys=["experiment"],
+    # Dispersion varies by embryo (tissue composition → variance structure)
+    dispersion_key="embryo_id",
+    # Library size determined by PCR well (amplification batch)
+    library_size_key="pcr_well",
+)
+```
+
 ## Installation
 
 ### GPU environment (recommended)
@@ -212,6 +285,10 @@ pip install -e ".[dev,test]"
 
 ## Quick start
 
+### Simple setup (batch_key)
+
+When a single batch variable can describe several technical effects — ambient RNA contamination, library size distribution, and overdispersion profile (typical for 10x Chromium where one sample = one GEM well):
+
 ```python
 import regularizedvi
 
@@ -234,6 +311,23 @@ model.train(
 )
 latent = model.get_latent_representation()
 ```
+
+### Purpose-driven covariate keys
+
+When different technical effects arise at different experimental granularities (e.g. sci-RNA-seq3, combinatorial indexing), you can assign each model component its own covariate:
+
+```python
+regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+    adata,
+    layer="counts",
+    ambient_covariate_keys=["embryo_id", "pcr_well"],   # additive background
+    categorical_covariate_keys=["experiment"],           # encoder/decoder injection
+    dispersion_key="embryo_id",                          # per-group overdispersion
+    library_size_key="pcr_well",                         # library size prior groups
+)
+```
+
+See [Covariate design](#covariate-design) below for full details.
 
 ### Default configuration
 
