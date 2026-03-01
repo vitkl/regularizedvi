@@ -224,8 +224,9 @@ class TestAmbientRegularizedSCVI:
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(
             adata,
             layer="counts",
-            batch_key="batch",
             ambient_covariate_keys=["batch", "site"],
+            dispersion_key="batch",
+            library_size_key="batch",
         )
         model = regularizedvi.AmbientRegularizedSCVI(
             adata,
@@ -251,6 +252,95 @@ class TestAmbientRegularizedSCVI:
                 adata,
                 layer="counts",
             )
+
+    def test_batch_key_mutual_exclusion(self, adata):
+        """batch_key cannot be combined with purpose-specific keys."""
+        with pytest.raises(ValueError, match="batch_key cannot be combined"):
+            regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+                adata,
+                layer="counts",
+                batch_key="batch",
+                ambient_covariate_keys=["batch"],
+            )
+        with pytest.raises(ValueError, match="batch_key cannot be combined"):
+            regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+                adata,
+                layer="counts",
+                batch_key="batch",
+                dispersion_key="batch",
+            )
+        with pytest.raises(ValueError, match="batch_key cannot be combined"):
+            regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+                adata,
+                layer="counts",
+                batch_key="batch",
+                library_size_key="batch",
+            )
+
+    def test_new_style_api_setup(self, adata):
+        """Test setup_anndata with purpose-driven keys (no batch_key)."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            ambient_covariate_keys=["batch", "site"],
+            dispersion_key="batch",
+            library_size_key="donor",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+        )
+        module = model.module
+        # 2 ambient covariates: batch (3 cats) + site (2 cats)
+        assert len(module.n_cats_per_ambient_cov) == 2
+        assert module.n_cats_per_ambient_cov[0] == 3  # batch
+        assert module.n_cats_per_ambient_cov[1] == 2  # site
+        # Dispersion: 3 categories (batch)
+        assert module.n_dispersion_cats == 3
+        # Library: 4 categories (donor)
+        assert module.n_library_cats == 4
+
+    def test_new_style_api_train(self, adata):
+        """Test training with new-style purpose-driven API end-to-end."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            ambient_covariate_keys=["batch"],
+            dispersion_key="batch",
+            library_size_key="donor",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        # Verify training completed and we can get latent
+        z = model.get_latent_representation()
+        assert z.shape == (adata.n_obs, 4)
+
+    def test_new_style_api_multiple_ambient_covs(self, adata):
+        """Test multiple ambient covariates produce summed background."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            ambient_covariate_keys=["batch", "site", "donor"],
+            dispersion_key="batch",
+            library_size_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+        )
+        module = model.module
+        # 3 ambient covariates: batch(3) + site(2) + donor(4)
+        assert len(module.additive_background) == 3
+        assert module.additive_background[0].shape[1] == 3  # batch
+        assert module.additive_background[1].shape[1] == 2  # site
+        assert module.additive_background[2].shape[1] == 4  # donor
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
 
 
 class TestRegularizedVAEModule:

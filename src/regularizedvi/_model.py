@@ -377,12 +377,18 @@ class AmbientRegularizedSCVI(
             and variance are computed per group from data at setup time.
             If None and ``batch_key`` is provided, defaults to ``batch_key``.
         """
+        # Mutual exclusion: batch_key cannot be combined with purpose-specific keys
+        if batch_key is not None and any([ambient_covariate_keys, dispersion_key, library_size_key]):
+            raise ValueError(
+                "batch_key cannot be combined with ambient_covariate_keys, dispersion_key, "
+                "or library_size_key. Either use batch_key alone (backward compatible) or "
+                "specify purpose-specific keys individually."
+            )
+
         # Backward compat: batch_key fans out to purpose-specific keys
-        if batch_key is not None and ambient_covariate_keys is None:
+        if batch_key is not None:
             ambient_covariate_keys = [batch_key]
-        if batch_key is not None and dispersion_key is None:
             dispersion_key = batch_key
-        if batch_key is not None and library_size_key is None:
             library_size_key = batch_key
 
         # Validation: must have ambient covariate source
