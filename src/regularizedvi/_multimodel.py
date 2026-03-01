@@ -375,13 +375,23 @@ class RegularizedMultimodalVI(
         if modalities is None:
             modalities = {key: key for key in mdata.mod.keys()}
 
-        # Backward compat: batch_key fans out to ambient covariates, dispersion, and library
-        if batch_key is not None and ambient_covariate_keys is None:
+        # Mutual exclusion: batch_key cannot be combined with purpose-specific keys
+        if batch_key is not None and any([ambient_covariate_keys, dispersion_key, library_size_key]):
+            raise ValueError(
+                "batch_key cannot be combined with ambient_covariate_keys, dispersion_key, "
+                "or library_size_key. Either use batch_key alone (backward compatible) or "
+                "specify purpose-specific keys individually."
+            )
+
+        # Backward compat: batch_key fans out to all purpose-specific keys
+        if batch_key is not None:
             ambient_covariate_keys = [batch_key]
-        if batch_key is not None and dispersion_key is None:
             dispersion_key = batch_key
-        if batch_key is not None and library_size_key is None:
             library_size_key = batch_key
+
+        # Default: modality_scaling mirrors categorical if not explicitly set
+        if categorical_covariate_keys is not None and modality_scaling_covariate_keys is None:
+            modality_scaling_covariate_keys = categorical_covariate_keys
 
         anndata_fields = []
 

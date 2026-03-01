@@ -770,3 +770,24 @@ class TestRegularizedMultimodalVI:
         n_latent = model.module.total_latent_dim
         for name in ["rna", "atac"]:
             assert result[name]["attribution"].shape == (mdata.n_obs, n_latent)
+
+    def test_batch_key_mutual_exclusion(self, mdata):
+        """batch_key cannot be combined with purpose-specific keys."""
+        with pytest.raises(ValueError, match="batch_key cannot be combined"):
+            regularizedvi.RegularizedMultimodalVI.setup_mudata(
+                mdata,
+                batch_key="batch",
+                ambient_covariate_keys=["batch"],
+            )
+        with pytest.raises(ValueError, match="batch_key cannot be combined"):
+            regularizedvi.RegularizedMultimodalVI.setup_mudata(
+                mdata,
+                batch_key="batch",
+                dispersion_key="batch",
+            )
+        with pytest.raises(ValueError, match="batch_key cannot be combined"):
+            regularizedvi.RegularizedMultimodalVI.setup_mudata(
+                mdata,
+                batch_key="batch",
+                library_size_key="batch",
+            )
