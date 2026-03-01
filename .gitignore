@@ -6,6 +6,7 @@ buck-out/
 *.gpu.out
 *.err
 *.out
+.nfs*
 
 # Compiled files
 .venv/
