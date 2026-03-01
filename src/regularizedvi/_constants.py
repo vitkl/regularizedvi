@@ -47,6 +47,9 @@ MODALITY_SCALING_COVS_KEY = "modality_scaling_covs"
 # Registry key for ambient covariates (controls additive background, separate from batch_key)
 AMBIENT_COVS_KEY = "ambient_covs"
 
+# Registry key for dispersion covariate (controls per-group px_r, separate from batch_key)
+DISPERSION_KEY = "dispersion_key"
+
 # --- Network architecture ---
 DEFAULT_USE_BATCH_NORM = "none"
 DEFAULT_USE_LAYER_NORM = "both"

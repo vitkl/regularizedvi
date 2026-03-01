@@ -42,6 +42,7 @@ from regularizedvi._constants import (
     DEFAULT_USE_BATCH_IN_DECODER,
     DEFAULT_USE_BATCH_NORM,
     DEFAULT_USE_LAYER_NORM,
+    DISPERSION_KEY,
     MODALITY_SCALING_COVS_KEY,
 )
 from regularizedvi._multimodule import RegularizedMultimodalVAE
@@ -279,6 +280,10 @@ class RegularizedMultimodalVI(
         if AMBIENT_COVS_KEY in self.adata_manager.data_registry:
             n_cats_per_ambient_cov = self.adata_manager.get_state_registry(AMBIENT_COVS_KEY).n_cats_per_key
 
+        n_dispersion_cats = None
+        if DISPERSION_KEY in self.adata_manager.data_registry:
+            n_dispersion_cats = len(self.adata_manager.get_state_registry(DISPERSION_KEY).categorical_mapping)
+
         kwargs = dict(self._module_kwargs)
         # Remove keys that are passed separately
         for k in ["n_hidden", "n_latent", "n_layers", "dropout_rate"]:
@@ -299,6 +304,7 @@ class RegularizedMultimodalVI(
             library_log_vars=library_log_vars,
             n_cats_per_scaling_cov=n_cats_per_scaling_cov,
             n_cats_per_ambient_cov=n_cats_per_ambient_cov,
+            n_dispersion_cats=n_dispersion_cats,
             **kwargs,
         )
 
@@ -310,6 +316,7 @@ class RegularizedMultimodalVI(
         modalities: dict[str, str] | None = None,
         batch_key: str | None = None,
         ambient_covariate_keys: list[str] | None = None,
+        dispersion_key: str | None = None,
         categorical_covariate_keys: list[str] | None = None,
         continuous_covariate_keys: list[str] | None = None,
         modality_scaling_covariate_keys: list[str] | None = None,
@@ -332,6 +339,12 @@ class RegularizedMultimodalVI(
             Each key produces a separate ``(n_features, n_cats)`` parameter.
             The per-cell background is the sum across all covariates.
             If None and ``batch_key`` is provided, defaults to ``[batch_key]``.
+        dispersion_key
+            Optional categorical ``.obs`` key whose categories define the
+            per-group dispersion parameter ``px_r[g, s]``. When ``dispersion``
+            is ``"gene-batch"``, the second dimension of ``px_r`` is sized by
+            the number of categories in this key (instead of ``n_batch``).
+            If None and ``batch_key`` is provided, defaults to ``batch_key``.
         %(param_cat_cov_keys)s
         %(param_cont_cov_keys)s
         modality_scaling_covariate_keys
@@ -346,9 +359,11 @@ class RegularizedMultimodalVI(
         if modalities is None:
             modalities = {key: key for key in mdata.mod.keys()}
 
-        # Backward compat: batch_key fans out to ambient covariates
+        # Backward compat: batch_key fans out to ambient covariates and dispersion
         if batch_key is not None and ambient_covariate_keys is None:
             ambient_covariate_keys = [batch_key]
+        if batch_key is not None and dispersion_key is None:
+            dispersion_key = batch_key
 
         anndata_fields = []
 
@@ -371,6 +386,16 @@ class RegularizedMultimodalVI(
                 mod_key=list(modalities.values())[0],
             )
         )
+
+        # Dispersion key (controls per-group px_r, separate from batch_key)
+        if dispersion_key:
+            anndata_fields.append(
+                fields.MuDataCategoricalObsField(
+                    DISPERSION_KEY,
+                    dispersion_key,
+                    mod_key=list(modalities.values())[0],
+                )
+            )
 
         # Ambient covariates (for additive background)
         if ambient_covariate_keys:

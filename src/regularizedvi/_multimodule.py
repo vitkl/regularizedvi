@@ -29,7 +29,7 @@ from torch import nn
 from torch.distributions import Exponential, Gamma, Normal
 from torch.distributions import kl_divergence as kld
 
-from regularizedvi._constants import AMBIENT_COVS_KEY, MODALITY_SCALING_COVS_KEY
+from regularizedvi._constants import AMBIENT_COVS_KEY, DISPERSION_KEY, MODALITY_SCALING_COVS_KEY
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -200,6 +200,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         additive_bg_prior_beta: float = 100.0,
         # Ambient covariates (for additive background, decoupled from batch_key)
         n_cats_per_ambient_cov: list[int] | None = None,
+        # Dispersion covariate (controls per-group px_r, decoupled from batch_key)
+        n_dispersion_cats: int | None = None,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -236,6 +238,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.region_factors_prior_beta = region_factors_prior_beta
         self.additive_bg_prior_alpha = additive_bg_prior_alpha
         self.additive_bg_prior_beta = additive_bg_prior_beta
+
+        # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
+        self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
 
         additive_background_modalities = additive_background_modalities or []
         region_factors_modalities = region_factors_modalities or []
@@ -400,12 +405,13 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 else:
                     self.px_r[name] = nn.Parameter(torch.randn(n_feat))
             elif disp in ("gene-batch", "region-batch"):
+                n_disp = self.n_dispersion_cats
                 if _px_r_init is not None:
                     self.px_r[name] = nn.Parameter(
-                        torch.full((n_feat, n_batch), _px_r_init) + 0.1 * torch.randn(n_feat, n_batch)
+                        torch.full((n_feat, n_disp), _px_r_init) + 0.1 * torch.randn(n_feat, n_disp)
                     )
                 else:
-                    self.px_r[name] = nn.Parameter(torch.randn(n_feat, n_batch))
+                    self.px_r[name] = nn.Parameter(torch.randn(n_feat, n_disp))
             elif disp in ("gene-label", "region-label"):
                 if _px_r_init is not None:
                     self.px_r[name] = nn.Parameter(
@@ -421,7 +427,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             for name in self.modality_names:
                 disp = dispersion_dict[name]
                 if disp in ("gene-batch", "region-batch"):
-                    self.dispersion_prior_rate_raw[name] = nn.Parameter(_raw_init.expand(n_batch).clone())
+                    self.dispersion_prior_rate_raw[name] = nn.Parameter(
+                        _raw_init.expand(self.n_dispersion_cats).clone()
+                    )
                 elif disp in ("gene-label", "region-label"):
                     self.dispersion_prior_rate_raw[name] = nn.Parameter(_raw_init.expand(n_labels).clone())
                 else:
@@ -485,6 +493,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             "z": inference_outputs["z"],
             "library": inference_outputs["library"],
             "batch_index": tensors[REGISTRY_KEYS.BATCH_KEY],
+            "dispersion_index": tensors.get(DISPERSION_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
             "cont_covs": tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
             "cat_covs": tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
             "scaling_covs": tensors.get(MODALITY_SCALING_COVS_KEY, None),
@@ -657,6 +666,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         z: torch.Tensor,
         library: dict[str, torch.Tensor],
         batch_index: torch.Tensor,
+        dispersion_index: torch.Tensor | None = None,
         cont_covs: torch.Tensor | None = None,
         cat_covs: torch.Tensor | None = None,
         scaling_covs: torch.Tensor | None = None,
@@ -744,10 +754,11 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     scaling = rf_transformed
                 px_rate = px_rate * scaling
 
-            # Resolve dispersion
+            # Resolve dispersion (use dispersion_index for gene-batch, fallback to batch_index)
+            _disp_idx = dispersion_index if dispersion_index is not None else batch_index
             if disp in ("gene-batch", "region-batch"):
                 px_r = torch.nn.functional.linear(
-                    one_hot(batch_index.squeeze(-1), self.n_batch).float(),
+                    one_hot(_disp_idx.squeeze(-1).long(), self.n_dispersion_cats).float(),
                     self.px_r[name],
                 )
             elif disp in ("gene-label", "region-label"):
