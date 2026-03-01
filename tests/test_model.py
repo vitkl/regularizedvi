@@ -425,11 +425,12 @@ class TestParameterInitialization:
         model = regularizedvi.RegularizedMultimodalVI(
             mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"]
         )
-        # additive_background["rna"] is a ParameterList (one param per ambient covariate).
+        # additive_background["rna"] is a single Parameter with concatenated ambient categories.
         # With batch_key backward compat, there is one ambient covariate = batch_key.
-        bg_params = model.module.additive_background["rna"]
-        assert len(bg_params) == 1, "Expected 1 ambient covariate param (from batch_key)"
-        bg = torch.exp(bg_params[0]).detach()
+        bg_param = model.module.additive_background["rna"]
+        n_batch = len(mdata["rna"].obs["batch"].cat.categories)
+        assert bg_param.shape == (50, n_batch), f"Expected (50, {n_batch}), got {bg_param.shape}"
+        bg = torch.exp(bg_param).detach()
         assert bg.mean().item() == pytest.approx(0.01, rel=0.2)
 
     def test_region_factors_init_at_prior_mean(self, mdata):
@@ -922,12 +923,12 @@ class TestRegularizedMultimodalVI:
         model = regularizedvi.RegularizedMultimodalVI(
             mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"]
         )
-        # 2 ambient covariates: batch (3 cats) + site (2 cats)
+        # 2 ambient covariates: batch (3 cats) + site (2 cats) = 5 total
         assert len(model.module.n_cats_per_ambient_cov) == 2
         assert model.module.n_cats_per_ambient_cov[0] == 3  # batch
         assert model.module.n_cats_per_ambient_cov[1] == 2  # site
-        # Additive bg: 2 params in ParameterList
-        assert len(model.module.additive_background["rna"]) == 2
+        # Single parameter with concatenated ambient categories (3 + 2 = 5)
+        assert model.module.additive_background["rna"].shape == (50, 5)
         # Dispersion: 3 categories (batch)
         assert model.module.n_dispersion_cats == 3
         # Library: 5 categories (pcr_well)
@@ -950,7 +951,7 @@ class TestRegularizedMultimodalVI:
         assert z.shape == (mdata.n_obs, model.module.total_latent_dim)
 
     def test_new_style_api_multiple_ambient_covs(self, mdata):
-        """Test multiple ambient covariates produce summed background."""
+        """Test multiple ambient covariates produce concatenated background."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(
             mdata,
             ambient_covariate_keys=["batch", "site", "donor"],
@@ -960,10 +961,7 @@ class TestRegularizedMultimodalVI:
         model = regularizedvi.RegularizedMultimodalVI(
             mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"]
         )
-        # 3 ambient covariates: batch(3) + site(2) + donor(4)
-        bg_params = model.module.additive_background["rna"]
-        assert len(bg_params) == 3
-        assert bg_params[0].shape[1] == 3  # batch
-        assert bg_params[1].shape[1] == 2  # site
-        assert bg_params[2].shape[1] == 4  # donor
+        # 3 ambient covariates: batch(3) + site(2) + donor(4) = 9 total
+        bg_param = model.module.additive_background["rna"]
+        assert bg_param.shape == (50, 9)
         model.train(max_epochs=2, train_size=1.0, batch_size=32)

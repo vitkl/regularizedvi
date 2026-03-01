@@ -709,13 +709,14 @@ class RegularizedMultimodalVI(
                 # Additive background (independent of z)
                 bg = None
                 if name in self.module.additive_background and ambient_covs is not None:
-                    bg = sum(
-                        torch.matmul(
-                            one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float(),
-                            torch.exp(self.module.additive_background[name][i]).T,
-                        )
-                        for i, n_cats_i in enumerate(self.module.n_cats_per_ambient_cov)
+                    concat_ambient = torch.cat(
+                        [
+                            one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float()
+                            for i, n_cats_i in enumerate(self.module.n_cats_per_ambient_cov)
+                        ],
+                        dim=-1,
                     )
+                    bg = torch.matmul(concat_ambient, torch.exp(self.module.additive_background[name]).T)
 
                 decode_rate = _make_decode_rate_fn(
                     self.module,

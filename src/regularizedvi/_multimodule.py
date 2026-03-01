@@ -267,9 +267,10 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         use_layer_norm_decoder = use_layer_norm in ("decoder", "both")
 
         # Encoder/decoder covariate composition (purpose-driven keys)
-        # Encoder sees: [ambient_covs...] + [cat_covs...] + [library_size]
+        # Encoder sees: [concat_ambient] + [cat_covs...] + [library_size]
         # Decoder sees: [cat_covs...] only (no batch injection by default)
-        _ambient_cats = list(n_cats_per_ambient_cov) if n_cats_per_ambient_cov else []
+        n_total_ambient_cats = sum(int(c) for c in n_cats_per_ambient_cov) if n_cats_per_ambient_cov else 0
+        _ambient_cats = [n_total_ambient_cats] if n_total_ambient_cats > 0 else []
         _cat_cats = list(n_cats_per_cov or [])
         _lib_cats = [n_library_cats if n_library_cats is not None else n_batch]
         encoder_cat_list = _ambient_cats + _cat_cats + _lib_cats
@@ -447,23 +448,20 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # ---- Ambient covariates (for additive background, decoupled from batch_key) ----
         self.n_cats_per_ambient_cov = list(n_cats_per_ambient_cov) if n_cats_per_ambient_cov is not None else []
 
-        # ---- Additive background (per selected modality, per ambient covariate) ----
-        # Each modality gets a ParameterList with one (n_feat, n_cats_i) parameter
-        # per ambient covariate. The per-cell background is the sum across covariates.
+        # ---- Additive background (per selected modality, concatenated ambient covariates) ----
+        # Each modality gets a single (n_feat, n_total_ambient_cats) parameter.
+        # Ambient covariates are concatenated into one one-hot vector per cell.
         # Initialized at log(prior_mean) = log(alpha/beta) so exp(init) matches Gamma prior mean.
         # Default Gamma(1, 100) → mean = 0.01, small relative to px_scale.
         _bg_init = math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
-        self.additive_background = nn.ModuleDict()
+        self.n_total_ambient_cats = n_total_ambient_cats
+        self.additive_background = nn.ParameterDict()
         for name in additive_background_modalities:
             n_feat = n_input_per_modality[name]
-            if self.n_cats_per_ambient_cov:
-                self.additive_background[name] = nn.ParameterList(
-                    [
-                        nn.Parameter(
-                            torch.full((n_feat, int(n_cats_i)), _bg_init) + 0.01 * torch.randn(n_feat, int(n_cats_i))
-                        )
-                        for n_cats_i in self.n_cats_per_ambient_cov
-                    ]
+            if self.n_total_ambient_cats > 0:
+                self.additive_background[name] = nn.Parameter(
+                    torch.full((n_feat, self.n_total_ambient_cats), _bg_init)
+                    + 0.01 * torch.randn(n_feat, self.n_total_ambient_cats)
                 )
 
         # ---- Region factors (cell2location-style per-covariate scaling) ----
@@ -542,11 +540,20 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         **modality_inputs
             Per-modality inputs as x_{modality_name} tensors.
         """
-        # Build encoder categorical inputs: [ambient_covs...] + [cat_covs...] + [library_size]
+        # Build encoder categorical inputs: [concat_ambient] + [cat_covs...] + [library_size]
+        from torch.nn.functional import one_hot
+
         encoder_categorical_input = ()
         if self.encode_covariates:
-            if ambient_covs is not None:
-                encoder_categorical_input += torch.split(ambient_covs, 1, dim=1)
+            if ambient_covs is not None and self.n_cats_per_ambient_cov:
+                concat_ambient = torch.cat(
+                    [
+                        one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float()
+                        for i, n_cats_i in enumerate(self.n_cats_per_ambient_cov)
+                    ],
+                    dim=-1,
+                )
+                encoder_categorical_input += (concat_ambient,)
             if cat_covs is not None:
                 encoder_categorical_input += torch.split(cat_covs, 1, dim=1)
             _lib_idx = library_size_index if library_size_index is not None else batch_index
@@ -736,16 +743,17 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             disp = self.dispersion_dict[name]
             lib = library[name]
 
-            # Compute additive background (sum over ambient covariates)
+            # Compute additive background (concatenated one-hot @ single parameter)
             bg = None
             if name in self.additive_background and ambient_covs is not None:
-                bg = sum(
-                    torch.matmul(
-                        one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float(),
-                        torch.exp(self.additive_background[name][i]).T,
-                    )
-                    for i, n_cats_i in enumerate(self.n_cats_per_ambient_cov)
+                concat_ambient = torch.cat(
+                    [
+                        one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float()
+                        for i, n_cats_i in enumerate(self.n_cats_per_ambient_cov)
+                    ],
+                    dim=-1,
                 )
+                bg = torch.matmul(concat_ambient, torch.exp(self.additive_background[name]).T)
 
             # Decode
             if self.use_batch_in_decoder:
@@ -987,13 +995,11 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             for name in self.additive_background_modalities:
                 if name not in self.additive_background:
                     continue
-                # Iterate over per-covariate background parameters
-                for param in self.additive_background[name]:
-                    bg_transformed = torch.exp(param)
-                    neg_log_prior = (
-                        -Gamma(self.additive_bg_prior_alpha, self.additive_bg_prior_beta).log_prob(bg_transformed).sum()
-                    )
-                    bg_penalty = bg_penalty + neg_log_prior
+                bg_transformed = torch.exp(self.additive_background[name])
+                neg_log_prior = (
+                    -Gamma(self.additive_bg_prior_alpha, self.additive_bg_prior_beta).log_prob(bg_transformed).sum()
+                )
+                bg_penalty = bg_penalty + neg_log_prior
             loss = loss + bg_penalty / n_obs
 
         return LossOutput(
