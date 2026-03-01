@@ -266,14 +266,19 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         use_layer_norm_encoder = use_layer_norm in ("encoder", "both")
         use_layer_norm_decoder = use_layer_norm in ("decoder", "both")
 
-        # Batch/covariate handling
-        cat_list = [n_batch] + list(n_cats_per_cov or [])
-        encoder_cat_list = cat_list if encode_covariates else None
+        # Encoder/decoder covariate composition (purpose-driven keys)
+        # Encoder sees: [ambient_covs...] + [cat_covs...] + [library_size]
+        # Decoder sees: [cat_covs...] only (no batch injection by default)
+        _ambient_cats = list(n_cats_per_ambient_cov) if n_cats_per_ambient_cov else []
+        _cat_cats = list(n_cats_per_cov or [])
+        _lib_cats = [n_library_cats if n_library_cats is not None else n_batch]
+        encoder_cat_list = _ambient_cats + _cat_cats + _lib_cats
+        encoder_cat_list = encoder_cat_list if encode_covariates else None
 
         if not use_batch_in_decoder:
-            decoder_cat_list = list(n_cats_per_cov or [])
+            decoder_cat_list = _cat_cats
         else:
-            decoder_cat_list = cat_list
+            decoder_cat_list = _cat_cats  # batch injection via use_batch_in_decoder is deprecated
 
         _extra_encoder_kwargs = extra_encoder_kwargs or {}
         _extra_decoder_kwargs = extra_decoder_kwargs or {}
@@ -481,6 +486,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             "batch_index": tensors[REGISTRY_KEYS.BATCH_KEY],
             "cont_covs": tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
             "cat_covs": tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
+            "ambient_covs": tensors.get(AMBIENT_COVS_KEY, None),
+            "library_size_index": tensors.get(LIBRARY_SIZE_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
         }
         for name in self.modality_names:
             key = f"X_{name}"
@@ -511,6 +518,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         batch_index: torch.Tensor,
         cont_covs: torch.Tensor | None = None,
         cat_covs: torch.Tensor | None = None,
+        ambient_covs: torch.Tensor | None = None,
+        library_size_index: torch.Tensor | None = None,
         n_samples: int = 1,
         **modality_inputs,
     ) -> dict[str, torch.Tensor | Distribution | None]:
@@ -519,20 +528,29 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         Parameters
         ----------
         batch_index
-            Batch indices.
+            Batch indices (kept for backward compat, not used by encoder).
         cont_covs
             Continuous covariates.
         cat_covs
-            Categorical covariates.
+            Categorical covariates (encoder/decoder injection).
+        ambient_covs
+            Ambient covariate indices (for encoder injection).
+        library_size_index
+            Library size group index (for encoder injection).
         n_samples
             Number of samples from posterior.
         **modality_inputs
             Per-modality inputs as x_{modality_name} tensors.
         """
-        if cat_covs is not None and self.encode_covariates:
-            categorical_input = torch.split(cat_covs, 1, dim=1)
-        else:
-            categorical_input = ()
+        # Build encoder categorical inputs: [ambient_covs...] + [cat_covs...] + [library_size]
+        encoder_categorical_input = ()
+        if self.encode_covariates:
+            if ambient_covs is not None:
+                encoder_categorical_input += torch.split(ambient_covs, 1, dim=1)
+            if cat_covs is not None:
+                encoder_categorical_input += torch.split(cat_covs, 1, dim=1)
+            _lib_idx = library_size_index if library_size_index is not None else batch_index
+            encoder_categorical_input += (_lib_idx,)
 
         # Detect which modalities are present per cell (for masking)
         masks = {}
@@ -564,7 +582,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     x = torch.cat([x, cont_covs], dim=-1)
                 inputs.append(x)
             joint_input = torch.cat(inputs, dim=-1)
-            qz, z = self.joint_encoder(joint_input, batch_index, *categorical_input)
+            qz, z = self.joint_encoder(joint_input, *encoder_categorical_input)
             # Store as single "joint" modality for KL computation
             qz_per_modality["_joint"] = qz
             z_per_modality["_joint"] = z
@@ -576,7 +594,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 x_ = torch.log1p(x) if self.log_variational else x
                 if cont_covs is not None and self.encode_covariates:
                     x_ = torch.cat([x_, cont_covs], dim=-1)
-                qz, z = self.encoders[name](x_, batch_index, *categorical_input)
+                qz, z = self.encoders[name](x_, *encoder_categorical_input)
                 qz_per_modality[name] = qz
                 z_per_modality[name] = z
 
@@ -614,7 +632,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             x_ = torch.log1p(x) if self.log_variational else x
             if cont_covs is not None and self.encode_covariates:
                 x_ = torch.cat([x_, cont_covs], dim=-1)
-            ql, lib = self.l_encoders[name](x_, batch_index, *categorical_input)
+            ql, lib = self.l_encoders[name](x_, *encoder_categorical_input)
             library[name] = lib
             ql_per_modality[name] = ql
 
