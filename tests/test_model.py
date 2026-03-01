@@ -791,3 +791,61 @@ class TestRegularizedMultimodalVI:
                 batch_key="batch",
                 library_size_key="batch",
             )
+
+    def test_new_style_api_setup(self, mdata):
+        """Test setup_mudata with purpose-driven keys (no batch_key)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            ambient_covariate_keys=["batch", "site"],
+            dispersion_key="batch",
+            library_size_key="pcr_well",
+            categorical_covariate_keys=["technology"],
+        )
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"]
+        )
+        # 2 ambient covariates: batch (3 cats) + site (2 cats)
+        assert len(model.module.n_cats_per_ambient_cov) == 2
+        assert model.module.n_cats_per_ambient_cov[0] == 3  # batch
+        assert model.module.n_cats_per_ambient_cov[1] == 2  # site
+        # Additive bg: 2 params in ParameterList
+        assert len(model.module.additive_background["rna"]) == 2
+        # Dispersion: 3 categories (batch)
+        assert model.module.n_dispersion_cats == 3
+        # Library: 5 categories (pcr_well)
+        assert model.module.n_library_cats == 5
+
+    def test_new_style_api_train(self, mdata):
+        """Test training with new-style purpose-driven API end-to-end."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            ambient_covariate_keys=["batch"],
+            dispersion_key="batch",
+            library_size_key="pcr_well",
+        )
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"]
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        # Verify training completed and we can get latent
+        z = model.get_latent_representation()
+        assert z.shape == (mdata.n_obs, model.module.total_latent_dim)
+
+    def test_new_style_api_multiple_ambient_covs(self, mdata):
+        """Test multiple ambient covariates produce summed background."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            ambient_covariate_keys=["batch", "site", "donor"],
+            dispersion_key="batch",
+            library_size_key="batch",
+        )
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"]
+        )
+        # 3 ambient covariates: batch(3) + site(2) + donor(4)
+        bg_params = model.module.additive_background["rna"]
+        assert len(bg_params) == 3
+        assert bg_params[0].shape[1] == 3  # batch
+        assert bg_params[1].shape[1] == 2  # site
+        assert bg_params[2].shape[1] == 4  # donor
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)

@@ -63,5 +63,12 @@ def mdata():
     for adata in [adata_rna, adata_atac]:
         adata.obs["technology"] = [f"tech_{i % 2}" for i in range(n_obs)]
         adata.obs["technology"] = adata.obs["technology"].astype("category")
+        # Extra covariates for purpose-driven key testing
+        adata.obs["site"] = [f"site_{i % 2}" for i in range(n_obs)]
+        adata.obs["site"] = adata.obs["site"].astype("category")
+        adata.obs["donor"] = [f"donor_{i % 4}" for i in range(n_obs)]
+        adata.obs["donor"] = adata.obs["donor"].astype("category")
+        adata.obs["pcr_well"] = [f"well_{i % 5}" for i in range(n_obs)]
+        adata.obs["pcr_well"] = adata.obs["pcr_well"].astype("category")
 
     return mu.MuData({"rna": adata_rna, "atac": adata_atac})
