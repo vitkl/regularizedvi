@@ -85,51 +85,51 @@ where $d\_m$ is the latent dimensionality assigned to modality $m$ (e.g. `n_late
 
 The following equations describe how observed counts $x^{(m)}\_{nf}$ — UMIs for RNA, fragment counts for ATAC — are generated for cell $n$ and feature $f$ (gene or chromatin peak). All modalities share this structure; the optional terms in the mean $\mu^{(m)}\_{nf}$ are selectively activated per modality.
 
-**Library size** — always learned (observed totals include ambient contamination). A low-capacity encoder infers library size per cell, regularised by a tight LogNormal prior estimated per batch ([`_multimodule.py:375–384`](src/regularizedvi/_multimodule.py#L375-L384) prior buffers, [`_multimodule.py:772–773`](src/regularizedvi/_multimodule.py#L772-L773) loss):
+**Library size** — always learned (observed totals include ambient contamination). A low-capacity encoder infers library size per cell, regularised by a tight LogNormal prior estimated per `library_size_key` group $p$ (one key, [`_multimodule.py:396–397`](src/regularizedvi/_multimodule.py#L396-L397) prior buffers, [`_multimodule.py:925–937`](src/regularizedvi/_multimodule.py#L925-L937) loss):
 
-$$\ell^{(m)}_n \sim \text{LogNormal}\big(\ell^{(m)}_{\mu}{}^\top s_n,\; 0.05 \cdot \ell^{(m)}_{\sigma^2}{}^\top s_n\big)$$
+$$\ell^{(m)}_n \sim \text{LogNormal}\big(\ell^{(m),\mu}_p,\; 0.05 \cdot \ell^{(m),\sigma}_p\big)$$
 
-**Decoder output** — maps joint latent code $z\_n$ and categorical covariates $c\_n$ (not batch $s\_n$) to non-negative feature signal via softplus ([`_multimodule.py:717–724`](src/regularizedvi/_multimodule.py#L717-L724)):
+**Decoder output** — maps joint latent code $z\_n$ and categorical covariates $c\_{k,n}$ (selected by `categorical_covariate_keys`, many keys) to non-negative feature signal via softplus ([`_multimodule.py:760–775`](src/regularizedvi/_multimodule.py#L760-L775)):
 
-$$\rho^{(m)}_{nf} = \text{softplus}\big(f^{(m)}_w(z_n,\, c_n)\big) \in \mathbb{R}_{\geq 0}$$
+$$\rho^{(m)}_{nf} = \text{softplus}\big(f^{(m)}_w(z_n,\, c_{k,n})\big) \in \mathbb{R}_{\geq 0}$$
 
-**Additive background** — per-feature, per-batch ambient contamination with Gamma prior ([`_multimodule.py:439–445`](src/regularizedvi/_multimodule.py#L439-L445) init, [`_multimodule.py:701–705`](src/regularizedvi/_multimodule.py#L701-L705) one-hot selection, [`_multimodule.py:943–955`](src/regularizedvi/_multimodule.py#L943-L955) prior penalty):
+**Additive background** — per-feature ambient contamination with Gamma prior, indexed by `ambient_covariate_keys` (many keys, concatenated one-hot, [`_multimodule.py:458–465`](src/regularizedvi/_multimodule.py#L458-L465) init, [`_multimodule.py:756`](src/regularizedvi/_multimodule.py#L756) one-hot selection, [`_multimodule.py:991–1003`](src/regularizedvi/_multimodule.py#L991-L1003) prior penalty):
 
-$$b^{(m)}_{f,s_n} = \exp(\beta^{(m)}_{f,s_n}), \qquad b^{(m)}_{f,s_n} \sim \text{Gamma}(1,\, 100)$$
+$$s^{(m)}_{e,f} = \exp(\beta^{(m)}_{e,f}), \qquad s^{(m)}_{e,f} \sim \text{Gamma}(1,\, 100)$$
 
-**Region factors** — per-feature, per-covariate multiplicative scaling capturing systematic biases (GC content, mappability, peak caller sensitivity). Parameterised as $\text{softplus}(\gamma)/0.7$ with a tight Gamma prior centered at 1. When scaling covariates $t$ are registered, each covariate category gets its own factor; the per-cell scaling is selected via one-hot indicator ([`_multimodule.py:452–456`](src/regularizedvi/_multimodule.py#L452-L456) init, [`_multimodule.py:728–736`](src/regularizedvi/_multimodule.py#L728-L736) activation and selection, [`_multimodule.py:924–941`](src/regularizedvi/_multimodule.py#L924-L941) prior penalty):
+**Region factors** — per-feature, per-covariate multiplicative scaling capturing systematic biases (GC content, mappability, peak caller sensitivity). Parameterised as $\text{softplus}(\gamma)/0.7$ with a tight Gamma prior centered at 1. Scaling covariates $t$ are selected by `modality_scaling_covariate_keys` (many keys); each covariate category gets its own factor ([`_multimodule.py:472–476`](src/regularizedvi/_multimodule.py#L472-L476) init, [`_multimodule.py:779–787`](src/regularizedvi/_multimodule.py#L779-L787) activation and selection, [`_multimodule.py:972–989`](src/regularizedvi/_multimodule.py#L972-L989) prior penalty):
 
-$$\alpha^{(m)}_{t,f} = \text{softplus}(\gamma^{(m)}_{t,f})\,/\,0.7, \qquad \alpha^{(m)}_{t,f} \sim \text{Gamma}(200,\, 200)$$
+$$y^{(m)}_{t,f} = \text{softplus}(\gamma^{(m)}_{t,f})\,/\,0.7, \qquad y^{(m)}_{t,f} \sim \text{Gamma}(200,\, 200)$$
 
-**Expected mean counts** — decoder output plus optional background, scaled by library size and region factor ([`_components.py:467`](src/regularizedvi/_components.py#L467), [`_multimodule.py:736`](src/regularizedvi/_multimodule.py#L736)):
+**Expected mean counts** — decoder output plus optional background, scaled by library size and region factor ([`_components.py:467`](src/regularizedvi/_components.py#L467)):
 
-$$\mu^{(m)}_{nf} = \ell^{(m)}_n \cdot \big(\rho^{(m)}_{nf} + b^{(m)}_{f,s_n}\big) \cdot \alpha^{(m)}_{t_n,f}$$
+$$\mu^{(m)}_{nf} = \ell^{(m)}_n \cdot \big(\rho^{(m)}_{nf} + s^{(m)}_{e_n,f}\big) \cdot y^{(m)}_{t_n,f}$$
 
-**Hierarchical dispersion prior** — same two-level structure as single-modality, per modality and batch ([`_multimodule.py:889–922`](src/regularizedvi/_multimodule.py#L889-L922)):
+**Hierarchical dispersion prior** — same two-level structure as single-modality, per modality and `dispersion_key` group $d$ (one key, [`_multimodule.py:940–970`](src/regularizedvi/_multimodule.py#L940-L970)):
 
-$$\lambda^{(m)}_{s_n} \sim \text{Gamma}(9,\, 3), \qquad 1/\sqrt{\theta^{(m)}_{f,s_n}} \sim \text{Exponential}(\lambda^{(m)}_{s_n})$$
+$$\lambda^{(m)}_d \sim \text{Gamma}(9,\, 3), \qquad 1/\sqrt{\theta^{(m)}_{f,d}} \sim \text{Exponential}(\lambda^{(m)}_d)$$
 
-**Observation model** — GammaPoisson (= negative binomial) with mean $\mu^{(m)}\_{nf}$ and inverse dispersion $\theta^{(m)}\_{f,s\_n}$:
+**Observation model** — GammaPoisson (= negative binomial) with mean $\mu^{(m)}\_{nf}$ and inverse dispersion $\theta^{(m)}\_{f,d}$:
 
-$$x^{(m)}_{nf} \sim \text{GammaPoisson}\!\Big(\text{concentration} = \theta^{(m)}_{f,s_n},\;\; \text{rate} = \frac{\theta^{(m)}_{f,s_n}}{\mu^{(m)}_{nf}}\Big)$$
+$$x^{(m)}_{nf} \sim \text{GammaPoisson}\!\Big(\text{concentration} = \theta^{(m)}_{f,d_n},\;\; \text{rate} = \frac{\theta^{(m)}_{f,d_n}}{\mu^{(m)}_{nf}}\Big)$$
 
 #### Optional per-modality correction terms
 
 | Term | Symbol | Prior | What it captures | RNA default | ATAC default |
 |------|--------|-------|-----------------|-------------|--------------|
-| Additive background | $b^{(m)}_{f,s_n} = \exp(\beta^{(m)}_{f,s_n})$ | $\text{Gamma}(1, 100)$, mean 0.01 | Per-feature, per-batch ambient contamination or assay baseline | **ON** | off |
-| Region factor | $\alpha^{(m)}_{t,f} = \text{softplus}(\gamma^{(m)}_{t,f})/0.7$ | $\text{Gamma}(200, 200)$, mean 1.0 | Per-feature, per-covariate multiplicative bias (GC content, mappability) | off | **ON** |
-| Learned library size | $\ell^{(m)}_n$ | $\text{LogNormal}$, 0.05 var scaling | Low-capacity encoder; observed totals include ambient | **always ON** | **always ON** |
-| Dispersion regularisation | $1/\sqrt{\theta^{(m)}_{f,s_n}}$ | $\text{Exp}(\lambda)$, $\lambda \sim \text{Gamma}(9,3)$ | Containment prior regularising against excessive overdispersion | ON | ON |
-| Batch-free decoder | — | — | Decoder conditioned only on categorical covariates $c_n$, not batch $s_n$ | ON | ON |
+| Additive background | $s^{(m)}_{e,f} = \exp(\beta^{(m)}_{e,f})$ | $\text{Gamma}(1, 100)$, mean 0.01 | Per-feature ambient contamination; `ambient_covariate_keys` (many keys) | **ON** | off |
+| Region factor | $y^{(m)}_{t,f} = \text{softplus}(\gamma^{(m)}_{t,f})/0.7$ | $\text{Gamma}(200, 200)$, mean 1.0 | Per-feature multiplicative bias; `modality_scaling_covariate_keys` (many keys) | off | **ON** |
+| Learned library size | $\ell^{(m)}_n$ | $\text{LogNormal}$, 0.05 var scaling | Low-capacity encoder; `library_size_key` (one key) | **always ON** | **always ON** |
+| Dispersion regularisation | $1/\sqrt{\theta^{(m)}_{f,d}}$ | $\text{Exp}(\lambda)$, $\lambda \sim \text{Gamma}(9,3)$ | Containment prior; `dispersion_key` (one key) | ON | ON |
+| Batch-free decoder | — | — | Decoder conditioned only on $c\_{k,n}$; `categorical_covariate_keys` (many keys) | ON | ON |
 
-Setting $b^{(m)}\_{f,s\_n} = 0$ (no ambient) and $\alpha^{(m)}\_{t,f} = 1$ (no region factor) recovers the standard regularizedvi single-modality model for that modality. The defaults reflect domain knowledge for snRNA+ATAC multiome: ambient RNA contamination is substantial in single-nucleus RNA-seq and well-captured by an additive term, while ATAC peaks have systematic per-peak biases from GC content, mappability and peak caller thresholds. See the [bone marrow multiome tutorial](docs/notebooks/bone_marrow_multimodal_tutorial.ipynb) for a worked RNA+ATAC example.
+Setting $s^{(m)}\_{e,f} = 0$ (no ambient) and $y^{(m)}\_{t,f} = 1$ (no region factor) recovers the standard regularizedvi single-modality model for that modality. The defaults reflect domain knowledge for snRNA+ATAC multiome: ambient RNA contamination is substantial in single-nucleus RNA-seq and well-captured by an additive term, while ATAC peaks have systematic per-peak biases from GC content, mappability and peak caller thresholds. See the [bone marrow multiome tutorial](docs/notebooks/bone_marrow_multimodal_tutorial.ipynb) for a worked RNA+ATAC example.
 
 #### Inference: per-modality encoders and posterior concatenation
 
 **Per-modality encoder** — each modality's encoder takes its own observed counts as input and independently constructs a Gaussian posterior over its private latent slice. The RNA encoder sees only RNA counts; the ATAC encoder sees only ATAC counts. This forces the model to build a dedicated representation for each modality before combining them:
 
-$$q_\eta(z^{(m)}_n \mid x^{(m)}_n, s_n, c_n) = \text{Normal}\!\big(\mu^{(m)}_\eta(x^{(m)}_n),\; (\sigma^{(m)}_\eta)^2(x^{(m)}_n)\big)$$
+$$q_\eta(z^{(m)}_n \mid x^{(m)}_n, e_n, c_{k,n}, p_n) = \text{Normal}\!\big(\mu^{(m)}_\eta(x^{(m)}_n),\; (\sigma^{(m)}_\eta)^2(x^{(m)}_n)\big)$$
 
 **Posterior concatenation** — samples from the per-modality posteriors are concatenated to form the joint representation fed to all decoders. Because every decoder $f^{(m)}\_w$ receives the full $z\_n$, cross-modal coupling can emerge through the decoders during training. The training objective (ELBO) penalises each encoder's KL divergence independently:
 
