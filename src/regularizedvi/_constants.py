@@ -50,6 +50,9 @@ AMBIENT_COVS_KEY = "ambient_covs"
 # Registry key for dispersion covariate (controls per-group px_r, separate from batch_key)
 DISPERSION_KEY = "dispersion_key"
 
+# Registry key for library size covariate (controls N(mu_s, sigma_s) prior, separate from batch_key)
+LIBRARY_SIZE_KEY = "library_size_key"
+
 # --- Network architecture ---
 DEFAULT_USE_BATCH_NORM = "none"
 DEFAULT_USE_LAYER_NORM = "both"

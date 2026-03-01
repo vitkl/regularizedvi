@@ -43,6 +43,7 @@ from regularizedvi._constants import (
     DEFAULT_USE_BATCH_NORM,
     DEFAULT_USE_LAYER_NORM,
     DISPERSION_KEY,
+    LIBRARY_SIZE_KEY,
     MODALITY_SCALING_COVS_KEY,
 )
 from regularizedvi._multimodule import RegularizedMultimodalVAE
@@ -241,30 +242,38 @@ class RegularizedMultimodalVI(
                 if reg_key in self.adata_manager.data_registry:
                     n_input_per_modality[name] = self.adata_manager.get_from_registry(reg_key).shape[1]
 
-        # Compute per-modality library size priors (log-scale mean and variance per batch)
+        # Compute per-modality library size priors (log-scale mean and variance per group)
+        # Use library_size_key indices if registered, otherwise fall back to batch_key
+        n_library_cats = None
+        if LIBRARY_SIZE_KEY in self.adata_manager.data_registry:
+            lib_indices = self.adata_manager.get_from_registry(LIBRARY_SIZE_KEY)
+            n_library_cats = len(self.adata_manager.get_state_registry(LIBRARY_SIZE_KEY).categorical_mapping)
+        else:
+            lib_indices = self.adata_manager.get_from_registry(REGISTRY_KEYS.BATCH_KEY)
+            n_library_cats = n_batch
+
         library_log_means = {}
         library_log_vars = {}
-        batch_indices = self.adata_manager.get_from_registry(REGISTRY_KEYS.BATCH_KEY)
         for name in modality_names:
             reg_key = f"X_{name}"
             data = self.adata_manager.get_from_registry(reg_key)
-            log_means = np.zeros(n_batch)
-            log_vars = np.ones(n_batch)
-            for i_batch in np.unique(batch_indices):
-                idx_batch = np.squeeze(batch_indices == i_batch)
-                batch_data = data[idx_batch.nonzero()[0]]
-                sum_counts = batch_data.sum(axis=1)
+            log_means = np.zeros(n_library_cats)
+            log_vars = np.ones(n_library_cats)
+            for i_group in np.unique(lib_indices):
+                idx_group = np.squeeze(lib_indices == i_group)
+                group_data = data[idx_group.nonzero()[0]]
+                sum_counts = group_data.sum(axis=1)
                 masked_log_sum = np.ma.log(sum_counts)
                 if np.ma.is_masked(masked_log_sum):
                     logger.warning(
-                        "Modality '%s' has cells with zero total counts in batch %d. "
+                        "Modality '%s' has cells with zero total counts in library group %d. "
                         "Consider filtering with scanpy.pp.filter_cells().",
                         name,
-                        i_batch,
+                        i_group,
                     )
                 log_counts = masked_log_sum.filled(0)
-                log_means[i_batch] = np.mean(log_counts).astype(np.float32)
-                log_vars[i_batch] = np.var(log_counts).astype(np.float32)
+                log_means[i_group] = np.mean(log_counts).astype(np.float32)
+                log_vars[i_group] = np.var(log_counts).astype(np.float32)
             library_log_means[name] = log_means.reshape(1, -1)
             library_log_vars[name] = log_vars.reshape(1, -1)
 
@@ -305,6 +314,7 @@ class RegularizedMultimodalVI(
             n_cats_per_scaling_cov=n_cats_per_scaling_cov,
             n_cats_per_ambient_cov=n_cats_per_ambient_cov,
             n_dispersion_cats=n_dispersion_cats,
+            n_library_cats=n_library_cats,
             **kwargs,
         )
 
@@ -317,6 +327,7 @@ class RegularizedMultimodalVI(
         batch_key: str | None = None,
         ambient_covariate_keys: list[str] | None = None,
         dispersion_key: str | None = None,
+        library_size_key: str | None = None,
         categorical_covariate_keys: list[str] | None = None,
         continuous_covariate_keys: list[str] | None = None,
         modality_scaling_covariate_keys: list[str] | None = None,
@@ -345,6 +356,11 @@ class RegularizedMultimodalVI(
             is ``"gene-batch"``, the second dimension of ``px_r`` is sized by
             the number of categories in this key (instead of ``n_batch``).
             If None and ``batch_key`` is provided, defaults to ``batch_key``.
+        library_size_key
+            Optional categorical ``.obs`` key whose categories define groups
+            for the library size prior ``N(mu_s, sigma_s)``. The prior mean
+            and variance are computed per group from data at setup time.
+            If None and ``batch_key`` is provided, defaults to ``batch_key``.
         %(param_cat_cov_keys)s
         %(param_cont_cov_keys)s
         modality_scaling_covariate_keys
@@ -359,11 +375,13 @@ class RegularizedMultimodalVI(
         if modalities is None:
             modalities = {key: key for key in mdata.mod.keys()}
 
-        # Backward compat: batch_key fans out to ambient covariates and dispersion
+        # Backward compat: batch_key fans out to ambient covariates, dispersion, and library
         if batch_key is not None and ambient_covariate_keys is None:
             ambient_covariate_keys = [batch_key]
         if batch_key is not None and dispersion_key is None:
             dispersion_key = batch_key
+        if batch_key is not None and library_size_key is None:
+            library_size_key = batch_key
 
         anndata_fields = []
 
@@ -393,6 +411,16 @@ class RegularizedMultimodalVI(
                 fields.MuDataCategoricalObsField(
                     DISPERSION_KEY,
                     dispersion_key,
+                    mod_key=list(modalities.values())[0],
+                )
+            )
+
+        # Library size key (controls per-group library prior, separate from batch_key)
+        if library_size_key:
+            anndata_fields.append(
+                fields.MuDataCategoricalObsField(
+                    LIBRARY_SIZE_KEY,
+                    library_size_key,
                     mod_key=list(modalities.values())[0],
                 )
             )

@@ -29,7 +29,7 @@ from torch import nn
 from torch.distributions import Exponential, Gamma, Normal
 from torch.distributions import kl_divergence as kld
 
-from regularizedvi._constants import AMBIENT_COVS_KEY, DISPERSION_KEY, MODALITY_SCALING_COVS_KEY
+from regularizedvi._constants import AMBIENT_COVS_KEY, DISPERSION_KEY, LIBRARY_SIZE_KEY, MODALITY_SCALING_COVS_KEY
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -202,6 +202,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         n_cats_per_ambient_cov: list[int] | None = None,
         # Dispersion covariate (controls per-group px_r, decoupled from batch_key)
         n_dispersion_cats: int | None = None,
+        # Library size covariate (controls per-group library prior, decoupled from batch_key)
+        n_library_cats: int | None = None,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -241,6 +243,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
         self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
+        # Library size covariate (decoupled from batch_key, fallback to n_batch)
+        self.n_library_cats = n_library_cats if n_library_cats is not None else n_batch
 
         additive_background_modalities = additive_background_modalities or []
         region_factors_modalities = region_factors_modalities or []
@@ -494,6 +498,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             "library": inference_outputs["library"],
             "batch_index": tensors[REGISTRY_KEYS.BATCH_KEY],
             "dispersion_index": tensors.get(DISPERSION_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
+            "library_size_index": tensors.get(LIBRARY_SIZE_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
             "cont_covs": tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
             "cat_covs": tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
             "scaling_covs": tensors.get(MODALITY_SCALING_COVS_KEY, None),
@@ -667,6 +672,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         library: dict[str, torch.Tensor],
         batch_index: torch.Tensor,
         dispersion_index: torch.Tensor | None = None,
+        library_size_index: torch.Tensor | None = None,
         cont_covs: torch.Tensor | None = None,
         cat_covs: torch.Tensor | None = None,
         scaling_covs: torch.Tensor | None = None,
@@ -781,7 +787,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # Prior on z
         pz = Normal(torch.zeros_like(z), torch.ones_like(z))
 
-        # Library priors (always learned)
+        # Library priors (always learned, indexed by library_size_index)
+        _lib_idx = library_size_index if library_size_index is not None else batch_index
         pl_dict = {}
         for name in self.modality_names:
             if name not in library:
@@ -790,11 +797,11 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             vars_buf = getattr(self, f"library_log_vars_{name}", None)
             if means_buf is not None and vars_buf is not None:
                 local_means = torch.nn.functional.linear(
-                    one_hot(batch_index.squeeze(-1), self.n_batch).float(),
+                    one_hot(_lib_idx.squeeze(-1).long(), self.n_library_cats).float(),
                     means_buf,
                 )
                 local_vars = torch.nn.functional.linear(
-                    one_hot(batch_index.squeeze(-1), self.n_batch).float(),
+                    one_hot(_lib_idx.squeeze(-1).long(), self.n_library_cats).float(),
                     vars_buf,
                 )
                 pl_dict[name] = Normal(local_means, local_vars.sqrt())
