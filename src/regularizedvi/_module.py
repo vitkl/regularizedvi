@@ -31,7 +31,7 @@ from scvi.module.base import (
 from torch.distributions import Exponential, Normal
 from torch.nn.functional import one_hot
 
-from regularizedvi._constants import AMBIENT_COVS_KEY, DISPERSION_KEY, LIBRARY_SIZE_KEY
+from regularizedvi._constants import AMBIENT_COVS_KEY, DEFAULT_COMPUTE_PEARSON, DISPERSION_KEY, LIBRARY_SIZE_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -40,6 +40,15 @@ if TYPE_CHECKING:
     from torch.distributions import Distribution
 
 logger = logging.getLogger(__name__)
+
+
+def _pearson_corr_rows(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Row-wise Pearson r between x and y (both shape [N, M])."""
+    x_centered = x - x.mean(dim=1, keepdim=True)
+    y_centered = y - y.mean(dim=1, keepdim=True)
+    num = (x_centered * y_centered).sum(dim=1)
+    den = (x_centered.norm(dim=1) * y_centered.norm(dim=1)).clamp(min=1e-8)
+    return num / den
 
 
 class GammaPoissonWithScale:
@@ -232,11 +241,14 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         n_dispersion_cats: int | None = None,
         # Library size covariate (controls per-group library prior, decoupled from batch_key)
         n_library_cats: int | None = None,
+        # Training metrics
+        compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
         super().__init__()
 
+        self.compute_pearson = compute_pearson
         self.dispersion = dispersion
         self.n_latent = n_latent
         self.log_variational = log_variational
@@ -806,6 +818,17 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             }
         else:
             extra_metrics_payload = {}
+
+        # Pearson correlation metrics (gene-wise and cell-wise)
+        if self.compute_pearson:
+            px_rate = generative_outputs[MODULE_KEYS.PX_KEY].mean.detach()
+            x_obs = x.detach()
+            # Gene-wise: transpose so genes are rows, cells are columns
+            pearson_gene = _pearson_corr_rows(px_rate.T, x_obs.T).mean()
+            # Cell-wise: cells are rows, genes are columns (natural layout)
+            pearson_cell = _pearson_corr_rows(px_rate, x_obs).mean()
+            extra_metrics_payload["pearson_gene"] = pearson_gene
+            extra_metrics_payload["pearson_cell"] = pearson_cell
 
         return LossOutput(
             loss=loss,

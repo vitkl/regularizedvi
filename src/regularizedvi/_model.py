@@ -16,6 +16,8 @@ import logging
 import warnings
 from typing import TYPE_CHECKING
 
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 from scvi import REGISTRY_KEYS, settings
 from scvi.data import AnnDataManager
@@ -44,6 +46,7 @@ from regularizedvi._constants import (
     AMBIENT_COVS_KEY,
     DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
     DEFAULT_ADDITIVE_BG_PRIOR_BETA,
+    DEFAULT_COMPUTE_PEARSON,
     DEFAULT_DISPERSION,
     DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
     DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
@@ -196,6 +199,7 @@ class AmbientRegularizedSCVI(
         regularise_background: bool = DEFAULT_REGULARISE_BACKGROUND,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_BATCH_NORM,
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
+        compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
         **kwargs,
     ):
         super().__init__(adata)
@@ -222,6 +226,7 @@ class AmbientRegularizedSCVI(
             "additive_bg_prior_alpha": additive_bg_prior_alpha,
             "additive_bg_prior_beta": additive_bg_prior_beta,
             "regularise_background": regularise_background,
+            "compute_pearson": compute_pearson,
             **kwargs,
         }
         self._model_summary_string = (
@@ -330,11 +335,59 @@ class AmbientRegularizedSCVI(
                 additive_bg_prior_alpha=additive_bg_prior_alpha,
                 additive_bg_prior_beta=additive_bg_prior_beta,
                 regularise_background=regularise_background,
+                compute_pearson=compute_pearson,
                 **kwargs,
             )
             self.module.minified_data_type = self.minified_data_type
 
         self.init_params_ = self._get_init_params(locals())
+
+    def train(
+        self,
+        max_epochs: int | None = None,
+        accelerator: str = "auto",
+        devices: int | list[int] | str = "auto",
+        train_size: float = 0.9,
+        validation_size: float | None = None,
+        shuffle_set_split: bool = True,
+        load_sparse_tensor: bool = False,
+        batch_size: int = 128,
+        early_stopping: bool = False,
+        datasplitter_kwargs: dict | None = None,
+        plan_kwargs: dict | None = None,
+        validation_batch_size: int | None = None,
+        **trainer_kwargs,
+    ):
+        """Train the model with optional larger validation batch size.
+
+        Parameters
+        ----------
+        validation_batch_size
+            Batch size for the validation DataLoader. If ``None`` (default),
+            uses the same ``batch_size`` as training. Larger values (e.g. 8192)
+            reduce noise in Pearson correlation metrics computed on validation.
+        **kwargs
+            All other arguments are passed to
+            :meth:`~scvi.model.base.UnsupervisedTrainingMixin.train`.
+        """
+        datasplitter_kwargs = datasplitter_kwargs or {}
+        if validation_batch_size is not None:
+            datasplitter_kwargs.setdefault("val_batch_size", validation_batch_size)
+
+        return super().train(
+            max_epochs=max_epochs,
+            accelerator=accelerator,
+            devices=devices,
+            train_size=train_size,
+            validation_size=validation_size,
+            shuffle_set_split=shuffle_set_split,
+            load_sparse_tensor=load_sparse_tensor,
+            batch_size=batch_size,
+            early_stopping=early_stopping,
+            datasplitter_kwargs=datasplitter_kwargs,
+            plan_kwargs=plan_kwargs,
+            **trainer_kwargs,
+        )
 
     @classmethod
     @setup_anndata_dsp.dedent
@@ -499,3 +552,73 @@ class AmbientRegularizedSCVI(
         minified_adata.obs[_SCVI_OBSERVED_LIB_SIZE] = np.squeeze(np.asarray(counts.sum(axis=1)))
         self._update_adata_and_manager_post_minification(minified_adata, minified_data_type)
         self.module.minified_data_type = minified_data_type
+
+    def plot_training_diagnostics(
+        self,
+        skip_epochs: int = 80,
+        figsize: tuple[float, float] | None = None,
+    ) -> matplotlib.figure.Figure:
+        """Plot single-modal training diagnostics.
+
+        Creates a column of training curves for key metrics.
+        Only rows with available data are shown.
+
+        Parameters
+        ----------
+        skip_epochs
+            Number of initial epochs to skip (early noisy epochs).
+        figsize
+            Figure size ``(width, height)``. Auto-computed if None.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        history = self.history_
+
+        # Define metric rows: (row_label, train_key, val_key)
+        metric_rows = [
+            ("Reconstruction loss", "reconstruction_loss_train", "reconstruction_loss_validation"),
+            ("Pearson r (gene-wise)", "pearson_gene_train", "pearson_gene_validation"),
+            ("Pearson r (cell-wise)", "pearson_cell_train", "pearson_cell_validation"),
+            ("KL divergence (Z)", "kl_local_train", "kl_local_validation"),
+            ("Total ELBO", "elbo_train", "elbo_validation"),
+        ]
+
+        # Filter to rows that have at least one available key
+        available_rows = []
+        for row_label, train_key, val_key in metric_rows:
+            has_train = train_key is not None and train_key in history
+            has_val = val_key is not None and val_key in history
+            if has_train or has_val:
+                available_rows.append((row_label, train_key, val_key))
+
+        n_rows = len(available_rows)
+        if n_rows == 0:
+            raise ValueError("No training metrics found in model.history_. Train the model first.")
+
+        if figsize is None:
+            figsize = (5.0, 3.0 * n_rows)
+
+        fig, axes = plt.subplots(n_rows, 1, figsize=figsize, squeeze=False)
+
+        for row_idx, (row_label, train_key, val_key) in enumerate(available_rows):
+            ax = axes[row_idx, 0]
+
+            if train_key is not None and train_key in history:
+                df = history[train_key]
+                values = df.iloc[skip_epochs:].values.ravel()
+                epochs = range(skip_epochs, skip_epochs + len(values))
+                ax.plot(epochs, values, color="tab:blue", label="train")
+            if val_key is not None and val_key in history:
+                df = history[val_key]
+                values = df.iloc[skip_epochs:].values.ravel()
+                epochs = range(skip_epochs, skip_epochs + len(values))
+                ax.plot(epochs, values, color="tab:orange", label="validation")
+
+            ax.set_ylabel(row_label)
+            ax.set_xlabel("Epoch")
+            ax.legend(fontsize="small")
+
+        fig.tight_layout()
+        return fig

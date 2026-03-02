@@ -59,6 +59,9 @@ DEFAULT_USE_BATCH_NORM = "none"
 DEFAULT_USE_LAYER_NORM = "both"
 DEFAULT_DROPOUT_ON_INPUT = True
 
+# --- Training metrics ---
+DEFAULT_COMPUTE_PEARSON = False
+
 # --- Recommended training defaults (documented, not enforced) ---
 # These are not enforced in code but recommended in docs/tutorial:
 # n_hidden=512, n_latent=128, n_layers=1

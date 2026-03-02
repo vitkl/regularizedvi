@@ -29,7 +29,14 @@ from torch import nn
 from torch.distributions import Exponential, Gamma, Normal
 from torch.distributions import kl_divergence as kld
 
-from regularizedvi._constants import AMBIENT_COVS_KEY, DISPERSION_KEY, LIBRARY_SIZE_KEY, MODALITY_SCALING_COVS_KEY
+from regularizedvi._constants import (
+    AMBIENT_COVS_KEY,
+    DEFAULT_COMPUTE_PEARSON,
+    DISPERSION_KEY,
+    LIBRARY_SIZE_KEY,
+    MODALITY_SCALING_COVS_KEY,
+)
+from regularizedvi._module import _pearson_corr_rows
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -205,11 +212,14 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         n_dispersion_cats: int | None = None,
         # Library size covariate (controls per-group library prior, decoupled from batch_key)
         n_library_cats: int | None = None,
+        # Training metrics
+        compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
         super().__init__()
 
+        self.compute_pearson = compute_pearson
         self.modality_names = list(modality_names)
         self.n_modalities = len(self.modality_names)
         self.n_input_per_modality = n_input_per_modality
@@ -1003,6 +1013,24 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 )
                 bg_penalty = bg_penalty + neg_log_prior
             loss = loss + bg_penalty / n_obs
+
+        # ---- Pearson correlation metrics (per modality) ----
+        if self.compute_pearson:
+            for name in self.modality_names:
+                if name not in px_dict:
+                    continue
+                key = f"X_{name}"
+                x_obs = tensors.get(key)
+                if x_obs is None:
+                    continue
+                px_rate = px_dict[name].mean.detach()
+                x_obs = x_obs.detach()
+                # Gene-wise: transpose so genes/features are rows, cells are columns
+                pearson_gene = _pearson_corr_rows(px_rate.T, x_obs.T).mean()
+                # Cell-wise: cells are rows, genes/features are columns
+                pearson_cell = _pearson_corr_rows(px_rate, x_obs).mean()
+                extra_metrics[f"pearson_gene_{name}"] = pearson_gene
+                extra_metrics[f"pearson_cell_{name}"] = pearson_cell
 
         return LossOutput(
             loss=loss,

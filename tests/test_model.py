@@ -335,6 +335,50 @@ class TestAmbientRegularizedSCVI:
         assert module.additive_background.shape == (adata.shape[1], 9)
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
 
+    def test_compute_pearson_single(self, adata):
+        """Test that Pearson correlation metrics are logged when compute_pearson=True."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            compute_pearson=True,
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+
+        history = model.history_
+        # scvi-tools logs extra_metrics with _{mode} suffix
+        assert "pearson_gene_train" in history, f"Missing pearson_gene_train. Keys: {list(history.keys())}"
+        assert "pearson_cell_train" in history, f"Missing pearson_cell_train. Keys: {list(history.keys())}"
+
+        # Values should be between -1 and 1
+        gene_vals = history["pearson_gene_train"].values
+        cell_vals = history["pearson_cell_train"].values
+        assert np.all(gene_vals >= -1.0) and np.all(gene_vals <= 1.0), f"pearson_gene out of range: {gene_vals}"
+        assert np.all(cell_vals >= -1.0) and np.all(cell_vals <= 1.0), f"pearson_cell out of range: {cell_vals}"
+
+    def test_plot_training_diagnostics_single(self, adata):
+        """Smoke test: plot_training_diagnostics returns a Figure for single-modal model."""
+        import matplotlib.figure
+
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        fig = model.plot_training_diagnostics(skip_epochs=0)
+        assert isinstance(fig, matplotlib.figure.Figure)
+        assert len(fig.axes) > 0
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
 
 class TestRegularizedVAEModule:
     """Tests for the RegularizedVAE module directly."""
@@ -984,3 +1028,116 @@ class TestRegularizedMultimodalVI:
         bg_param = model.module.additive_background["rna"]
         assert bg_param.shape == (50, 9)
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+    def test_attribution_with_categorical_covariates(self, mdata):
+        """Test get_modality_attribution works with categorical covariates."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            batch_key="batch",
+            categorical_covariate_keys=["site", "donor"],
+        )
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+        result = model.get_modality_attribution(batch_size=32)
+
+        assert "rna" in result
+        assert "atac" in result
+
+        n_obs = mdata.n_obs
+        n_latent = model.module.total_latent_dim  # 4 + 4 = 8
+
+        for name in ["rna", "atac"]:
+            assert "attribution" in result[name]
+            assert "weighted_z" in result[name]
+            assert result[name]["attribution"].shape == (n_obs, n_latent)
+            assert result[name]["weighted_z"].shape == (n_obs, n_latent)
+            # Attribution values should be non-negative (mean of abs)
+            assert np.all(result[name]["attribution"] >= 0)
+
+    def test_compute_pearson_multimodal(self, mdata):
+        """Test that per-modality Pearson correlation metrics are logged."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            compute_pearson=True,
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+
+        history = model.history_
+        # Per-modality Pearson metrics with _{mode} suffix
+        for mod_name in ["rna", "atac"]:
+            gene_key = f"pearson_gene_{mod_name}_train"
+            cell_key = f"pearson_cell_{mod_name}_train"
+            assert gene_key in history, f"Missing {gene_key}. Keys: {list(history.keys())}"
+            assert cell_key in history, f"Missing {cell_key}. Keys: {list(history.keys())}"
+
+            # Values should be between -1 and 1
+            gene_vals = history[gene_key].values
+            cell_vals = history[cell_key].values
+            assert np.all(gene_vals >= -1.0) and np.all(gene_vals <= 1.0), f"{gene_key} out of range: {gene_vals}"
+            assert np.all(cell_vals >= -1.0) and np.all(cell_vals <= 1.0), f"{cell_key} out of range: {cell_vals}"
+
+    def test_get_modality_latents(self, mdata):
+        """Test get_modality_latents returns dict with correct shapes."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent={"rna": 6, "atac": 4},
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+        result = model.get_modality_latents()
+
+        # Should have modality keys + "__joint__"
+        assert "rna" in result
+        assert "atac" in result
+        assert "__joint__" in result
+
+        n_cells = mdata.n_obs
+
+        # Check per-modality shapes
+        assert result["rna"].shape == (n_cells, 6)
+        assert result["atac"].shape == (n_cells, 4)
+        assert result["__joint__"].shape == (n_cells, 10)  # 6 + 4
+
+        # Joint should equal concatenation of per-modality latents in modality_names order
+        parts = [result[name] for name in model.module.modality_names]
+        joint_from_parts = np.concatenate(parts, axis=1)
+        np.testing.assert_array_equal(result["__joint__"], joint_from_parts)
+
+    def test_get_modality_latents_weighted_mean_raises(self, mdata):
+        """Test get_modality_latents raises ValueError for weighted_mean mode."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            latent_mode="weighted_mean",
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+        with pytest.raises(ValueError, match="weighted_mean"):
+            model.get_modality_latents()
+
+    def test_plot_training_diagnostics_multimodal(self, mdata):
+        """Smoke test: plot_training_diagnostics returns a Figure for multimodal model."""
+        import matplotlib.figure
+
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+
+        fig = model.plot_training_diagnostics(skip_epochs=0)
+        assert isinstance(fig, matplotlib.figure.Figure)
+        assert len(fig.axes) > 0
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)

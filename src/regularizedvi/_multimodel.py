@@ -14,6 +14,8 @@ import logging
 import warnings
 from typing import TYPE_CHECKING
 
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from mudata import MuData
@@ -30,6 +32,7 @@ from regularizedvi._constants import (
     AMBIENT_COVS_KEY,
     DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
     DEFAULT_ADDITIVE_BG_PRIOR_BETA,
+    DEFAULT_COMPUTE_PEARSON,
     DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
     DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
@@ -155,6 +158,7 @@ class RegularizedMultimodalVI(
         regularise_background: bool = DEFAULT_REGULARISE_BACKGROUND,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_BATCH_NORM,
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
+        compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
         **kwargs,
     ):
         super().__init__(mdata)
@@ -196,6 +200,7 @@ class RegularizedMultimodalVI(
             "regularise_background": regularise_background,
             "use_batch_norm": use_batch_norm,
             "use_layer_norm": use_layer_norm,
+            "compute_pearson": compute_pearson,
             **kwargs,
         }
 
@@ -215,6 +220,53 @@ class RegularizedMultimodalVI(
             f"latent_mode={latent_mode}, n_hidden={n_hidden}, n_latent={n_latent}"
         )
         self.init_params_ = self._get_init_params(locals())
+
+    def train(
+        self,
+        max_epochs: int | None = None,
+        accelerator: str = "auto",
+        devices: int | list[int] | str = "auto",
+        train_size: float = 0.9,
+        validation_size: float | None = None,
+        shuffle_set_split: bool = True,
+        load_sparse_tensor: bool = False,
+        batch_size: int = 128,
+        early_stopping: bool = False,
+        datasplitter_kwargs: dict | None = None,
+        plan_kwargs: dict | None = None,
+        validation_batch_size: int | None = None,
+        **trainer_kwargs,
+    ):
+        """Train the model with optional larger validation batch size.
+
+        Parameters
+        ----------
+        validation_batch_size
+            Batch size for the validation DataLoader. If ``None`` (default),
+            uses the same ``batch_size`` as training. Larger values (e.g. 8192)
+            reduce noise in Pearson correlation metrics computed on validation.
+        **kwargs
+            All other arguments are passed to
+            :meth:`~scvi.model.base.UnsupervisedTrainingMixin.train`.
+        """
+        datasplitter_kwargs = datasplitter_kwargs or {}
+        if validation_batch_size is not None:
+            datasplitter_kwargs.setdefault("val_batch_size", validation_batch_size)
+
+        return super().train(
+            max_epochs=max_epochs,
+            accelerator=accelerator,
+            devices=devices,
+            train_size=train_size,
+            validation_size=validation_size,
+            shuffle_set_split=shuffle_set_split,
+            load_sparse_tensor=load_sparse_tensor,
+            batch_size=batch_size,
+            early_stopping=early_stopping,
+            datasplitter_kwargs=datasplitter_kwargs,
+            plan_kwargs=plan_kwargs,
+            **trainer_kwargs,
+        )
 
     def _get_modality_names(self) -> list[str]:
         """Extract modality names from registered data."""
@@ -548,6 +600,179 @@ class RegularizedMultimodalVI(
 
         return np.concatenate(latent, axis=0)
 
+    def get_modality_latents(self, **kwargs) -> dict[str, np.ndarray]:
+        """Return per-modality latent representations.
+
+        Calls :meth:`get_latent_representation` to obtain the joint latent
+        (n_cells, total_latent), then splits it by modality using the
+        per-modality ``n_latent`` configuration.
+
+        Parameters
+        ----------
+        **kwargs
+            Keyword arguments passed to :meth:`get_latent_representation`.
+
+        Returns
+        -------
+        dict mapping modality names to their latent arrays, plus
+        ``"__joint__"`` for the full concatenated representation.
+        For example::
+
+            {
+                "rna": np.ndarray of shape (n_cells, n_latent_rna),
+                "atac": np.ndarray of shape (n_cells, n_latent_atac),
+                "__joint__": np.ndarray of shape (n_cells, total_latent),
+            }
+
+        Raises
+        ------
+        ValueError
+            If the model uses ``latent_mode="weighted_mean"`` (per-modality
+            latents share the same dimensions and cannot be meaningfully split).
+        """
+        if self.module.latent_mode == "weighted_mean":
+            raise ValueError(
+                "get_modality_latents() is not supported for latent_mode='weighted_mean' "
+                "because all modalities share the same latent dimensions. "
+                "Use get_latent_representation() instead."
+            )
+
+        joint = self.get_latent_representation(**kwargs)
+        result = {"__joint__": joint}
+
+        # Split joint latent into per-modality slices
+        offset = 0
+        for name in self.module.modality_names:
+            n_lat = self.module.n_latent_dict[name]
+            result[name] = joint[:, offset : offset + n_lat]
+            offset += n_lat
+
+        return result
+
+    def plot_training_diagnostics(
+        self,
+        skip_epochs: int = 80,
+        figsize: tuple[float, float] | None = None,
+    ) -> matplotlib.figure.Figure:
+        """Plot per-modality training diagnostics.
+
+        Creates a grid of training curves with modalities as columns and
+        metric types as rows. Only rows with available data are shown.
+
+        Parameters
+        ----------
+        skip_epochs
+            Number of initial epochs to skip (early noisy epochs).
+        figsize
+            Figure size ``(width, height)``. Auto-computed if None.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        history = self.history_
+        modality_names = self.module.modality_names
+        n_modalities = len(modality_names)
+
+        # Define metric rows: (row_label, key_template_train, key_template_val)
+        # Templates use {name} for modality name
+        metric_rows = [
+            ("Reconstruction loss", "recon_loss_{name}_train", "recon_loss_{name}_validation"),
+            ("Pearson r (gene-wise)", "pearson_gene_{name}_train", "pearson_gene_{name}_validation"),
+            ("Pearson r (cell-wise)", "pearson_cell_{name}_train", "pearson_cell_{name}_validation"),
+            ("KL divergence (Z)", "kl_z_{name}_train", "kl_z_{name}_validation"),
+            ("Z variance", "z_var_{name}_train", "z_var_{name}_validation"),
+        ]
+
+        # Filter to rows that have at least one available key across modalities
+        available_rows = []
+        for row_label, train_tmpl, val_tmpl in metric_rows:
+            has_any = False
+            for name in modality_names:
+                train_key = train_tmpl.format(name=name)
+                val_key = val_tmpl.format(name=name)
+                if train_key in history or val_key in history:
+                    has_any = True
+                    break
+            if has_any:
+                available_rows.append((row_label, train_tmpl, val_tmpl))
+
+        # Check for ELBO row (not per-modality)
+        has_elbo = "elbo_train" in history or "elbo_validation" in history
+
+        n_metric_rows = len(available_rows)
+        n_total_rows = n_metric_rows + (1 if has_elbo else 0)
+
+        if n_total_rows == 0:
+            raise ValueError("No training metrics found in model.history_. Train the model first.")
+
+        if figsize is None:
+            figsize = (4.0 * n_modalities, 3.0 * n_total_rows)
+
+        fig, axes = plt.subplots(
+            n_total_rows,
+            n_modalities,
+            figsize=figsize,
+            squeeze=False,
+        )
+
+        # Plot per-modality metric rows
+        for row_idx, (row_label, train_tmpl, val_tmpl) in enumerate(available_rows):
+            for col_idx, name in enumerate(modality_names):
+                ax = axes[row_idx, col_idx]
+                train_key = train_tmpl.format(name=name)
+                val_key = val_tmpl.format(name=name)
+
+                plotted = False
+                if train_key in history:
+                    df = history[train_key]
+                    values = df.iloc[skip_epochs:].values.ravel()
+                    epochs = range(skip_epochs, skip_epochs + len(values))
+                    ax.plot(epochs, values, color="tab:blue", label="train")
+                    plotted = True
+                if val_key in history:
+                    df = history[val_key]
+                    values = df.iloc[skip_epochs:].values.ravel()
+                    epochs = range(skip_epochs, skip_epochs + len(values))
+                    ax.plot(epochs, values, color="tab:orange", label="validation")
+                    plotted = True
+
+                if not plotted:
+                    ax.set_visible(False)
+                else:
+                    if row_idx == 0:
+                        ax.set_title(name)
+                    if col_idx == 0:
+                        ax.set_ylabel(row_label)
+                    ax.set_xlabel("Epoch")
+                    ax.legend(fontsize="small")
+
+        # Plot ELBO row (spans all columns, but use leftmost subplot)
+        if has_elbo:
+            elbo_row = n_metric_rows
+            # Hide all but the first axis in the ELBO row
+            for col_idx in range(n_modalities):
+                if col_idx > 0:
+                    axes[elbo_row, col_idx].set_visible(False)
+
+            ax = axes[elbo_row, 0]
+            if "elbo_train" in history:
+                df = history["elbo_train"]
+                values = df.iloc[skip_epochs:].values.ravel()
+                epochs = range(skip_epochs, skip_epochs + len(values))
+                ax.plot(epochs, values, color="tab:blue", label="train")
+            if "elbo_validation" in history:
+                df = history["elbo_validation"]
+                values = df.iloc[skip_epochs:].values.ravel()
+                epochs = range(skip_epochs, skip_epochs + len(values))
+                ax.plot(epochs, values, color="tab:orange", label="validation")
+            ax.set_ylabel("Total ELBO")
+            ax.set_xlabel("Epoch")
+            ax.legend(fontsize="small")
+
+        fig.tight_layout()
+        return fig
+
     @torch.no_grad()
     def get_modality_attribution(
         self,
@@ -590,12 +815,16 @@ class RegularizedMultimodalVI(
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
 
         self.module.eval()
+        device = next(self.module.parameters()).device
         n_latent = self.module.total_latent_dim
 
         all_z = []
         importances = {name: [] for name in self.module.modality_names}
 
         for tensors in scdl:
+            # Move all tensors to model device (dataloader returns CPU tensors)
+            tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
+
             # Run inference to get z (posterior means)
             inference_inputs = self.module._get_inference_input(tensors)
             outputs = self.module.inference(**inference_inputs)
