@@ -626,6 +626,74 @@ class TestGammaPoissonMode:
         latent = model.get_latent_representation()
         assert latent.shape == (adata.n_obs, 4)
 
+    def test_feature_scaling_shape_default(self, adata):
+        """Test feature_scaling param shape when no scaling covariates."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        # Without scaling covariates: single row, n_genes columns
+        assert model.module.feature_scaling.shape == (1, adata.n_vars)
+
+    def test_feature_scaling_shape_with_covs(self, adata):
+        """Test feature_scaling param shape with scaling covariates."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+            feature_scaling_covariate_keys=["site", "donor"],
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        n_site = adata.obs["site"].nunique()
+        n_donor = adata.obs["donor"].nunique()
+        assert model.module.feature_scaling.shape == (n_site + n_donor, adata.n_vars)
+
+    def test_feature_scaling_softplus_init(self, adata):
+        """Test that feature_scaling uses softplus/0.7 (centered at ~1 at init)."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        fs_val = torch.nn.functional.softplus(model.module.feature_scaling) / 0.7
+        assert torch.allclose(fs_val, torch.ones_like(fs_val), atol=0.02)
+
+    def test_train_with_feature_scaling_covs(self, adata):
+        """Test training with feature scaling covariates."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+            feature_scaling_covariate_keys=["site", "donor"],
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+
+    def test_feature_scaling_prior_in_loss(self, adata):
+        """Test that Gamma prior on feature_scaling contributes to finite loss."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        module = model.module
+        module.eval()
+        device = next(module.parameters()).device
+        scdl = model._make_data_loader(adata=adata, batch_size=32)
+        tensors = next(iter(scdl))
+        tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
+        inf_inputs = module._get_inference_input(tensors)
+        inf_outputs = module.inference(**inf_inputs)
+        gen_inputs = module._get_generative_input(tensors, inf_outputs)
+        gen_outputs = module.generative(**gen_inputs)
+        loss_output = module.loss(tensors, inf_outputs, gen_outputs)
+        assert loss_output.loss.isfinite()
+
 
 class TestRegularizedMultimodalVI:
     """Tests for the RegularizedMultimodalVI multi-modal model."""

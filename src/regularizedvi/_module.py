@@ -31,7 +31,15 @@ from scvi.module.base import (
 from torch.distributions import Exponential, Normal
 from torch.nn.functional import one_hot
 
-from regularizedvi._constants import AMBIENT_COVS_KEY, DEFAULT_COMPUTE_PEARSON, DISPERSION_KEY, LIBRARY_SIZE_KEY
+from regularizedvi._constants import (
+    AMBIENT_COVS_KEY,
+    DEFAULT_COMPUTE_PEARSON,
+    DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
+    DEFAULT_FEATURE_SCALING_PRIOR_BETA,
+    DISPERSION_KEY,
+    FEATURE_SCALING_COVS_KEY,
+    LIBRARY_SIZE_KEY,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -237,6 +245,10 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         regularise_background: bool = True,
         # Ambient covariates (for additive background, decoupled from batch_key)
         n_cats_per_ambient_cov: list[int] | None = None,
+        # Feature scaling covariates (cell2location-style per-feature multiplicative scaling)
+        n_cats_per_feature_scaling_cov: list[int] | None = None,
+        feature_scaling_prior_alpha: float = DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
+        feature_scaling_prior_beta: float = DEFAULT_FEATURE_SCALING_PRIOR_BETA,
         # Dispersion covariate (controls per-group px_r, decoupled from batch_key)
         n_dispersion_cats: int | None = None,
         # Library size covariate (controls per-group library prior, decoupled from batch_key)
@@ -351,6 +363,22 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 torch.full((n_input, self.n_total_ambient_cats), _bg_init)
                 + 0.01 * torch.randn(n_input, self.n_total_ambient_cats)
             )
+
+        # Feature scaling (cell2location-style per-covariate multiplicative scaling)
+        # Shape: (n_feature_scaling_rows, n_input) where n_feature_scaling_rows is either:
+        #   - sum(n_cats_per_feature_scaling_cov) when scaling covariates are provided
+        #   - 1 when no scaling covariates (single shared factor)
+        # Initialized at 0; softplus(0)/0.7 ≈ 0.99 (centered at ~1.0)
+        self.n_cats_per_feature_scaling_cov = (
+            list(n_cats_per_feature_scaling_cov) if n_cats_per_feature_scaling_cov else []
+        )
+        self.n_total_feature_scaling_cats = (
+            sum(self.n_cats_per_feature_scaling_cov) if self.n_cats_per_feature_scaling_cov else 0
+        )
+        n_feature_scaling_rows = self.n_total_feature_scaling_cats if self.n_total_feature_scaling_cats > 0 else 1
+        self.feature_scaling = torch.nn.Parameter(torch.zeros(n_feature_scaling_rows, n_input))
+        self.feature_scaling_prior_alpha = feature_scaling_prior_alpha
+        self.feature_scaling_prior_beta = feature_scaling_prior_beta
 
         self.batch_representation = batch_representation
         if self.batch_representation == "embedding":
@@ -489,6 +517,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             MODULE_KEYS.CAT_COVS_KEY: tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
             MODULE_KEYS.SIZE_FACTOR_KEY: size_factor,
             "ambient_covs": tensors.get(AMBIENT_COVS_KEY, None),
+            "feature_scaling_covs": tensors.get(FEATURE_SCALING_COVS_KEY, None),
             "dispersion_index": tensors.get(DISPERSION_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
             "library_size_index": tensors.get(LIBRARY_SIZE_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
         }
@@ -625,6 +654,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         y: torch.Tensor | None = None,
         transform_batch: torch.Tensor | None = None,
         ambient_covs: torch.Tensor | None = None,
+        feature_scaling_covs: torch.Tensor | None = None,
         dispersion_index: torch.Tensor | None = None,
         library_size_index: torch.Tensor | None = None,
     ) -> dict[str, Distribution | None]:
@@ -707,6 +737,21 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             px_r = self.px_r
 
         px_r = torch.exp(px_r)
+
+        # Feature scaling (cell2location-style per-covariate multiplicative scaling)
+        fs_transformed = torch.nn.functional.softplus(self.feature_scaling) / 0.7
+        if feature_scaling_covs is not None and self.n_total_feature_scaling_cats > 0:
+            feature_scaling_indicator = torch.cat(
+                [
+                    one_hot(feature_scaling_covs[:, i].long(), int(n)).float()
+                    for i, n in enumerate(self.n_cats_per_feature_scaling_cov)
+                ],
+                dim=-1,
+            )
+            scaling = torch.matmul(feature_scaling_indicator, fs_transformed)
+        else:
+            scaling = fs_transformed  # (1, n_genes) broadcasts
+        px_rate = px_rate * scaling
 
         # GammaPoisson (= NB): concentration=theta, rate=theta/mu
         px = GammaPoissonWithScale(concentration=px_r, rate=px_r / px_rate, scale=px_scale)
@@ -809,6 +854,16 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             )
             loss = loss + bg_penalty / n_obs
 
+        # Feature scaling Gamma prior (cell2location-style)
+        from torch.distributions import Gamma
+
+        n_obs = x.shape[0]
+        fs_transformed = torch.nn.functional.softplus(self.feature_scaling) / 0.7
+        fs_penalty = (
+            -Gamma(self.feature_scaling_prior_alpha, self.feature_scaling_prior_beta).log_prob(fs_transformed).sum()
+        )
+        loss = loss + fs_penalty / n_obs
+
         # a payload to be used during autotune
         if self.extra_payload_autotune:
             extra_metrics_payload = {
@@ -820,13 +875,17 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             extra_metrics_payload = {}
 
         # Pearson correlation metrics (gene-wise and cell-wise)
+        # Normalize to per-cell proportions to remove library size confound:
+        # px_rate is library-scaled, so raw correlation is dominated by cell size.
         if self.compute_pearson:
             px_rate = generative_outputs[MODULE_KEYS.PX_KEY].mean.detach()
             x_obs = x.detach()
+            px_props = px_rate / px_rate.sum(dim=1, keepdim=True)
+            x_props = x_obs / x_obs.sum(dim=1, keepdim=True)
             # Gene-wise: transpose so genes are rows, cells are columns
-            pearson_gene = _pearson_corr_rows(px_rate.T, x_obs.T).mean()
+            pearson_gene = _pearson_corr_rows(px_props.T, x_props.T).mean()
             # Cell-wise: cells are rows, genes are columns (natural layout)
-            pearson_cell = _pearson_corr_rows(px_rate, x_obs).mean()
+            pearson_cell = _pearson_corr_rows(px_props, x_props).mean()
             extra_metrics_payload["pearson_gene"] = pearson_gene
             extra_metrics_payload["pearson_cell"] = pearson_cell
 

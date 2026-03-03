@@ -50,6 +50,8 @@ from regularizedvi._constants import (
     DEFAULT_DISPERSION,
     DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
     DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
+    DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
+    DEFAULT_FEATURE_SCALING_PRIOR_BETA,
     DEFAULT_GENE_LIKELIHOOD,
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
     DEFAULT_LIBRARY_N_HIDDEN,
@@ -62,6 +64,7 @@ from regularizedvi._constants import (
     DEFAULT_USE_BATCH_NORM,
     DEFAULT_USE_LAYER_NORM,
     DISPERSION_KEY,
+    FEATURE_SCALING_COVS_KEY,
     LIBRARY_SIZE_KEY,
 )
 from regularizedvi._module import RegularizedVAE
@@ -211,6 +214,8 @@ class AmbientRegularizedSCVI(
         additive_bg_prior_alpha: float = DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
         additive_bg_prior_beta: float = DEFAULT_ADDITIVE_BG_PRIOR_BETA,
         regularise_background: bool = DEFAULT_REGULARISE_BACKGROUND,
+        feature_scaling_prior_alpha: float = DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
+        feature_scaling_prior_beta: float = DEFAULT_FEATURE_SCALING_PRIOR_BETA,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_BATCH_NORM,
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
@@ -247,6 +252,8 @@ class AmbientRegularizedSCVI(
             "additive_bg_prior_alpha": additive_bg_prior_alpha,
             "additive_bg_prior_beta": additive_bg_prior_beta,
             "regularise_background": regularise_background,
+            "feature_scaling_prior_alpha": feature_scaling_prior_alpha,
+            "feature_scaling_prior_beta": feature_scaling_prior_beta,
             "compute_pearson": compute_pearson,
             **kwargs,
         }
@@ -277,6 +284,11 @@ class AmbientRegularizedSCVI(
             n_cats_per_ambient_cov = (
                 self.adata_manager.get_state_registry(AMBIENT_COVS_KEY).n_cats_per_key
                 if AMBIENT_COVS_KEY in self.adata_manager.data_registry
+                else None
+            )
+            n_cats_per_feature_scaling_cov = (
+                self.adata_manager.get_state_registry(FEATURE_SCALING_COVS_KEY).n_cats_per_key
+                if FEATURE_SCALING_COVS_KEY in self.adata_manager.data_registry
                 else None
             )
             n_dispersion_cats = (
@@ -329,6 +341,7 @@ class AmbientRegularizedSCVI(
                 n_continuous_cov=self.summary_stats.get("n_extra_continuous_covs", 0),
                 n_cats_per_cov=n_cats_per_cov,
                 n_cats_per_ambient_cov=n_cats_per_ambient_cov,
+                n_cats_per_feature_scaling_cov=n_cats_per_feature_scaling_cov,
                 n_dispersion_cats=n_dispersion_cats,
                 n_library_cats=n_library_cats,
                 n_hidden=n_hidden,
@@ -356,6 +369,8 @@ class AmbientRegularizedSCVI(
                 additive_bg_prior_alpha=additive_bg_prior_alpha,
                 additive_bg_prior_beta=additive_bg_prior_beta,
                 regularise_background=regularise_background,
+                feature_scaling_prior_alpha=feature_scaling_prior_alpha,
+                feature_scaling_prior_beta=feature_scaling_prior_beta,
                 compute_pearson=compute_pearson,
                 **kwargs,
             )
@@ -424,6 +439,7 @@ class AmbientRegularizedSCVI(
         ambient_covariate_keys: list[str] | None = None,
         dispersion_key: str | None = None,
         library_size_key: str | None = None,
+        feature_scaling_covariate_keys: list[str] | None = None,
         **kwargs,
     ):
         """%(summary)s.
@@ -459,6 +475,14 @@ class AmbientRegularizedSCVI(
             for the library size prior ``N(mu_s, sigma_s)``. The prior mean
             and variance are computed per group from data at setup time.
             If None and ``batch_key`` is provided, defaults to ``batch_key``.
+        feature_scaling_covariate_keys
+            Optional list of categorical ``.obs`` keys whose categories define
+            per-feature multiplicative scaling factors (cell2location-style
+            ``detection_tech_gene``). Each key contributes a learnable
+            ``(n_cats, n_genes)`` parameter; the per-cell scaling is computed
+            via one-hot indicator matmul. If None and
+            ``nn_conditioning_covariate_keys`` is provided, defaults to the
+            same keys.
         """
         # Mutual exclusion: batch_key cannot be combined with purpose-specific keys
         if batch_key is not None and any([ambient_covariate_keys, dispersion_key, library_size_key]):
@@ -473,6 +497,10 @@ class AmbientRegularizedSCVI(
             ambient_covariate_keys = [batch_key]
             dispersion_key = batch_key
             library_size_key = batch_key
+
+        # Default: feature_scaling mirrors nn_conditioning covariates if not explicitly set
+        if nn_conditioning_covariate_keys is not None and feature_scaling_covariate_keys is None:
+            feature_scaling_covariate_keys = nn_conditioning_covariate_keys
 
         # Validation: must have ambient covariate source
         if ambient_covariate_keys is None:
@@ -507,6 +535,7 @@ class AmbientRegularizedSCVI(
             CategoricalJointObsField(AMBIENT_COVS_KEY, ambient_covariate_keys),
             CategoricalObsField(DISPERSION_KEY, dispersion_key),
             CategoricalObsField(LIBRARY_SIZE_KEY, library_size_key),
+            CategoricalJointObsField(FEATURE_SCALING_COVS_KEY, feature_scaling_covariate_keys),
         ]
         # register new fields if the adata is minified
         adata_minify_type = _get_adata_minify_type(adata)

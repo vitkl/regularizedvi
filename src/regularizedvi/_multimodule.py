@@ -1017,6 +1017,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             loss = loss + bg_penalty / n_obs
 
         # ---- Pearson correlation metrics (per modality) ----
+        # Normalize to per-cell proportions to remove library size confound:
+        # px_rate is library-scaled, so raw correlation is dominated by cell size.
         if self.compute_pearson:
             for name in self.modality_names:
                 if name not in px_dict:
@@ -1027,10 +1029,12 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     continue
                 px_rate = px_dict[name].mean.detach()
                 x_obs = x_obs.detach()
+                px_props = px_rate / px_rate.sum(dim=1, keepdim=True)
+                x_props = x_obs / x_obs.sum(dim=1, keepdim=True)
                 # Gene-wise: transpose so genes/features are rows, cells are columns
-                pearson_gene = _pearson_corr_rows(px_rate.T, x_obs.T).mean()
+                pearson_gene = _pearson_corr_rows(px_props.T, x_props.T).mean()
                 # Cell-wise: cells are rows, genes/features are columns
-                pearson_cell = _pearson_corr_rows(px_rate, x_obs).mean()
+                pearson_cell = _pearson_corr_rows(px_props, x_props).mean()
                 extra_metrics[f"pearson_gene_{name}"] = pearson_gene
                 extra_metrics[f"pearson_cell_{name}"] = pearson_cell
 
