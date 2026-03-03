@@ -42,7 +42,7 @@ class TestAmbientRegularizedSCVI:
             adata,
             layer="counts",
             batch_key="batch",
-            categorical_covariate_keys=["site", "donor"],
+            nn_conditioning_covariate_keys=["site", "donor"],
         )
         model = regularizedvi.AmbientRegularizedSCVI(
             adata,
@@ -123,7 +123,7 @@ class TestAmbientRegularizedSCVI:
             adata,
             layer="counts",
             batch_key="batch",
-            categorical_covariate_keys=["site", "donor"],
+            nn_conditioning_covariate_keys=["site", "donor"],
         )
         model = regularizedvi.AmbientRegularizedSCVI(
             adata,
@@ -509,12 +509,12 @@ class TestParameterInitialization:
         assert bg.mean().item() == pytest.approx(0.01, rel=0.2)
 
     def test_region_factors_init_at_prior_mean(self, mdata):
-        """Region factors softplus(0)/0.7 ≈ 0.99 should match Gamma(200,200) mean=1.0."""
+        """Feature scaling softplus(0)/0.7 ≈ 0.99 should match Gamma(200,200) mean=1.0."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(
-            mdata, n_hidden=16, n_latent=4, region_factors_modalities=["atac"]
+            mdata, n_hidden=16, n_latent=4, feature_scaling_modalities=["atac"]
         )
-        rf = torch.nn.functional.softplus(model.module.region_factors["atac"]).detach() / 0.7
+        rf = torch.nn.functional.softplus(model.module.feature_scaling["atac"]).detach() / 0.7
         assert rf.mean().item() == pytest.approx(1.0, rel=0.02)
 
     def test_dispersion_prior_rate_init_multimodal(self, mdata):
@@ -666,15 +666,15 @@ class TestRegularizedMultimodalVI:
         assert module.px_r["atac"].shape == (30, n_batch)  # n_atac peaks × n_batch
 
     def test_default_additive_background_and_region_factors(self, mdata):
-        """Test default additive background on RNA, region factors on ATAC."""
+        """Test default additive background on RNA, feature scaling on ATAC."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
         module = model.module
 
         assert "rna" in module.additive_background
         assert "atac" not in module.additive_background
-        assert "atac" in module.region_factors
-        assert "rna" not in module.region_factors
+        assert "atac" in module.feature_scaling
+        assert "rna" not in module.feature_scaling
 
     def test_per_modality_n_hidden_n_latent(self, mdata):
         """Test per-modality architecture sizes via dict config."""
@@ -759,21 +759,21 @@ class TestRegularizedMultimodalVI:
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
 
     def test_custom_modality_flags(self, mdata):
-        """Test custom additive_background and region_factors modality lists."""
+        """Test custom additive_background and feature_scaling modality lists."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
-        # Reverse the defaults: background on ATAC, region factors on RNA
+        # Reverse the defaults: background on ATAC, feature scaling on RNA
         model = regularizedvi.RegularizedMultimodalVI(
             mdata,
             n_hidden=16,
             n_latent=4,
             additive_background_modalities=["atac"],
-            region_factors_modalities=["rna"],
+            feature_scaling_modalities=["rna"],
         )
         module = model.module
         assert "atac" in module.additive_background
         assert "rna" not in module.additive_background
-        assert "rna" in module.region_factors
-        assert "atac" not in module.region_factors
+        assert "rna" in module.feature_scaling
+        assert "atac" not in module.feature_scaling
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
 
     def test_weighted_mean_universal_weights(self, mdata):
@@ -896,50 +896,50 @@ class TestRegularizedMultimodalVI:
         for name in ["rna", "atac"]:
             assert result[name]["attribution"].shape == (mdata.n_obs, n_latent)
 
-    # --- Region factors: shape, activation, prior, scaling covariates ---
+    # --- Feature scaling: shape, activation, prior, scaling covariates ---
 
     def test_region_factors_shape_no_scaling_covs(self, mdata):
-        """Test region factors shape without scaling covariates (backward compat)."""
+        """Test feature scaling shape without scaling covariates (backward compat)."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
         module = model.module
-        # Default: ATAC gets region factors, shape (1, n_atac_features) without scaling covs
-        assert "atac" in module.region_factors
-        assert module.region_factors["atac"].shape == (1, 30)
+        # Default: ATAC gets feature scaling, shape (1, n_atac_features) without scaling covs
+        assert "atac" in module.feature_scaling
+        assert module.feature_scaling["atac"].shape == (1, 30)
 
     def test_region_factors_shape_with_scaling_covs(self, mdata):
-        """Test region factors shape with scaling covariates."""
+        """Test feature scaling shape with scaling covariates."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(
             mdata,
             batch_key="batch",
-            modality_scaling_covariate_keys=["technology"],
+            feature_scaling_covariate_keys=["technology"],
         )
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
         module = model.module
         n_tech = 2  # tech_0, tech_1
-        assert module.region_factors["atac"].shape == (n_tech, 30)
+        assert module.feature_scaling["atac"].shape == (n_tech, 30)
 
     def test_region_factors_softplus_activation(self, mdata):
-        """Test that region factors use softplus/0.7 activation (centered at ~1)."""
+        """Test that feature scaling use softplus/0.7 activation (centered at ~1)."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
         module = model.module
         # At initialization (param=0), softplus(0)/0.7 ~ 0.693/0.7 ~ 0.99
-        rf_val = torch.nn.functional.softplus(module.region_factors["atac"]) / 0.7
+        rf_val = torch.nn.functional.softplus(module.feature_scaling["atac"]) / 0.7
         assert torch.allclose(rf_val, torch.ones_like(rf_val), atol=0.02)
 
     def test_train_with_scaling_covs(self, mdata):
-        """Test training with modality scaling covariates."""
+        """Test training with feature scaling covariates."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(
             mdata,
             batch_key="batch",
-            modality_scaling_covariate_keys=["technology"],
+            feature_scaling_covariate_keys=["technology"],
         )
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
         model.train(max_epochs=3, train_size=1.0, batch_size=32)
 
     def test_region_factors_prior_in_loss(self, mdata):
-        """Test that Gamma prior on region factors contributes to finite loss."""
+        """Test that Gamma prior on feature scaling contributes to finite loss."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
         model.train(max_epochs=1, train_size=1.0, batch_size=32)
@@ -957,7 +957,7 @@ class TestRegularizedMultimodalVI:
         assert loss_output.loss.isfinite()
 
     def test_region_factors_with_multiple_scaling_covs(self, mdata):
-        """Test region factors with multiple scaling covariates."""
+        """Test feature scaling with multiple scaling covariates."""
         # Add a second covariate
         for mod_key in mdata.mod:
             mdata[mod_key].obs["site"] = [f"site_{i % 3}" for i in range(mdata.n_obs)]
@@ -966,12 +966,12 @@ class TestRegularizedMultimodalVI:
         regularizedvi.RegularizedMultimodalVI.setup_mudata(
             mdata,
             batch_key="batch",
-            modality_scaling_covariate_keys=["technology", "site"],
+            feature_scaling_covariate_keys=["technology", "site"],
         )
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
         module = model.module
         # 2 tech + 3 sites = 5 total rows
-        assert module.region_factors["atac"].shape == (5, 30)
+        assert module.feature_scaling["atac"].shape == (5, 30)
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
 
     def test_attribution_with_scaling_covs(self, mdata):
@@ -979,7 +979,7 @@ class TestRegularizedMultimodalVI:
         regularizedvi.RegularizedMultimodalVI.setup_mudata(
             mdata,
             batch_key="batch",
-            modality_scaling_covariate_keys=["technology"],
+            feature_scaling_covariate_keys=["technology"],
         )
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
@@ -1016,7 +1016,7 @@ class TestRegularizedMultimodalVI:
             ambient_covariate_keys=["batch", "site"],
             dispersion_key="batch",
             library_size_key="pcr_well",
-            categorical_covariate_keys=["technology"],
+            nn_conditioning_covariate_keys=["technology"],
         )
         model = regularizedvi.RegularizedMultimodalVI(
             mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"]
@@ -1069,7 +1069,7 @@ class TestRegularizedMultimodalVI:
         regularizedvi.RegularizedMultimodalVI.setup_mudata(
             mdata,
             batch_key="batch",
-            categorical_covariate_keys=["site", "donor"],
+            nn_conditioning_covariate_keys=["site", "donor"],
         )
         model = regularizedvi.RegularizedMultimodalVI(
             mdata,
@@ -1222,3 +1222,75 @@ class TestWandBUtilities:
         from regularizedvi.utils import finish_wandb
 
         finish_wandb()  # should not raise
+
+
+class TestCoercePapermillParams:
+    """Tests for coerce_papermill_params utility."""
+
+    def test_coerce_bool_string_zero(self):
+        """bool("0") bug: papermill -r injects "0" as string."""
+        from regularizedvi.utils import coerce_papermill_params
+
+        result = coerce_papermill_params(flag=("0", bool))
+        assert result["flag"] is False
+
+    def test_coerce_bool_string_one(self):
+        from regularizedvi.utils import coerce_papermill_params
+
+        result = coerce_papermill_params(flag=("1", bool))
+        assert result["flag"] is True
+
+    def test_coerce_bool_int_passthrough(self):
+        from regularizedvi.utils import coerce_papermill_params
+
+        assert coerce_papermill_params(flag=(1, bool))["flag"] is True
+        assert coerce_papermill_params(flag=(0, bool))["flag"] is False
+
+    def test_coerce_bool_already_bool(self):
+        from regularizedvi.utils import coerce_papermill_params
+
+        assert coerce_papermill_params(flag=(True, bool))["flag"] is True
+        assert coerce_papermill_params(flag=(False, bool))["flag"] is False
+
+    def test_coerce_float_string(self):
+        from regularizedvi.utils import coerce_papermill_params
+
+        result = coerce_papermill_params(beta=("5.0", float))
+        assert result["beta"] == 5.0
+        assert isinstance(result["beta"], float)
+
+    def test_coerce_float_passthrough(self):
+        from regularizedvi.utils import coerce_papermill_params
+
+        result = coerce_papermill_params(beta=(5.0, float))
+        assert result["beta"] == 5.0
+
+    def test_coerce_str_or_none_string_none(self):
+        from regularizedvi.utils import coerce_papermill_params
+
+        assert coerce_papermill_params(proj=("None", "str_or_none"))["proj"] is None
+        assert coerce_papermill_params(proj=("none", "str_or_none"))["proj"] is None
+
+    def test_coerce_str_or_none_passthrough(self):
+        from regularizedvi.utils import coerce_papermill_params
+
+        assert coerce_papermill_params(proj=(None, "str_or_none"))["proj"] is None
+        assert coerce_papermill_params(proj=("myproject", "str_or_none"))["proj"] == "myproject"
+
+    def test_coerce_multiple_params(self):
+        from regularizedvi.utils import coerce_papermill_params
+
+        result = coerce_papermill_params(
+            regularise_background=("0", bool),
+            additive_bg_prior_beta=("5.0", float),
+            wandb_project=("None", "str_or_none"),
+        )
+        assert result["regularise_background"] is False
+        assert result["additive_bg_prior_beta"] == 5.0
+        assert result["wandb_project"] is None
+
+    def test_coerce_invalid_bool_raises(self):
+        from regularizedvi.utils import coerce_papermill_params
+
+        with pytest.raises(TypeError, match="Cannot coerce"):
+            coerce_papermill_params(flag=("notabool", bool))

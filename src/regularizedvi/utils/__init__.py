@@ -7,9 +7,11 @@ from regularizedvi.utils._distributions import (
     plot_prior_comparison,
 )
 from regularizedvi.utils._filtering import filter_genes
+from regularizedvi.utils._papermill import coerce_papermill_params
 from regularizedvi.utils._wandb import finish_wandb, log_figure_to_wandb, setup_wandb_logger
 
 __all__ = [
+    "coerce_papermill_params",
     "compare_nb_gammapoisson",
     "compare_prior_directions",
     "download_bone_marrow_dataset",

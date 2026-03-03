@@ -153,7 +153,7 @@ class AmbientRegularizedSCVI(
     ...     adata,
     ...     layer="counts",
     ...     batch_key="batch",
-    ...     categorical_covariate_keys=["site", "donor"],
+    ...     nn_conditioning_covariate_keys=["site", "donor"],
     ... )
     >>> model = regularizedvi.AmbientRegularizedSCVI(
     ...     adata,
@@ -419,8 +419,8 @@ class AmbientRegularizedSCVI(
         batch_key: str | None = None,
         labels_key: str | None = None,
         size_factor_key: str | None = None,
-        categorical_covariate_keys: list[str] | None = None,
-        continuous_covariate_keys: list[str] | None = None,
+        nn_conditioning_covariate_keys: list[str] | None = None,
+        nn_continuous_covariate_keys: list[str] | None = None,
         ambient_covariate_keys: list[str] | None = None,
         dispersion_key: str | None = None,
         library_size_key: str | None = None,
@@ -435,8 +435,13 @@ class AmbientRegularizedSCVI(
         %(param_batch_key)s
         %(param_labels_key)s
         %(param_size_factor_key)s
-        %(param_cat_cov_keys)s
-        %(param_cont_cov_keys)s
+        nn_conditioning_covariate_keys
+            keys in ``adata.obs`` that correspond to categorical data.
+            One-hot encoded and fed into the encoder (if ``encode_covariates=True``)
+            and decoder neural networks as conditioning input.
+        nn_continuous_covariate_keys
+            keys in ``adata.obs`` that correspond to continuous data.
+            Fed into the encoder and decoder neural networks as conditioning input.
         ambient_covariate_keys
             Optional list of categorical ``.obs`` keys whose categories define
             per-covariate additive background terms (ambient RNA correction).
@@ -497,8 +502,8 @@ class AmbientRegularizedSCVI(
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
             CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, labels_key),
             NumericalObsField(REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False),
-            CategoricalJointObsField(REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariate_keys),
-            NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
+            CategoricalJointObsField(REGISTRY_KEYS.CAT_COVS_KEY, nn_conditioning_covariate_keys),
+            NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, nn_continuous_covariate_keys),
             CategoricalJointObsField(AMBIENT_COVS_KEY, ambient_covariate_keys),
             CategoricalObsField(DISPERSION_KEY, dispersion_key),
             CategoricalObsField(LIBRARY_SIZE_KEY, library_size_key),

@@ -39,3 +39,4 @@ _check_*.sh
 _submit_*.sh
 _make_*.py
 _show_*.py
+_extract_*.py

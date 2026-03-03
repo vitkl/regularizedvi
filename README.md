@@ -41,7 +41,7 @@ The inference model uses amortised variational inference to fit all cell specifi
 $$z_n \sim \text{Normal}(0, I)$$
 $$\ell_n \sim \text{LogNormal}(\ell_p^{\mu},\; 0.05 \cdot \ell_p^{\sigma^2})$$
 
-**Decoder output** — batch-free decoder maps $z\_n$ and categorical covariates $c\_{k,n}$ (not ambient/library covariates) to non-negative gene expression via softplus. Categorical covariates are selected by `categorical_covariate_keys` (many keys, [`_module.py:654–685`](src/regularizedvi/_module.py#L654-L685), [`_components.py:461–462`](src/regularizedvi/_components.py#L461-L462)):
+**Decoder output** — batch-free decoder maps $z\_n$ and categorical covariates $c\_{k,n}$ (not ambient/library covariates) to non-negative gene expression via softplus. Categorical covariates are selected by `nn_conditioning_covariate_keys` (many keys, [`_module.py:654–685`](src/regularizedvi/_module.py#L654-L685), [`_components.py:461–462`](src/regularizedvi/_components.py#L461-L462)):
 
 $$\rho_{ng} = \text{softplus}\big(f_w(z_n, c_{k,n})\big) \in \mathbb{R}_{\geq 0}^G$$
 
@@ -59,7 +59,7 @@ $$x_{ng} \sim \text{GammaPoisson}\Big(\text{concentration} = \theta_{g,d_n},\;\;
 
 **Notation:**
 - $s\_{e,g} = \exp(\beta\_{e,g})$ — per-gene ambient background indexed by `ambient_covariate_keys` (many keys); $\beta$ is the unconstrained parameter (code: `additive_background`). When `batch_key` is used alone, $e$ = batch group.
-- $c\_{k,n}$ — categorical covariates (site, donor, etc.), selected by `categorical_covariate_keys` (many keys). Injected into encoder and decoder.
+- $c\_{k,n}$ — categorical covariates (site, donor, etc.), selected by `nn_conditioning_covariate_keys` (many keys). Injected into encoder and decoder.
 - $\rho\_{ng} \in \mathbb{R}\_{\geq 0}^G$ — decoder output via softplus (not on the simplex), since $\rho\_{ng} + s\_{e,g}$ need not sum to 1
 - $\theta\_{g,d} = \exp(\phi\_{g,d})$ — inverse dispersion indexed by `dispersion_key` (one key); initialised at $\log(\lambda^2) \approx 2.2$ so $\theta \approx 9$ (equilibrium: $1/\sqrt{\theta} = 1/\lambda$) ([`_module.py:287–295`](src/regularizedvi/_module.py#L287-L295))
 - $\lambda\_d$ — learned Exponential rate, one per dispersion group; $\text{Gamma}(9, 3)$ hyper-prior has mean 3 ([`_module.py:314–323`](src/regularizedvi/_module.py#L314-L323))
@@ -89,7 +89,7 @@ The following equations describe how observed counts $x^{(m)}\_{nf}$ — UMIs fo
 
 $$\ell^{(m)}_n \sim \text{LogNormal}\big(\ell^{(m),\mu}_p,\; 0.05 \cdot \ell^{(m),\sigma^2}_p\big)$$
 
-**Decoder output** — maps joint latent code $z\_n$ and categorical covariates $c\_{k,n}$ (selected by `categorical_covariate_keys`, many keys) to non-negative feature signal via softplus ([`_multimodule.py:760–775`](src/regularizedvi/_multimodule.py#L760-L775)):
+**Decoder output** — maps joint latent code $z\_n$ and categorical covariates $c\_{k,n}$ (selected by `nn_conditioning_covariate_keys`, many keys) to non-negative feature signal via softplus ([`_multimodule.py:760–775`](src/regularizedvi/_multimodule.py#L760-L775)):
 
 $$\rho^{(m)}_{nf} = \text{softplus}\big(f^{(m)}_w(z_n,\, c_{k,n})\big) \in \mathbb{R}_{\geq 0}$$
 
@@ -97,11 +97,11 @@ $$\rho^{(m)}_{nf} = \text{softplus}\big(f^{(m)}_w(z_n,\, c_{k,n})\big) \in \math
 
 $$s^{(m)}_{e,f} = \exp(\beta^{(m)}_{e,f}), \qquad s^{(m)}_{e,f} \sim \text{Gamma}(1,\, 100)$$
 
-**Region factors** — per-feature, per-covariate multiplicative scaling capturing systematic biases (GC content, mappability, peak caller sensitivity). Parameterised as $\text{softplus}(\gamma)/0.7$ with a tight Gamma prior centered at 1. Scaling covariates $t$ are selected by `modality_scaling_covariate_keys` (many keys); each covariate category gets its own factor ([`_multimodule.py:472–476`](src/regularizedvi/_multimodule.py#L472-L476) init, [`_multimodule.py:779–787`](src/regularizedvi/_multimodule.py#L779-L787) activation and selection, [`_multimodule.py:972–989`](src/regularizedvi/_multimodule.py#L972-L989) prior penalty):
+**Feature scaling** — per-feature, per-covariate multiplicative scaling capturing systematic biases (GC content, mappability, peak caller sensitivity). Parameterised as $\text{softplus}(\gamma)/0.7$ with a tight Gamma prior centered at 1. Scaling covariates $t$ are selected by `feature_scaling_covariate_keys` (many keys); each covariate category gets its own factor ([`_multimodule.py:472–476`](src/regularizedvi/_multimodule.py#L472-L476) init, [`_multimodule.py:779–787`](src/regularizedvi/_multimodule.py#L779-L787) activation and selection, [`_multimodule.py:972–989`](src/regularizedvi/_multimodule.py#L972-L989) prior penalty):
 
 $$y^{(m)}_{t,f} = \text{softplus}(\gamma^{(m)}_{t,f})\,/\,0.7, \qquad y^{(m)}_{t,f} \sim \text{Gamma}(200,\, 200)$$
 
-**Expected mean counts** — decoder output plus optional background, scaled by library size and region factor ([`_components.py:467`](src/regularizedvi/_components.py#L467) base rate, [`_multimodule.py:789`](src/regularizedvi/_multimodule.py#L789) region factor scaling):
+**Expected mean counts** — decoder output plus optional background, scaled by library size and feature scaling ([`_components.py:467`](src/regularizedvi/_components.py#L467) base rate, [`_multimodule.py:789`](src/regularizedvi/_multimodule.py#L789) feature scaling scaling):
 
 $$\mu^{(m)}_{nf} = \ell^{(m)}_n \cdot \big(\rho^{(m)}_{nf} + s^{(m)}_{e_n,f}\big) \cdot y^{(m)}_{t_n,f}$$
 
@@ -118,12 +118,12 @@ $$x^{(m)}_{nf} \sim \text{GammaPoisson}\!\Big(\text{concentration} = \theta^{(m)
 | Term | Symbol | Prior | What it captures | RNA default | ATAC default |
 |------|--------|-------|-----------------|-------------|--------------|
 | Additive background | $s^{(m)}\_{e,f} = \exp(\beta^{(m)}\_{e,f})$ | $\text{Gamma}(1, 100)$, mean 0.01 | Per-feature ambient contamination; `ambient_covariate_keys` (many keys) | **ON** | off |
-| Region factor | $y^{(m)}\_{t,f} = \text{softplus}(\gamma^{(m)}\_{t,f})/0.7$ | $\text{Gamma}(200, 200)$, mean 1.0 | Per-feature multiplicative bias; `modality_scaling_covariate_keys` (many keys) | off | **ON** |
+| Feature scaling | $y^{(m)}\_{t,f} = \text{softplus}(\gamma^{(m)}\_{t,f})/0.7$ | $\text{Gamma}(200, 200)$, mean 1.0 | Per-feature multiplicative bias; `feature_scaling_covariate_keys` (many keys) | off | **ON** |
 | Learned library size | $\ell^{(m)}\_n$ | $\text{LogNormal}$, 0.05 var scaling | Low-capacity encoder; `library_size_key` (one key) | **always ON** | **always ON** |
 | Dispersion regularisation | $1/\sqrt{\theta^{(m)}\_{f,d}}$ | $\text{Exp}(\lambda)$, $\lambda \sim \text{Gamma}(9,3)$ | Containment prior; `dispersion_key` (one key) | ON | ON |
-| Batch-free decoder | — | — | Decoder conditioned only on $c\_{k,n}$; `categorical_covariate_keys` (many keys) | ON | ON |
+| Batch-free decoder | — | — | Decoder conditioned only on $c\_{k,n}$; `nn_conditioning_covariate_keys` (many keys) | ON | ON |
 
-Setting $s^{(m)}\_{e,f} = 0$ (no ambient) and $y^{(m)}\_{t,f} = 1$ (no region factor) recovers the standard regularizedvi single-modality model for that modality. The defaults reflect domain knowledge for snRNA+ATAC multiome: ambient RNA contamination is substantial in single-nucleus RNA-seq and well-captured by an additive term, while ATAC peaks have systematic per-peak biases from GC content, mappability and peak caller thresholds. See the [bone marrow multiome tutorial](docs/notebooks/bone_marrow_multimodal_tutorial.ipynb) for a worked RNA+ATAC example.
+Setting $s^{(m)}\_{e,f} = 0$ (no ambient) and $y^{(m)}\_{t,f} = 1$ (no feature scaling) recovers the standard regularizedvi single-modality model for that modality. The defaults reflect domain knowledge for snRNA+ATAC multiome: ambient RNA contamination is substantial in single-nucleus RNA-seq and well-captured by an additive term, while ATAC peaks have systematic per-peak biases from GC content, mappability and peak caller thresholds. See the [bone marrow multiome tutorial](docs/notebooks/bone_marrow_multimodal_tutorial.ipynb) for a worked RNA+ATAC example.
 
 #### Inference: per-modality encoders and posterior concatenation
 
@@ -155,7 +155,7 @@ This reveals the empirical partition of the latent space: even though concatenat
 
 2. **Hierarchical dispersion regularisation**: Prior $1/\sqrt{\theta\_{g,d}} \sim \text{Exponential}(\lambda\_d)$ is a containment prior (Simpson et al. 2017) that penalises small $\theta$ (excessive overdispersion), regularising the NB toward the Poisson baseline during gradient-based training. The data likelihood provides the opposing force, pulling $\theta$ toward values that explain observed count variance. The rate $\lambda\_d$ is learned per dispersion group (selected by `dispersion_key`) with a $\text{Gamma}(9, 3)$ hyper-prior (mean 3). Dispersion $\theta = \exp(\phi)$ is initialised at $\lambda^2 = 9$ (equilibrium). As used in cell2location/cell2fate.
 
-3. **Batch-free decoder with separated correction paths**: The decoder $f\_w(z\_n, c\_{k,n})$ receives only categorical covariates $c\_{k,n}$ (site, donor, protocol via `categorical_covariate_keys`), **not** the ambient or dispersion covariates. This separates batch correction into structurally different paths: (a) a **constrained additive** path ($s\_{e,g}$ with Gamma prior, selected by `ambient_covariate_keys`) for per-sample ambient RNA, (b) a **flexible multiplicative** path through categorical covariates in the decoder for systematic differences between donors, protocols, or sites (e.g. PCR bias, RT efficiency, 10x chemistry versions), and (c) per-group dispersion $\theta\_{g,d}$ (selected by `dispersion_key`) for variance differences. In standard scVI, the decoder handles all batch effects through a single flexible path, which can absorb biological variation. The separation is most beneficial when batches have high within-batch cell type diversity (e.g. whole-embryo samples), because the additive background can be cleanly identified as the baseline signal shared across all cells in a batch.
+3. **Batch-free decoder with separated correction paths**: The decoder $f\_w(z\_n, c\_{k,n})$ receives only categorical covariates $c\_{k,n}$ (site, donor, protocol via `nn_conditioning_covariate_keys`), **not** the ambient or dispersion covariates. This separates batch correction into structurally different paths: (a) a **constrained additive** path ($s\_{e,g}$ with Gamma prior, selected by `ambient_covariate_keys`) for per-sample ambient RNA, (b) a **flexible multiplicative** path through categorical covariates in the decoder for systematic differences between donors, protocols, or sites (e.g. PCR bias, RT efficiency, 10x chemistry versions), and (c) per-group dispersion $\theta\_{g,d}$ (selected by `dispersion_key`) for variance differences. In standard scVI, the decoder handles all batch effects through a single flexible path, which can absorb biological variation. The separation is most beneficial when batches have high within-batch cell type diversity (e.g. whole-embryo samples), because the additive background can be cleanly identified as the baseline signal shared across all cells in a batch.
 
 4. **Softplus activation**: Because $\rho\_{ng} + s\_{e\_n,g}$ must be non-negative but need not sum to 1 across genes, softmax is replaced with softplus. The library size $\ell\_n$ acts as a true normalisation factor.
 
@@ -169,7 +169,7 @@ This reveals the empirical partition of the latent space: even though concatenat
 
 - **Study design matters**: The structured assumptions (additive ambient + multiplicative categorical covariates) depend on the experimental design. With some study designs, every batch has both additive effects (ambient RNA) and multiplicative effects (PCR bias, RT differences, 10x 3' v1 vs v2 vs v3, 3' vs 5'). These assumptions may not hold for Smart-seq type data where every cell can have PCR bias and RT differences.
 
-- **Using as standard scVI with ambient correction**: If you provide the batch covariate to both `batch_key` and `categorical_covariate_keys`, the model effectively operates as standard scVI with ambient RNA correction (batch effects handled through both additive and multiplicative paths).
+- **Using as standard scVI with ambient correction**: If you provide the batch covariate to both `batch_key` and `nn_conditioning_covariate_keys`, the model effectively operates as standard scVI with ambient RNA correction (batch effects handled through both additive and multiplicative paths).
 
 - **Not a strict ambient correction model**: Unlike CellBender (Fleming et al. 2023), this model is not constrained by the ambient count distribution from empty droplets. However, because it does not require empty droplets data, it can be more easily applied to integration of published datasets where empty droplet profiles are unavailable.
 
@@ -190,8 +190,8 @@ However, in complex experimental designs — particularly combinatorial indexing
 | Ambient RNA contamination | GEM well | Embryo (lysis batch) | `ambient_covariate_keys` |
 | Library size distribution | GEM well | PCR well (amplification batch) | `library_size_key` |
 | Overdispersion profile | GEM well | Embryo or experiment | `dispersion_key` |
-| Multiplicative biases (RT, PCR) | Protocol version | Experiment batch | `categorical_covariate_keys` |
-| Per-feature scaling (region factors) | — | Experiment batch | `modality_scaling_covariate_keys` |
+| Multiplicative biases (RT, PCR) | Protocol version | Experiment batch | `nn_conditioning_covariate_keys` |
+| Per-feature scaling (feature scaling) | — | Experiment batch | `feature_scaling_covariate_keys` |
 
 Using a single `batch_key` forces all components to share the same granularity, which either under-corrects (too few groups) or over-parameterises (too many groups for components that don't need that resolution).
 
@@ -200,8 +200,8 @@ Using a single `batch_key` forces all components to share the same granularity, 
 | Parameter | Model component | Encoder | Decoder | Shape per modality |
 |-----------|----------------|---------|---------|-------------------|
 | `ambient_covariate_keys` | Additive background $s\_{e,g} = \exp(\beta\_{e,g})$: single parameter with concatenated one-hot across all ambient keys | Yes (concat one-hot) | No | `(n_feat, sum(n_cats))` |
-| `categorical_covariate_keys` | Standard scVI-style injection $c\_{k,n}$ into encoder/decoder | Yes (one-hot) | Yes (one-hot) | Standard |
-| `modality_scaling_covariate_keys` | Region factors $y\_{t,g}$: multiplicative per-feature scaling | No | Multiplicative on rate | `(sum(n_cats), n_feat)` |
+| `nn_conditioning_covariate_keys` | Standard scVI-style injection $c\_{k,n}$ into encoder/decoder | Yes (one-hot) | Yes (one-hot) | Standard |
+| `feature_scaling_covariate_keys` | Feature scaling $y\_{t,g}$: multiplicative per-feature scaling | No | Multiplicative on rate | `(sum(n_cats), n_feat)` |
 | `dispersion_key` | Inverse dispersion $\theta\_{g,d}$: per-gene, per-group | No | Indexing | `(n_feat, n_disp_cats)` |
 | `library_size_key` | Library prior $\ell\_n \sim \text{LogNormal}(\ell\_p^{\mu}, 0.05 \cdot \ell\_p^{\sigma^2})$: per-group mean/var | Yes (one-hot) | No | `(1, n_lib_cats)` |
 
@@ -211,7 +211,7 @@ Using a single `batch_key` forces all components to share the same granularity, 
 
 - **`batch_key` + purpose-specific keys**: Raises `ValueError`. These are mutually exclusive — use one approach or the other.
 
-- **`modality_scaling_covariate_keys`**: If not specified but `categorical_covariate_keys` is provided, defaults to `categorical_covariate_keys` (multi-modal only).
+- **`feature_scaling_covariate_keys`**: If not specified but `nn_conditioning_covariate_keys` is provided, defaults to `nn_conditioning_covariate_keys` (multi-modal only).
 
 ### Encoder/decoder composition
 
@@ -229,7 +229,7 @@ regularizedvi.AmbientRegularizedSCVI.setup_anndata(
     adata,
     layer="counts",
     batch_key="sample",
-    categorical_covariate_keys=["donor", "site"],
+    nn_conditioning_covariate_keys=["donor", "site"],
 )
 ```
 
@@ -242,7 +242,7 @@ regularizedvi.AmbientRegularizedSCVI.setup_anndata(
     # Ambient RNA comes from lysis: each embryo has its own ambient profile
     ambient_covariate_keys=["embryo_id", "pcr_well"],
     # Multiplicative effects from experiment-level protocol differences
-    categorical_covariate_keys=["experiment"],
+    nn_conditioning_covariate_keys=["experiment"],
     # Dispersion varies by embryo (tissue composition → variance structure)
     dispersion_key="embryo_id",
     # Library size determined by PCR well (amplification batch)
@@ -297,7 +297,7 @@ regularizedvi.AmbientRegularizedSCVI.setup_anndata(
     adata,
     layer="counts",
     batch_key="batch",
-    categorical_covariate_keys=["site", "donor"],
+    nn_conditioning_covariate_keys=["site", "donor"],
 )
 model = regularizedvi.AmbientRegularizedSCVI(
     adata,
@@ -322,7 +322,7 @@ regularizedvi.AmbientRegularizedSCVI.setup_anndata(
     adata,
     layer="counts",
     ambient_covariate_keys=["embryo_id", "pcr_well"],   # additive background
-    categorical_covariate_keys=["experiment"],           # encoder/decoder injection
+    nn_conditioning_covariate_keys=["experiment"],           # encoder/decoder injection
     dispersion_key="embryo_id",                          # per-group overdispersion
     library_size_key="pcr_well",                         # library size prior groups
 )

@@ -4,7 +4,7 @@ N-modality extensible model with symmetric regularized components.
 Supports RNA + ATAC (and extensible to more modalities) with:
 - GammaPoisson likelihood for all modalities
 - Learnable hierarchical dispersion prior
-- Per-modality additive background and region factors
+- Per-modality additive background and feature scaling
 - Three Z combination strategies: concatenation, single_encoder, weighted_mean
 """
 
@@ -35,10 +35,10 @@ from regularizedvi._constants import (
     DEFAULT_COMPUTE_PEARSON,
     DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
     DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
+    DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
+    DEFAULT_FEATURE_SCALING_PRIOR_BETA,
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
     DEFAULT_LIBRARY_N_HIDDEN,
-    DEFAULT_REGION_FACTORS_PRIOR_ALPHA,
-    DEFAULT_REGION_FACTORS_PRIOR_BETA,
     DEFAULT_REGULARISE_BACKGROUND,
     DEFAULT_REGULARISE_DISPERSION,
     DEFAULT_REGULARISE_DISPERSION_PRIOR,
@@ -47,8 +47,8 @@ from regularizedvi._constants import (
     DEFAULT_USE_BATCH_NORM,
     DEFAULT_USE_LAYER_NORM,
     DISPERSION_KEY,
+    FEATURE_SCALING_COVS_KEY,
     LIBRARY_SIZE_KEY,
-    MODALITY_SCALING_COVS_KEY,
 )
 from regularizedvi._model import AmbientRegularizedSCVI
 from regularizedvi._multimodule import RegularizedMultimodalVAE
@@ -69,7 +69,7 @@ class RegularizedMultimodalVI(
 
     N-modality extensible model using symmetric regularized components.
     Each modality uses the same encoder/decoder architecture with per-modality
-    configuration for architecture size, additive background, and region factors.
+    configuration for architecture size, additive background, and feature scaling.
 
     Parameters
     ----------
@@ -100,12 +100,12 @@ class RegularizedMultimodalVI(
         If False (default), batch-free decoder.
     additive_background_modalities
         Modalities with additive ambient background. Default ``["rna"]``.
-    region_factors_modalities
-        Modalities with per-feature region factors. Default ``["atac"]``.
-    region_factors_prior_alpha
-        Gamma prior alpha on region factors. Default 200 (tight prior, mean=1).
-    region_factors_prior_beta
-        Gamma prior beta on region factors. Default 200.
+    feature_scaling_modalities
+        Modalities with per-feature feature scaling. Default ``["atac"]``.
+    feature_scaling_prior_alpha
+        Gamma prior alpha on feature scaling. Default 200 (tight prior, mean=1).
+    feature_scaling_prior_beta
+        Gamma prior beta on feature scaling. Default 200.
     regularise_dispersion
         Enable dispersion regularization. Default True.
     regularise_dispersion_prior
@@ -147,9 +147,9 @@ class RegularizedMultimodalVI(
         scale_activation: str = DEFAULT_SCALE_ACTIVATION,
         use_batch_in_decoder: bool = DEFAULT_USE_BATCH_IN_DECODER,
         additive_background_modalities: list[str] | None = None,
-        region_factors_modalities: list[str] | None = None,
-        region_factors_prior_alpha: float = DEFAULT_REGION_FACTORS_PRIOR_ALPHA,
-        region_factors_prior_beta: float = DEFAULT_REGION_FACTORS_PRIOR_BETA,
+        feature_scaling_modalities: list[str] | None = None,
+        feature_scaling_prior_alpha: float = DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
+        feature_scaling_prior_beta: float = DEFAULT_FEATURE_SCALING_PRIOR_BETA,
         regularise_dispersion: bool = DEFAULT_REGULARISE_DISPERSION,
         regularise_dispersion_prior: float = DEFAULT_REGULARISE_DISPERSION_PRIOR,
         dispersion_hyper_prior_alpha: float = DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
@@ -179,8 +179,8 @@ class RegularizedMultimodalVI(
         # Set defaults based on discovered modalities
         if additive_background_modalities is None:
             additive_background_modalities = [m for m in modality_names if m == "rna"]
-        if region_factors_modalities is None:
-            region_factors_modalities = [m for m in modality_names if m == "atac"]
+        if feature_scaling_modalities is None:
+            feature_scaling_modalities = [m for m in modality_names if m == "atac"]
 
         self._module_kwargs = {
             "n_hidden": n_hidden,
@@ -195,9 +195,9 @@ class RegularizedMultimodalVI(
             "scale_activation": scale_activation,
             "use_batch_in_decoder": use_batch_in_decoder,
             "additive_background_modalities": additive_background_modalities,
-            "region_factors_modalities": region_factors_modalities,
-            "region_factors_prior_alpha": region_factors_prior_alpha,
-            "region_factors_prior_beta": region_factors_prior_beta,
+            "feature_scaling_modalities": feature_scaling_modalities,
+            "feature_scaling_prior_alpha": feature_scaling_prior_alpha,
+            "feature_scaling_prior_beta": feature_scaling_prior_beta,
             "regularise_dispersion": regularise_dispersion,
             "regularise_dispersion_prior": regularise_dispersion_prior,
             "dispersion_hyper_prior_alpha": dispersion_hyper_prior_alpha,
@@ -343,9 +343,11 @@ class RegularizedMultimodalVI(
         if REGISTRY_KEYS.CAT_COVS_KEY in self.adata_manager.data_registry:
             n_cats_per_cov = self.adata_manager.get_state_registry(REGISTRY_KEYS.CAT_COVS_KEY).n_cats_per_key
 
-        n_cats_per_scaling_cov = None
-        if MODALITY_SCALING_COVS_KEY in self.adata_manager.data_registry:
-            n_cats_per_scaling_cov = self.adata_manager.get_state_registry(MODALITY_SCALING_COVS_KEY).n_cats_per_key
+        n_cats_per_feature_scaling_cov = None
+        if FEATURE_SCALING_COVS_KEY in self.adata_manager.data_registry:
+            n_cats_per_feature_scaling_cov = self.adata_manager.get_state_registry(
+                FEATURE_SCALING_COVS_KEY
+            ).n_cats_per_key
 
         n_cats_per_ambient_cov = None
         if AMBIENT_COVS_KEY in self.adata_manager.data_registry:
@@ -373,7 +375,7 @@ class RegularizedMultimodalVI(
             dropout_rate=self._module_kwargs["dropout_rate"],
             library_log_means=library_log_means,
             library_log_vars=library_log_vars,
-            n_cats_per_scaling_cov=n_cats_per_scaling_cov,
+            n_cats_per_feature_scaling_cov=n_cats_per_feature_scaling_cov,
             n_cats_per_ambient_cov=n_cats_per_ambient_cov,
             n_dispersion_cats=n_dispersion_cats,
             n_library_cats=n_library_cats,
@@ -390,9 +392,9 @@ class RegularizedMultimodalVI(
         ambient_covariate_keys: list[str] | None = None,
         dispersion_key: str | None = None,
         library_size_key: str | None = None,
-        categorical_covariate_keys: list[str] | None = None,
-        continuous_covariate_keys: list[str] | None = None,
-        modality_scaling_covariate_keys: list[str] | None = None,
+        nn_conditioning_covariate_keys: list[str] | None = None,
+        nn_continuous_covariate_keys: list[str] | None = None,
+        feature_scaling_covariate_keys: list[str] | None = None,
         **kwargs,
     ):
         """Set up MuData for RegularizedMultimodalVI.
@@ -423,14 +425,19 @@ class RegularizedMultimodalVI(
             for the library size prior ``N(mu_s, sigma_s)``. The prior mean
             and variance are computed per group from data at setup time.
             If None and ``batch_key`` is provided, defaults to ``batch_key``.
-        %(param_cat_cov_keys)s
-        %(param_cont_cov_keys)s
-        modality_scaling_covariate_keys
+        nn_conditioning_covariate_keys
+            keys in ``adata.obs`` that correspond to categorical data.
+            One-hot encoded and fed into the encoder (if ``encode_covariates=True``)
+            and decoder neural networks as conditioning input.
+        nn_continuous_covariate_keys
+            keys in ``adata.obs`` that correspond to continuous data.
+            Fed into the encoder and decoder neural networks as conditioning input.
+        feature_scaling_covariate_keys
             Optional list of categorical ``.obs`` keys whose categories define
             per-feature scaling factors (cell2location-style ``y_{t,g}``).
-            Registered separately from ``categorical_covariate_keys`` — these
+            Registered separately from ``nn_conditioning_covariate_keys`` — these
             do NOT feed into encoder/decoder injection layers, they only
-            control the per-feature multiplicative region factor.
+            control the per-feature multiplicative feature scaling.
         """
         setup_method_args = cls._get_setup_method_args(**locals())
 
@@ -452,8 +459,8 @@ class RegularizedMultimodalVI(
             library_size_key = batch_key
 
         # Default: modality_scaling mirrors categorical if not explicitly set
-        if categorical_covariate_keys is not None and modality_scaling_covariate_keys is None:
-            modality_scaling_covariate_keys = categorical_covariate_keys
+        if nn_conditioning_covariate_keys is not None and feature_scaling_covariate_keys is None:
+            feature_scaling_covariate_keys = nn_conditioning_covariate_keys
 
         anndata_fields = []
 
@@ -508,29 +515,29 @@ class RegularizedMultimodalVI(
             )
 
         # Covariates
-        if categorical_covariate_keys:
+        if nn_conditioning_covariate_keys:
             anndata_fields.append(
                 fields.MuDataCategoricalJointObsField(
                     REGISTRY_KEYS.CAT_COVS_KEY,
-                    categorical_covariate_keys,
+                    nn_conditioning_covariate_keys,
                     mod_key=list(modalities.values())[0],
                 )
             )
-        if continuous_covariate_keys:
+        if nn_continuous_covariate_keys:
             anndata_fields.append(
                 fields.MuDataNumericalJointObsField(
                     REGISTRY_KEYS.CONT_COVS_KEY,
-                    continuous_covariate_keys,
+                    nn_continuous_covariate_keys,
                     mod_key=list(modalities.values())[0],
                 )
             )
 
         # Modality scaling covariates (separate from encoder/decoder covariates)
-        if modality_scaling_covariate_keys:
+        if feature_scaling_covariate_keys:
             anndata_fields.append(
                 fields.MuDataCategoricalJointObsField(
-                    MODALITY_SCALING_COVS_KEY,
-                    modality_scaling_covariate_keys,
+                    FEATURE_SCALING_COVS_KEY,
+                    feature_scaling_covariate_keys,
                     mod_key=list(modalities.values())[0],
                 )
             )
@@ -872,17 +879,17 @@ class RegularizedMultimodalVI(
                 categorical_input = ()
 
             # Build scaling covariate indicator (cell2location obs2extra_categoricals)
-            scaling_covs = tensors.get(MODALITY_SCALING_COVS_KEY)
-            if scaling_covs is not None and self.module.n_total_scaling_cats > 0:
-                scaling_indicator = torch.cat(
+            feature_scaling_covs = tensors.get(FEATURE_SCALING_COVS_KEY)
+            if feature_scaling_covs is not None and self.module.n_total_feature_scaling_cats > 0:
+                feature_scaling_indicator = torch.cat(
                     [
-                        one_hot(scaling_covs[:, i].long(), n_cats).float()
-                        for i, n_cats in enumerate(self.module.n_cats_per_scaling_cov)
+                        one_hot(feature_scaling_covs[:, i].long(), n_cats).float()
+                        for i, n_cats in enumerate(self.module.n_cats_per_feature_scaling_cov)
                     ],
                     dim=-1,
                 )
             else:
-                scaling_indicator = None
+                feature_scaling_indicator = None
 
             def _make_decode_rate_fn(
                 module,
@@ -893,7 +900,7 @@ class RegularizedMultimodalVI(
                 categorical_input,
                 bg,
                 cont_covs,
-                scaling_indicator,
+                feature_scaling_indicator,
             ):
                 """Create a closure that computes decoder rate for a given z."""
 
@@ -926,10 +933,10 @@ class RegularizedMultimodalVI(
                             additive_background=bg,
                         )
 
-                    if name in module.region_factors:
-                        rf_transformed = torch.nn.functional.softplus(module.region_factors[name]) / 0.7
-                        if scaling_indicator is not None:
-                            scaling = torch.matmul(scaling_indicator, rf_transformed)
+                    if name in module.feature_scaling:
+                        rf_transformed = torch.nn.functional.softplus(module.feature_scaling[name]) / 0.7
+                        if feature_scaling_indicator is not None:
+                            scaling = torch.matmul(feature_scaling_indicator, rf_transformed)
                         else:
                             scaling = rf_transformed
                         px_rate = px_rate * scaling
@@ -966,7 +973,7 @@ class RegularizedMultimodalVI(
                     categorical_input,
                     bg,
                     cont_covs,
-                    scaling_indicator,
+                    feature_scaling_indicator,
                 )
 
                 # Baseline decoder rate

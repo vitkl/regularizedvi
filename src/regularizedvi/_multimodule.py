@@ -5,7 +5,7 @@ Each modality uses the same encoder/decoder architecture (RegularizedEncoder,
 RegularizedDecoderSCVI) with per-modality configuration for:
 - n_hidden, n_latent (architecture sizing)
 - additive_background (ambient correction, default ON for RNA only)
-- region_factors (per-feature bias, default ON for ATAC only)
+- feature_scaling (per-feature bias, default ON for ATAC only)
 - dispersion parameterization (gene/region, gene-batch/region-batch)
 - GammaPoisson likelihood (default for all modalities)
 
@@ -33,8 +33,8 @@ from regularizedvi._constants import (
     AMBIENT_COVS_KEY,
     DEFAULT_COMPUTE_PEARSON,
     DISPERSION_KEY,
+    FEATURE_SCALING_COVS_KEY,
     LIBRARY_SIZE_KEY,
-    MODALITY_SCALING_COVS_KEY,
 )
 from regularizedvi._module import _pearson_corr_rows
 
@@ -79,7 +79,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
     All modalities share the same encoder/decoder class (RegularizedEncoder,
     RegularizedDecoderSCVI) but can differ in architecture size, normalization,
-    and per-modality flags (additive_background, region_factors).
+    and per-modality flags (additive_background, feature_scaling).
 
     Parameters
     ----------
@@ -139,8 +139,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
     additive_bg_prior_beta
         Beta for Gamma prior on ``exp(additive_background)``. Default ``100.0``.
         Together gives Gamma(1, 100) with mean=0.01 (cell2location-style).
-    region_factors_modalities
-        List of modality names that get per-feature region factors.
+    feature_scaling_modalities
+        List of modality names that get per-feature feature scaling.
     regularise_dispersion
         Enable dispersion regularization.
     regularise_dispersion_prior
@@ -188,7 +188,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         scale_activation: str = "softplus",
         use_batch_in_decoder: bool = False,
         additive_background_modalities: list[str] | None = None,
-        region_factors_modalities: list[str] | None = None,
+        feature_scaling_modalities: list[str] | None = None,
         regularise_dispersion: bool = True,
         regularise_dispersion_prior: float = 3.0,
         dispersion_hyper_prior_alpha: float = 9.0,
@@ -199,10 +199,10 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         deeply_inject_covariates: bool = True,
         extra_encoder_kwargs: dict | None = None,
         extra_decoder_kwargs: dict | None = None,
-        # Region factors (cell2location-style detection_tech_gene)
-        n_cats_per_scaling_cov: list[int] | None = None,
-        region_factors_prior_alpha: float = 200.0,
-        region_factors_prior_beta: float = 200.0,
+        # Feature scaling (cell2location-style detection_tech_gene)
+        n_cats_per_feature_scaling_cov: list[int] | None = None,
+        feature_scaling_prior_alpha: float = 200.0,
+        feature_scaling_prior_beta: float = 200.0,
         additive_bg_prior_alpha: float = 1.0,
         additive_bg_prior_beta: float = 100.0,
         regularise_background: bool = True,
@@ -244,11 +244,13 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.dispersion_hyper_prior_beta = dispersion_hyper_prior_beta
         self.encode_covariates = encode_covariates
 
-        # Region factors scaling covariates (cell2location-style detection_tech_gene)
-        self.n_cats_per_scaling_cov = n_cats_per_scaling_cov or []
-        self.n_total_scaling_cats = sum(self.n_cats_per_scaling_cov) if self.n_cats_per_scaling_cov else 0
-        self.region_factors_prior_alpha = region_factors_prior_alpha
-        self.region_factors_prior_beta = region_factors_prior_beta
+        # Feature scaling scaling covariates (cell2location-style detection_tech_gene)
+        self.n_cats_per_feature_scaling_cov = n_cats_per_feature_scaling_cov or []
+        self.n_total_feature_scaling_cats = (
+            sum(self.n_cats_per_feature_scaling_cov) if self.n_cats_per_feature_scaling_cov else 0
+        )
+        self.feature_scaling_prior_alpha = feature_scaling_prior_alpha
+        self.feature_scaling_prior_beta = feature_scaling_prior_beta
         self.additive_bg_prior_alpha = additive_bg_prior_alpha
         self.additive_bg_prior_beta = additive_bg_prior_beta
         self.regularise_background = regularise_background
@@ -259,9 +261,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.n_library_cats = n_library_cats if n_library_cats is not None else n_batch
 
         additive_background_modalities = additive_background_modalities or []
-        region_factors_modalities = region_factors_modalities or []
+        feature_scaling_modalities = feature_scaling_modalities or []
         self.additive_background_modalities = additive_background_modalities
-        self.region_factors_modalities = region_factors_modalities
+        self.feature_scaling_modalities = feature_scaling_modalities
 
         # Resolve per-modality configs
         n_hidden_dict = _resolve_per_modality(n_hidden, self.modality_names)
@@ -476,16 +478,16 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     + 0.01 * torch.randn(n_feat, self.n_total_ambient_cats)
                 )
 
-        # ---- Region factors (cell2location-style per-covariate scaling) ----
-        # Shape: (n_scaling_rows, n_features) where n_scaling_rows is either:
-        #   - sum(n_cats_per_scaling_cov) when scaling covariates are provided
+        # ---- Feature scaling (cell2location-style per-covariate scaling) ----
+        # Shape: (n_feature_scaling_rows, n_features) where n_feature_scaling_rows is either:
+        #   - sum(n_cats_per_feature_scaling_cov) when scaling covariates are provided
         #   - 1 when no scaling covariates (single shared factor, backward compatible)
         # Initialized at 0; softplus(0)/0.7 ≈ 0.99 (centered at ~1.0)
-        self.region_factors = nn.ParameterDict()
-        n_scaling_rows = self.n_total_scaling_cats if self.n_total_scaling_cats > 0 else 1
-        for name in region_factors_modalities:
+        self.feature_scaling = nn.ParameterDict()
+        n_feature_scaling_rows = self.n_total_feature_scaling_cats if self.n_total_feature_scaling_cats > 0 else 1
+        for name in feature_scaling_modalities:
             n_feat = n_input_per_modality[name]
-            self.region_factors[name] = nn.Parameter(torch.zeros(n_scaling_rows, n_feat))
+            self.feature_scaling[name] = nn.Parameter(torch.zeros(n_feature_scaling_rows, n_feat))
 
     def _get_inference_input(
         self,
@@ -518,7 +520,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             "library_size_index": tensors.get(LIBRARY_SIZE_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
             "cont_covs": tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
             "cat_covs": tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
-            "scaling_covs": tensors.get(MODALITY_SCALING_COVS_KEY, None),
+            "feature_scaling_covs": tensors.get(FEATURE_SCALING_COVS_KEY, None),
             "ambient_covs": tensors.get(AMBIENT_COVS_KEY, None),
         }
 
@@ -712,7 +714,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         library_size_index: torch.Tensor | None = None,
         cont_covs: torch.Tensor | None = None,
         cat_covs: torch.Tensor | None = None,
-        scaling_covs: torch.Tensor | None = None,
+        feature_scaling_covs: torch.Tensor | None = None,
         ambient_covs: torch.Tensor | None = None,
     ) -> dict[str, dict]:
         """Per-modality decoding from shared Z.
@@ -736,16 +738,16 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             categorical_input = ()
 
         # Build one-hot indicator for scaling covariates (cell2location obs2extra_categoricals)
-        if scaling_covs is not None and self.n_total_scaling_cats > 0:
-            scaling_indicator = torch.cat(
+        if feature_scaling_covs is not None and self.n_total_feature_scaling_cats > 0:
+            feature_scaling_indicator = torch.cat(
                 [
-                    one_hot(scaling_covs[:, i].long(), n_cats).float()
-                    for i, n_cats in enumerate(self.n_cats_per_scaling_cov)
+                    one_hot(feature_scaling_covs[:, i].long(), n_cats).float()
+                    for i, n_cats in enumerate(self.n_cats_per_feature_scaling_cov)
                 ],
                 dim=-1,
-            )  # (n_cells, n_total_scaling_cats)
+            )  # (n_cells, n_total_feature_scaling_cats)
         else:
-            scaling_indicator = None
+            feature_scaling_indicator = None
 
         px_dict = {}
         for name in self.modality_names:
@@ -786,13 +788,13 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     additive_background=bg,
                 )
 
-            # Region factors (cell2location-style per-covariate scaling)
+            # Feature scaling (cell2location-style per-covariate scaling)
             # softplus(param)/0.7: centered at ~1.0 when param=0, positive, unbounded
-            if name in self.region_factors:
-                rf_transformed = torch.nn.functional.softplus(self.region_factors[name]) / 0.7
-                if scaling_indicator is not None:
+            if name in self.feature_scaling:
+                rf_transformed = torch.nn.functional.softplus(self.feature_scaling[name]) / 0.7
+                if feature_scaling_indicator is not None:
                     # (n_cells, n_total_cats) @ (n_total_cats, n_feat) -> (n_cells, n_feat)
-                    scaling = torch.matmul(scaling_indicator, rf_transformed)
+                    scaling = torch.matmul(feature_scaling_indicator, rf_transformed)
                 else:
                     # No covariates: (1, n_feat) broadcasts with px_rate
                     scaling = rf_transformed
@@ -981,18 +983,18 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
             loss = loss + dispersion_penalty / n_obs
 
-        # ---- Region factors Gamma prior (cell2location-style) ----
-        if self.region_factors_modalities:
+        # ---- Feature scaling Gamma prior (cell2location-style) ----
+        if self.feature_scaling_modalities:
             n_obs = recon_loss.shape[0]
             rf_penalty = torch.tensor(0.0, device=recon_loss.device)
-            for name in self.region_factors_modalities:
-                if name not in self.region_factors:
+            for name in self.feature_scaling_modalities:
+                if name not in self.feature_scaling:
                     continue
-                rf_transformed = torch.nn.functional.softplus(self.region_factors[name]) / 0.7
+                rf_transformed = torch.nn.functional.softplus(self.feature_scaling[name]) / 0.7
                 neg_log_prior = (
                     -Gamma(
-                        self.region_factors_prior_alpha,
-                        self.region_factors_prior_beta,
+                        self.feature_scaling_prior_alpha,
+                        self.feature_scaling_prior_beta,
                     )
                     .log_prob(rf_transformed)
                     .sum()
