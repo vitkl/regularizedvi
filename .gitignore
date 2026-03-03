@@ -34,3 +34,6 @@ __pycache__/
 
 # Local scripts
 run_tests.sh
+_check_*.py
+_check_*.sh
+_submit_*.sh
