@@ -410,6 +410,55 @@ class TestAmbientRegularizedSCVI:
         )
         assert model.module is not None
 
+    def test_compute_latent_umap(self, adata):
+        """Test compute_latent_umap populates obsm keys."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, n_layers=1)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        model.compute_latent_umap(adata)
+        assert "X_scVI" in adata.obsm
+        assert "X_umap" in adata.obsm
+        assert adata.obsm["X_scVI"].shape == (100, 4)
+        assert adata.obsm["X_umap"].shape == (100, 2)
+
+    def test_compute_latent_umap_with_leiden(self, adata):
+        """Test compute_latent_umap with Leiden clustering."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, n_layers=1)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        model.compute_latent_umap(adata, add_leiden=True)
+        assert "leiden" in adata.obs
+
+    def test_save_analysis_outputs(self, adata, tmp_path):
+        """Test save_analysis_outputs creates expected files."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, n_layers=1)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        model.compute_latent_umap(adata, add_leiden=True)
+        saved = model.save_analysis_outputs(str(tmp_path / "outputs"), adata)
+        assert len(saved) > 0
+        assert any("X_scVI" in p for p in saved)
+        assert any("X_umap" in p for p in saved)
+        assert any("leiden" in p for p in saved)
+        assert any("distances" in p for p in saved)
+
+    def test_plot_umap_comparison(self, adata):
+        """Test plot_umap_comparison returns a figure without mutating X_umap."""
+        import matplotlib
+        import matplotlib.pyplot as plt
+
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, n_layers=1)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        model.compute_latent_umap(adata)
+        # Store original X_umap
+        original_umap = adata.obsm["X_umap"].copy()
+        fig = model.plot_umap_comparison(adata, color="batch")
+        assert isinstance(fig, matplotlib.figure.Figure)
+        # X_umap should not be mutated
+        np.testing.assert_array_equal(adata.obsm["X_umap"], original_umap)
+        plt.close(fig)
+
 
 class TestRegularizedVAEModule:
     """Tests for the RegularizedVAE module directly."""
@@ -1262,6 +1311,65 @@ class TestRegularizedMultimodalVI:
         ]:
             with pytest.raises(TypeError, match=param):
                 regularizedvi.RegularizedMultimodalVI(mdata, **{param: "true"})
+
+    def test_compute_latent_umap_multimodal(self, mdata):
+        """Test compute_latent_umap populates joint + per-modality UMAPs."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        adata_rna = mdata["rna"]
+        model.compute_latent_umap(adata_rna)
+        assert "X_multiVI_joint" in adata_rna.obsm
+        assert "X_umap_joint" in adata_rna.obsm
+        assert "X_multiVI_rna" in adata_rna.obsm
+        assert "X_umap_rna" in adata_rna.obsm
+        assert "X_multiVI_atac" in adata_rna.obsm
+        assert "X_umap_atac" in adata_rna.obsm
+        # X_umap should be set to joint UMAP
+        np.testing.assert_array_equal(adata_rna.obsm["X_umap"], adata_rna.obsm["X_umap_joint"])
+
+    def test_save_analysis_outputs_multimodal(self, mdata, tmp_path):
+        """Test save_analysis_outputs creates expected files for multimodal."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        adata_rna = mdata["rna"]
+        model.compute_latent_umap(adata_rna)
+        saved = model.save_analysis_outputs(str(tmp_path / "outputs"), adata_rna)
+        assert len(saved) > 0
+        assert any("joint" in p for p in saved)
+        assert any("distances" in p for p in saved)
+
+    def test_plot_modality_attribution(self, mdata):
+        """Test plot_modality_attribution returns attribution dict and figure."""
+        import matplotlib
+        import matplotlib.pyplot as plt
+
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        attribution, fig = model.plot_modality_attribution(batch_size=32)
+        assert isinstance(attribution, dict)
+        assert "rna" in attribution
+        assert "atac" in attribution
+        assert isinstance(fig, matplotlib.figure.Figure)
+        plt.close(fig)
+
+    def test_plot_umap_comparison_multimodal(self, mdata):
+        """Test plot_umap_comparison returns a figure without mutating X_umap."""
+        import matplotlib
+        import matplotlib.pyplot as plt
+
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        adata_rna = mdata["rna"]
+        model.compute_latent_umap(adata_rna)
+        original_umap = adata_rna.obsm["X_umap"].copy()
+        fig = model.plot_umap_comparison(adata_rna, color="batch")
+        assert isinstance(fig, matplotlib.figure.Figure)
+        np.testing.assert_array_equal(adata_rna.obsm["X_umap"], original_umap)
+        plt.close(fig)
 
 
 class TestWandBUtilities:

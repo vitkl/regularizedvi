@@ -1002,3 +1002,320 @@ class RegularizedMultimodalVI(
                 }
 
         return result
+
+    def compute_latent_umap(
+        self,
+        adata,
+        n_neighbors: int = 50,
+        min_dist: float = 0.4,
+        spread: float = 1.3,
+        per_modality: bool = True,
+        add_leiden: bool = False,
+        leiden_resolution: float = 1.0,
+    ) -> None:
+        """Compute joint and per-modality latent representations + UMAPs.
+
+        Stores results in ``adata.obsm``:
+        - ``X_multiVI_joint``, ``X_umap_joint``
+        - ``X_multiVI_{modality}``, ``X_umap_{modality}`` (if ``per_modality=True``)
+
+        Parameters
+        ----------
+        adata
+            AnnData object to store results in (typically the first modality's
+            ``adata``, e.g. ``mdata["rna"]``).
+        n_neighbors
+            Number of neighbors for KNN graph.
+        min_dist
+            UMAP min_dist parameter.
+        spread
+            UMAP spread parameter.
+        per_modality
+            If True, also compute per-modality UMAPs.
+        add_leiden
+            If True, compute Leiden clustering on joint UMAP.
+        leiden_resolution
+            Resolution for Leiden clustering.
+        """
+        import scanpy as sc
+
+        latent_dict = self.get_modality_latents()
+
+        # Joint latent
+        adata.obsm["X_multiVI_joint"] = latent_dict["__joint__"]
+        sc.pp.neighbors(
+            adata, use_rep="X_multiVI_joint", n_neighbors=n_neighbors, metric="euclidean", key_added="joint"
+        )
+        sc.tl.umap(adata, min_dist=min_dist, spread=spread, neighbors_key="joint")
+        adata.obsm["X_umap_joint"] = adata.obsm["X_umap"].copy()
+
+        if add_leiden:
+            sc.tl.leiden(adata, resolution=leiden_resolution, flavor="igraph", neighbors_key="joint")
+
+        # Per-modality latents
+        if per_modality:
+            for name in self.module.modality_names:
+                adata.obsm[f"X_multiVI_{name}"] = latent_dict[name]
+                sc.pp.neighbors(
+                    adata,
+                    use_rep=f"X_multiVI_{name}",
+                    n_neighbors=n_neighbors,
+                    metric="euclidean",
+                    key_added=name,
+                )
+                sc.tl.umap(adata, min_dist=min_dist, spread=spread, neighbors_key=name)
+                adata.obsm[f"X_umap_{name}"] = adata.obsm["X_umap"].copy()
+
+        # Set X_umap to joint UMAP (sc.tl.umap leaves the last one computed)
+        adata.obsm["X_umap"] = adata.obsm["X_umap_joint"]
+
+    def save_analysis_outputs(
+        self,
+        output_dir: str,
+        adata,
+        n_neighbors: int = 50,
+        save_latents: bool = True,
+        save_umaps: bool = True,
+        save_knn_graphs: bool = True,
+        save_attribution: bool = False,
+        attribution: dict | None = None,
+    ) -> list[str]:
+        """Save multimodal analysis outputs to CSV/npz files.
+
+        Parameters
+        ----------
+        output_dir
+            Directory to save outputs. Created if it doesn't exist.
+        adata
+            AnnData object with computed latents, UMAPs, etc.
+        n_neighbors
+            Number of neighbors (used in output filenames).
+        save_latents
+            Save latent representations (joint + per-modality) to CSV.
+        save_umaps
+            Save UMAP coordinates to CSV.
+        save_knn_graphs
+            Save KNN distance/connectivity matrices to npz.
+        save_attribution
+            Save attribution data to CSV.
+        attribution
+            Attribution dict from ``get_modality_attribution()``.
+
+        Returns
+        -------
+        list[str]
+            List of saved file paths.
+        """
+        import os
+
+        import pandas as pd
+        import scipy.sparse
+
+        os.makedirs(output_dir, exist_ok=True)
+        saved = []
+
+        # Latent representations
+        if save_latents:
+            latent_keys = [("X_multiVI_joint", "joint")]
+            for name in self.module.modality_names:
+                latent_keys.append((f"X_multiVI_{name}", name))
+            for obsm_key, label in latent_keys:
+                if obsm_key in adata.obsm:
+                    path = f"{output_dir}/X_multiVI_{label}.csv"
+                    pd.DataFrame(
+                        adata.obsm[obsm_key],
+                        index=adata.obs_names,
+                        columns=range(adata.obsm[obsm_key].shape[1]),
+                    ).to_csv(path)
+                    saved.append(path)
+
+        # UMAP coordinates
+        if save_umaps:
+            umap_keys = [("X_umap_joint", "joint")]
+            for name in self.module.modality_names:
+                umap_keys.append((f"X_umap_{name}", name))
+                umap_keys.append((f"X_umap_attr_{name}", f"attr_{name}"))
+            for obsm_key, label in umap_keys:
+                if obsm_key in adata.obsm:
+                    path = f"{output_dir}/X_umap_{label}_k{n_neighbors}.csv"
+                    pd.DataFrame(
+                        adata.obsm[obsm_key],
+                        index=adata.obs_names,
+                        columns=range(2),
+                    ).to_csv(path)
+                    saved.append(path)
+
+        # KNN graphs (joint only — stored with key_added="joint" prefix)
+        if save_knn_graphs:
+            for key in ("distances", "connectivities"):
+                obsp_key = f"joint_{key}"
+                if obsp_key in adata.obsp:
+                    path = f"{output_dir}/{key}_euclidean_k{n_neighbors}.npz"
+                    scipy.sparse.save_npz(path, adata.obsp[obsp_key], compressed=True)
+                    saved.append(path)
+
+        # Attribution data
+        if save_attribution and attribution is not None:
+            for name in self.module.modality_names:
+                if name in attribution:
+                    for key in ("attribution", "weighted_z"):
+                        data = attribution[name][key]
+                        path = f"{output_dir}/attribution_{name}_{key}.csv"
+                        pd.DataFrame(
+                            data,
+                            index=adata.obs_names,
+                            columns=range(data.shape[1]),
+                        ).to_csv(path)
+                        saved.append(path)
+
+        return saved
+
+    def plot_modality_attribution(
+        self,
+        attribution: dict | None = None,
+        batch_size: int = 256,
+        figsize: tuple[float, float] = (14, 5),
+    ) -> tuple[dict, matplotlib.figure.Figure]:
+        """Plot attribution bar chart showing per-modality decoder sensitivity.
+
+        Parameters
+        ----------
+        attribution
+            Pre-computed attribution dict. If None, computes via
+            ``get_modality_attribution()``.
+        batch_size
+            Batch size for attribution computation (if not pre-computed).
+        figsize
+            Figure size for the bar chart.
+
+        Returns
+        -------
+        tuple[dict, Figure]
+            ``(attribution_dict, figure)``
+        """
+        from matplotlib.patches import Patch
+
+        if attribution is None:
+            attribution = self.get_modality_attribution(batch_size=batch_size)
+
+        n_modalities = len(self.module.modality_names)
+        fig, axes = plt.subplots(1, n_modalities, figsize=figsize)
+        if n_modalities == 1:
+            axes = [axes]
+
+        # Color palette for modalities
+        mod_colors = {}
+        palette = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple"]
+        for i, name in enumerate(self.module.modality_names):
+            mod_colors[name] = palette[i % len(palette)]
+
+        for ax, name in zip(axes, self.module.modality_names, strict=False):
+            attr = attribution[name]["attribution"]
+            mean_attr = attr.mean(axis=0)
+
+            # Color bars by which modality's Z dims they belong to
+            colors = []
+            for mod_name in self.module.modality_names:
+                n = self.module.n_latent_dict[mod_name]
+                colors.extend([mod_colors[mod_name]] * n)
+
+            ax.bar(range(len(mean_attr)), mean_attr, color=colors, alpha=0.7)
+            ax.set_xlabel("Latent dimension")
+            ax.set_ylabel("Mean |Jacobian|")
+            ax.set_title(f"{name.upper()} decoder attribution")
+
+            # Add modality boundary lines
+            offset = 0
+            for mod_name in self.module.modality_names[:-1]:
+                offset += self.module.n_latent_dict[mod_name]
+                ax.axvline(offset - 0.5, color="red", linestyle="--", alpha=0.5)
+
+            # Legend
+            legend_elements = [
+                Patch(facecolor=mod_colors[m], alpha=0.7, label=f"Z_{m}") for m in self.module.modality_names
+            ]
+            ax.legend(handles=legend_elements)
+
+        fig.tight_layout()
+
+        # Print cross-modality attribution fractions
+        for name in self.module.modality_names:
+            attr = attribution[name]["attribution"]
+            total = attr.mean(axis=0).sum()
+            offset = 0
+            for mod_name in self.module.modality_names:
+                n = self.module.n_latent_dict[mod_name]
+                frac = attr.mean(axis=0)[offset : offset + n].sum() / total
+                logger.info(f"{name.upper()} decoder: {frac:.1%} from Z_{mod_name}")
+                offset += n
+
+        return attribution, fig
+
+    def plot_umap_comparison(
+        self,
+        adata,
+        color: str | list[str] = "l2_cell_type",
+        umap_keys: list[tuple[str, str]] | None = None,
+        size: float = 2,
+        show_legend: bool = False,
+        figsize_per_panel: tuple[float, float] = (7, 7),
+    ) -> matplotlib.figure.Figure:
+        """Side-by-side UMAP comparison across latent representations.
+
+        Parameters
+        ----------
+        adata
+            AnnData object with precomputed UMAP embeddings in ``.obsm``.
+        color
+            Column(s) in ``adata.obs`` to color by.
+        umap_keys
+            List of ``(obsm_key, title)`` tuples. If None, auto-detects
+            available UMAP keys.
+        size
+            Point size in UMAP plots.
+        show_legend
+            Whether to show legend on each panel.
+        figsize_per_panel
+            Size of each individual panel.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        import scanpy as sc
+
+        if umap_keys is None:
+            umap_keys = []
+            for key in adata.obsm:
+                if key.startswith("X_umap"):
+                    title = key.replace("X_umap_", "").replace("X_umap", "UMAP")
+                    umap_keys.append((key, title))
+
+        if isinstance(color, str):
+            color = [color]
+
+        n_umaps = len(umap_keys)
+        n_colors = len(color)
+        fig, axes = plt.subplots(
+            n_colors,
+            n_umaps,
+            figsize=(figsize_per_panel[0] * n_umaps, figsize_per_panel[1] * n_colors),
+            squeeze=False,
+        )
+
+        for row_idx, color_key in enumerate(color):
+            for col_idx, (umap_key, title) in enumerate(umap_keys):
+                ax = axes[row_idx, col_idx]
+                sc.pl.embedding(
+                    adata,
+                    basis=umap_key,
+                    color=color_key,
+                    size=size,
+                    ax=ax,
+                    show=False,
+                    title=f"{title} - {color_key}" if n_colors > 1 else title,
+                    legend_loc="right margin" if show_legend else "none",
+                )
+
+        fig.tight_layout()
+        return fig
