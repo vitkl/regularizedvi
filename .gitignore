@@ -37,3 +37,5 @@ run_tests.sh
 _check_*.py
 _check_*.sh
 _submit_*.sh
+_make_*.py
+_show_*.py
