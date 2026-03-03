@@ -857,12 +857,12 @@ class AmbientRegularizedSCVI(
 
             if train_key is not None and train_key in history:
                 df = history[train_key]
-                values = df.iloc[skip_epochs:].values.ravel()
+                values = df.iloc[skip_epochs:].values.ravel().astype(float)
                 epochs = range(skip_epochs, skip_epochs + len(values))
                 ax.plot(epochs, values, color="tab:blue", label="train")
             if val_key is not None and val_key in history:
                 df = history[val_key]
-                values = df.iloc[skip_epochs:].values.ravel()
+                values = df.iloc[skip_epochs:].values.ravel().astype(float)
                 epochs = range(skip_epochs, skip_epochs + len(values))
                 ax.plot(epochs, values, color="tab:orange", label="validation")
 

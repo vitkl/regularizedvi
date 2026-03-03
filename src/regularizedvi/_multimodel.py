@@ -740,13 +740,13 @@ class RegularizedMultimodalVI(
                 plotted = False
                 if train_key in history:
                     df = history[train_key]
-                    values = df.iloc[skip_epochs:].values.ravel()
+                    values = df.iloc[skip_epochs:].values.ravel().astype(float)
                     epochs = range(skip_epochs, skip_epochs + len(values))
                     ax.plot(epochs, values, color="tab:blue", label="train")
                     plotted = True
                 if val_key in history:
                     df = history[val_key]
-                    values = df.iloc[skip_epochs:].values.ravel()
+                    values = df.iloc[skip_epochs:].values.ravel().astype(float)
                     epochs = range(skip_epochs, skip_epochs + len(values))
                     ax.plot(epochs, values, color="tab:orange", label="validation")
                     plotted = True

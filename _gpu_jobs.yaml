@@ -1,0 +1,108 @@
+# GPU experiment specifications for regularizedvi.
+# Each entry defines one bsub job submitted via papermill.
+#
+# Fields:
+#   job_name:    bsub -J name and wandb_name
+#   notebook:    source notebook to execute
+#   output:      output notebook path (papermill writes executed notebook here)
+#   overrides:   extra papermill -r flags (empty = use notebook defaults)
+#   description: what this ablation tests
+
+# ── Single-modal (RNA-only GammaPoisson) ──
+
+- job_name: gp_es_default
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping_out.ipynb
+  overrides: ""
+  description: >-
+    Baseline single-modal RNA model with all regularisation enabled.
+    Uses GammaPoisson likelihood, additive background prior (alpha=1, beta=100),
+    per-covariate feature scaling (site + donor), and early stopping.
+
+- job_name: gp_es_nobg
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping_nobg_out.ipynb
+  overrides: "-r regularise_background 0"
+  description: >-
+    Ablation: disable additive ambient RNA background prior.
+    Tests whether the per-batch background correction term improves
+    reconstruction and latent quality on the bone marrow RNA dataset.
+
+- job_name: gp_es_beta5
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping_beta5_out.ipynb
+  overrides: "-r additive_bg_prior_beta 5.0"
+  description: >-
+    Ablation: weaker background prior (beta=5 vs default beta=100).
+    Prior mean shifts from 0.01 to 0.2, allowing larger background estimates.
+    Tests sensitivity of reconstruction quality to background prior strength.
+
+# ── Multimodal (RNA+ATAC, concatenation latent) ──
+
+- job_name: mm_es_default
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_out.ipynb
+  overrides: ""
+  description: >-
+    Baseline multimodal RNA+ATAC model with all regularisation enabled.
+    Uses concatenation latent (separate z_rna + z_atac), additive background
+    prior (alpha=1, beta=100), feature scaling for both modalities, and
+    early stopping.
+
+- job_name: mm_es_nobg
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_nobg_out.ipynb
+  overrides: "-r regularise_background 0"
+  description: >-
+    Ablation: disable additive ambient RNA background prior in multimodal model.
+    Tests whether per-batch background correction improves joint latent quality
+    and cross-modality integration on bone marrow RNA+ATAC data.
+
+- job_name: mm_es_beta5
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_beta5_out.ipynb
+  overrides: "-r additive_bg_prior_beta 5.0"
+  description: >-
+    Ablation: weaker background prior (beta=5 vs default beta=100) in
+    multimodal model. Tests sensitivity of joint latent and per-modality
+    reconstruction to background prior strength.
+
+- job_name: mm_es_nofs
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_nofs_out.ipynb
+  overrides: "-r use_feature_scaling 0"
+  description: >-
+    Ablation: disable per-covariate multiplicative feature scaling.
+    Background prior remains enabled. Tests whether the Gamma(alpha, beta)
+    per-gene scaling factors (conditioned on site/donor) improve latent
+    quality beyond what batch correction alone provides.
+
+- job_name: mm_es_nofs_nobg
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_nofs_nobg_out.ipynb
+  overrides: "-r use_feature_scaling 0 -r regularise_background 0"
+  description: >-
+    Minimal model: both feature scaling and background prior disabled.
+    Only batch correction via encoder conditioning remains. Serves as
+    a lower bound to quantify the combined benefit of both regularisation
+    components.
+
+- job_name: mm_es_nobg_fs
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_nobg_fs_out.ipynb
+  overrides: "-r regularise_background 0 -r use_feature_scaling 1"
+  description: >-
+    Ablation: feature scaling ON, background prior OFF. Isolates the
+    contribution of per-covariate feature scaling when background
+    correction is absent. Compare with mm_es_nofs_nobg (both off)
+    and mm_es_nobg (scaling off, bg off) to disentangle effects.
+
+- job_name: mm_es_rerun
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_rerun_out.ipynb
+  overrides: ""
+  description: >-
+    Rerun of default multimodal model with bug fixes applied: corrected
+    Pearson metric normalisation (per-cell proportions instead of
+    library-scaled px_rate), fixed bool('0') papermill coercion bug,
+    and W&B logging enabled. Verifies reproducibility against mm_es_default.
