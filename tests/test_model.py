@@ -459,6 +459,22 @@ class TestAmbientRegularizedSCVI:
         np.testing.assert_array_equal(adata.obsm["X_umap"], original_umap)
         plt.close(fig)
 
+    def test_compute_latent_umap_with_precomputed_latent(self, adata):
+        """Test compute_latent_umap skips GPU when latent is pre-stored."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+
+        # Pre-store latent manually
+        latent = model.get_latent_representation()
+        adata.obsm["X_scVI"] = latent
+
+        # compute_latent_umap should skip the GPU call
+        model.compute_latent_umap(adata)
+
+        assert "X_umap" in adata.obsm
+        assert adata.obsm["X_umap"].shape == (adata.n_obs, 2)
+
 
 class TestRegularizedVAEModule:
     """Tests for the RegularizedVAE module directly."""
@@ -1370,6 +1386,78 @@ class TestRegularizedMultimodalVI:
         assert isinstance(fig, matplotlib.figure.Figure)
         np.testing.assert_array_equal(adata_rna.obsm["X_umap"], original_umap)
         plt.close(fig)
+
+    def test_compute_latent_umap_with_precomputed_latents(self, mdata):
+        """Test compute_latent_umap skips GPU when latents are pre-stored."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+
+        adata_rna = mdata["rna"]
+
+        # Pre-store latents manually (simulating GPU → save → CPU workflow)
+        latent_dict = model.get_modality_latents()
+        adata_rna.obsm["X_multiVI_joint"] = latent_dict["__joint__"]
+        for name in model.module.modality_names:
+            adata_rna.obsm[f"X_multiVI_{name}"] = latent_dict[name]
+
+        # Now compute_latent_umap should skip the GPU call and just do KNN+UMAP
+        model.compute_latent_umap(adata_rna)
+
+        assert "X_umap_joint" in adata_rna.obsm
+        assert adata_rna.obsm["X_umap_joint"].shape == (mdata["rna"].n_obs, 2)
+        for name in model.module.modality_names:
+            assert f"X_umap_{name}" in adata_rna.obsm
+
+    def test_store_attribution_results(self, mdata):
+        """Test store_attribution_results populates obsm + obs keys."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+
+        adata_rna = mdata["rna"]
+        attribution = model.store_attribution_results(adata_rna, batch_size=32)
+
+        # Check return value
+        assert isinstance(attribution, dict)
+        for name in model.module.modality_names:
+            assert name in attribution
+
+        # Check obsm keys (weighted latents)
+        for name in model.module.modality_names:
+            assert f"X_multiVI_attr_{name}" in adata_rna.obsm
+            assert adata_rna.obsm[f"X_multiVI_attr_{name}"].shape[0] == mdata["rna"].n_obs
+
+        # Check obs columns
+        for name in model.module.modality_names:
+            assert f"{name}_decoder_total_attr" in adata_rna.obs
+            assert f"{name}_decoder_own_attr" in adata_rna.obs
+
+        # Log2 ratio (2 modalities: alphabetical order atac < rna)
+        assert "log2_atac_vs_rna_attr" in adata_rna.obs
+
+        # No UMAP keys yet (that's compute_attribution_umap's job)
+        for name in model.module.modality_names:
+            assert f"X_umap_attr_{name}" not in adata_rna.obsm
+
+    def test_compute_attribution_umap(self, mdata):
+        """Test compute_attribution_umap computes UMAPs on attribution latents."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+
+        adata_rna = mdata["rna"]
+        model.compute_latent_umap(adata_rna)  # populates X_umap_joint
+        model.store_attribution_results(adata_rna, batch_size=32)
+        model.compute_attribution_umap(adata_rna)
+
+        # Check UMAP keys
+        for name in model.module.modality_names:
+            assert f"X_umap_attr_{name}" in adata_rna.obsm
+            assert adata_rna.obsm[f"X_umap_attr_{name}"].shape == (mdata["rna"].n_obs, 2)
+
+        # X_umap should be restored to joint
+        np.testing.assert_array_equal(adata_rna.obsm["X_umap"], adata_rna.obsm["X_umap_joint"])
 
 
 class TestWandBUtilities:

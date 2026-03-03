@@ -32,11 +32,15 @@ __pycache__/
 # Notebook outputs (papermill)
 *_out.ipynb
 
-# Local scripts
+# Local helper scripts (repo root only)
 run_tests.sh
-_check_*.py
-_check_*.sh
-_submit_*.sh
-_make_*.py
-_show_*.py
-_extract_*.py
+_check_cells.py
+_check_nb.py
+_check_progress.sh
+_extract_params.py
+_inspect_notebook.py
+_inspect_notebook.sh
+_make_subsample_nb.py
+_rename_vars.py
+_show_outputs.py
+_submit_gpu_jobs.sh

@@ -1019,6 +1019,12 @@ class RegularizedMultimodalVI(
         - ``X_multiVI_joint``, ``X_umap_joint``
         - ``X_multiVI_{modality}``, ``X_umap_{modality}`` (if ``per_modality=True``)
 
+        If latent representations are already stored in ``adata.obsm``
+        (e.g. from a previous call to ``get_modality_latents()``), the
+        GPU forward pass is skipped and only KNN/UMAP is computed. This
+        enables a split workflow: compute latents on GPU, save ``adata``,
+        then compute UMAPs on CPU.
+
         Parameters
         ----------
         adata
@@ -1039,10 +1045,14 @@ class RegularizedMultimodalVI(
         """
         import scanpy as sc
 
-        latent_dict = self.get_modality_latents()
+        # GPU part: skip if latents already stored (enables CPU-only workflow)
+        if "X_multiVI_joint" not in adata.obsm:
+            latent_dict = self.get_modality_latents()
+            adata.obsm["X_multiVI_joint"] = latent_dict["__joint__"]
+            if per_modality:
+                for name in self.module.modality_names:
+                    adata.obsm[f"X_multiVI_{name}"] = latent_dict[name]
 
-        # Joint latent
-        adata.obsm["X_multiVI_joint"] = latent_dict["__joint__"]
         sc.pp.neighbors(
             adata, use_rep="X_multiVI_joint", n_neighbors=n_neighbors, metric="euclidean", key_added="joint"
         )
@@ -1052,22 +1062,136 @@ class RegularizedMultimodalVI(
         if add_leiden:
             sc.tl.leiden(adata, resolution=leiden_resolution, flavor="igraph", neighbors_key="joint")
 
-        # Per-modality latents
+        # Per-modality UMAPs (CPU-only: latents already in obsm)
         if per_modality:
             for name in self.module.modality_names:
-                adata.obsm[f"X_multiVI_{name}"] = latent_dict[name]
-                sc.pp.neighbors(
-                    adata,
-                    use_rep=f"X_multiVI_{name}",
-                    n_neighbors=n_neighbors,
-                    metric="euclidean",
-                    key_added=name,
-                )
-                sc.tl.umap(adata, min_dist=min_dist, spread=spread, neighbors_key=name)
-                adata.obsm[f"X_umap_{name}"] = adata.obsm["X_umap"].copy()
+                if f"X_multiVI_{name}" in adata.obsm:
+                    sc.pp.neighbors(
+                        adata,
+                        use_rep=f"X_multiVI_{name}",
+                        n_neighbors=n_neighbors,
+                        metric="euclidean",
+                        key_added=name,
+                    )
+                    sc.tl.umap(adata, min_dist=min_dist, spread=spread, neighbors_key=name)
+                    adata.obsm[f"X_umap_{name}"] = adata.obsm["X_umap"].copy()
 
         # Set X_umap to joint UMAP (sc.tl.umap leaves the last one computed)
         adata.obsm["X_umap"] = adata.obsm["X_umap_joint"]
+
+    def store_attribution_results(
+        self,
+        adata,
+        attribution: dict | None = None,
+        batch_size: int = 256,
+    ) -> dict:
+        """Compute attribution and store results in ``adata``.
+
+        Stores attribution-weighted latents in ``adata.obsm`` and per-modality
+        importance scores in ``adata.obs``. Does **not** compute KNN/UMAP —
+        use :meth:`compute_attribution_umap` for that (can run on CPU separately).
+
+        For each modality stores:
+
+        - ``X_multiVI_attr_{name}`` in obsm — attribution-weighted latent
+        - ``{name}_decoder_total_attr`` in obs — total attribution per cell
+        - ``{name}_decoder_own_attr`` in obs — attribution from own Z dims
+
+        If exactly 2 modalities, also stores ``log2_{mod0}_vs_{mod1}_attr``.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to store results in.
+        attribution
+            Pre-computed attribution dict from :meth:`get_modality_attribution`.
+            If None, computes it (requires GPU).
+        batch_size
+            Batch size for attribution computation (if not pre-computed).
+
+        Returns
+        -------
+        dict
+            The attribution dict.
+        """
+        import numpy as np
+
+        if attribution is None:
+            attribution = self.get_modality_attribution(batch_size=batch_size)
+
+        # Store attribution-weighted latents
+        for name in self.module.modality_names:
+            adata.obsm[f"X_multiVI_attr_{name}"] = attribution[name]["weighted_z"]
+
+        # Per-modality importance scores
+        total_attrs = {}
+        for name in self.module.modality_names:
+            attr = attribution[name]["attribution"]
+            total = attr.sum(axis=1)
+            adata.obs[f"{name}_decoder_total_attr"] = total
+            total_attrs[name] = total
+
+            # Own-modality attribution: find column offset for this modality's Z dims
+            offset = 0
+            for mod_name in self.module.modality_names:
+                n = self.module.n_latent_dict[mod_name]
+                if mod_name == name:
+                    adata.obs[f"{name}_decoder_own_attr"] = attr[:, offset : offset + n].sum(axis=1)
+                    break
+                offset += n
+
+        # Log2 ratio for 2-modality case
+        if len(self.module.modality_names) == 2:
+            mod0, mod1 = self.module.modality_names
+            adata.obs[f"log2_{mod0}_vs_{mod1}_attr"] = np.log2(total_attrs[mod0] / (total_attrs[mod1] + 1e-10))
+
+        return attribution
+
+    def compute_attribution_umap(
+        self,
+        adata,
+        n_neighbors: int = 50,
+        min_dist: float = 0.4,
+        spread: float = 1.3,
+    ) -> None:
+        """Compute KNN graphs and UMAPs on attribution-weighted latents.
+
+        Requires :meth:`store_attribution_results` to have been called first,
+        which populates ``X_multiVI_attr_{name}`` keys in ``adata.obsm``.
+
+        For each modality stores ``X_umap_attr_{name}`` in ``adata.obsm``.
+
+        Parameters
+        ----------
+        adata
+            AnnData with ``X_multiVI_attr_{name}`` keys in ``.obsm``.
+        n_neighbors
+            Number of neighbors for KNN graph.
+        min_dist
+            UMAP min_dist parameter.
+        spread
+            UMAP spread parameter.
+        """
+        import scanpy as sc
+
+        for name in self.module.modality_names:
+            obsm_key = f"X_multiVI_attr_{name}"
+            if obsm_key not in adata.obsm:
+                msg = f"{obsm_key!r} not found in adata.obsm. Call store_attribution_results() first."
+                raise KeyError(msg)
+            sc.pp.neighbors(
+                adata,
+                use_rep=obsm_key,
+                n_neighbors=n_neighbors,
+                metric="euclidean",
+                key_added=f"attr_{name}",
+            )
+            sc.tl.umap(adata, min_dist=min_dist, spread=spread, neighbors_key=f"attr_{name}")
+            adata.obsm[f"X_umap_attr_{name}"] = adata.obsm["X_umap"].copy()
+
+        # Restore X_umap to joint UMAP if available
+        if "X_umap_joint" in adata.obsm:
+            adata.obsm["X_umap"] = adata.obsm["X_umap_joint"]
 
     def save_analysis_outputs(
         self,

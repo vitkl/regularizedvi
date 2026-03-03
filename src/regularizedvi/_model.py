@@ -624,6 +624,10 @@ class AmbientRegularizedSCVI(
         ``obsm_latent_key`` for the latent, ``X_umap`` for UMAP coordinates.
         Optionally computes Leiden clustering.
 
+        If the latent representation is already stored in
+        ``adata.obsm[obsm_latent_key]``, the GPU forward pass is skipped
+        and only KNN/UMAP is computed.
+
         Parameters
         ----------
         adata
@@ -644,8 +648,10 @@ class AmbientRegularizedSCVI(
         """
         import scanpy as sc
 
-        latent = self.get_latent_representation()
-        adata.obsm[obsm_latent_key] = latent
+        # GPU part: skip if latent already stored (enables CPU-only workflow)
+        if obsm_latent_key not in adata.obsm:
+            latent = self.get_latent_representation()
+            adata.obsm[obsm_latent_key] = latent
         sc.pp.neighbors(adata, use_rep=obsm_latent_key, n_neighbors=n_neighbors, metric="euclidean")
         sc.tl.umap(adata, min_dist=min_dist, spread=spread)
         if add_leiden:
