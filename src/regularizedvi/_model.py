@@ -174,6 +174,20 @@ class AmbientRegularizedSCVI(
 
     _module_cls = RegularizedVAE
 
+    @staticmethod
+    def _validate_bool_params(**params) -> None:
+        """Validate that boolean parameters are not strings.
+
+        Papermill ``-p key value`` passes all values as strings.
+        The string ``"false"`` is truthy in Python, silently giving wrong results.
+        """
+        for name, value in params.items():
+            if isinstance(value, str):
+                raise TypeError(
+                    f"Parameter '{name}' must be bool, got str '{value}'. "
+                    f"Papermill -p passes strings. Use: {name} = bool({name})"
+                )
+
     def __init__(
         self,
         adata: AnnData | None = None,
@@ -202,6 +216,13 @@ class AmbientRegularizedSCVI(
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
         **kwargs,
     ):
+        self._validate_bool_params(
+            use_additive_background=use_additive_background,
+            use_batch_in_decoder=use_batch_in_decoder,
+            regularise_dispersion=regularise_dispersion,
+            regularise_background=regularise_background,
+            compute_pearson=compute_pearson,
+        )
         super().__init__(adata)
 
         self._module_kwargs = {

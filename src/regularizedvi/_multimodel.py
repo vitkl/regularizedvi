@@ -50,6 +50,7 @@ from regularizedvi._constants import (
     LIBRARY_SIZE_KEY,
     MODALITY_SCALING_COVS_KEY,
 )
+from regularizedvi._model import AmbientRegularizedSCVI
 from regularizedvi._multimodule import RegularizedMultimodalVAE
 
 if TYPE_CHECKING:
@@ -161,6 +162,12 @@ class RegularizedMultimodalVI(
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
         **kwargs,
     ):
+        AmbientRegularizedSCVI._validate_bool_params(
+            use_batch_in_decoder=use_batch_in_decoder,
+            regularise_dispersion=regularise_dispersion,
+            regularise_background=regularise_background,
+            compute_pearson=compute_pearson,
+        )
         super().__init__(mdata)
 
         # Discover modality names from the registered MuData

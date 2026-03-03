@@ -7,13 +7,17 @@ from regularizedvi.utils._distributions import (
     plot_prior_comparison,
 )
 from regularizedvi.utils._filtering import filter_genes
+from regularizedvi.utils._wandb import finish_wandb, log_figure_to_wandb, setup_wandb_logger
 
 __all__ = [
     "compare_nb_gammapoisson",
     "compare_prior_directions",
     "download_bone_marrow_dataset",
     "filter_genes",
+    "finish_wandb",
+    "log_figure_to_wandb",
     "nb_variance",
     "plot_nb_vs_gammapoisson",
     "plot_prior_comparison",
+    "setup_wandb_logger",
 ]

@@ -36,6 +36,9 @@ dependencies = [
   "session-info2",
   "torch>=2",
 ]
+optional-dependencies.wandb = [
+  "wandb",
+]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://regularizedvi.readthedocs.io/"
 urls.Homepage = "https://github.com/vitkl/regularizedvi"

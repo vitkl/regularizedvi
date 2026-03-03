@@ -379,6 +379,37 @@ class TestAmbientRegularizedSCVI:
 
         plt.close(fig)
 
+    def test_string_bool_raises(self, adata):
+        """String boolean params raise TypeError (papermill -p passes strings)."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        with pytest.raises(TypeError, match="must be bool"):
+            regularizedvi.AmbientRegularizedSCVI(adata, regularise_background="false")
+
+    def test_string_bool_all_params_raise(self, adata):
+        """Each boolean param raises TypeError when passed as string."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        for param in [
+            "use_additive_background",
+            "use_batch_in_decoder",
+            "regularise_dispersion",
+            "regularise_background",
+            "compute_pearson",
+        ]:
+            with pytest.raises(TypeError, match=param):
+                regularizedvi.AmbientRegularizedSCVI(adata, **{param: "true"})
+
+    def test_int_bool_accepted(self, adata):
+        """Int 0/1 are accepted as boolean params (for papermill -r compatibility)."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            regularise_background=0,
+            compute_pearson=1,
+        )
+        assert model.module is not None
+
 
 class TestRegularizedVAEModule:
     """Tests for the RegularizedVAE module directly."""
@@ -788,8 +819,10 @@ class TestRegularizedMultimodalVI:
         # Run one forward pass through the module to get the LossOutput
         module = model.module
         module.eval()
+        device = next(module.parameters()).device
         scdl = model._make_data_loader(adata=mdata, batch_size=32)
         tensors = next(iter(scdl))
+        tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
         inf_inputs = module._get_inference_input(tensors)
         gen_inputs = module._get_generative_input(tensors, module.inference(**inf_inputs))
         inf_outputs = module.inference(**inf_inputs)
@@ -912,8 +945,10 @@ class TestRegularizedMultimodalVI:
         model.train(max_epochs=1, train_size=1.0, batch_size=32)
         module = model.module
         module.eval()
+        device = next(module.parameters()).device
         scdl = model._make_data_loader(adata=mdata, batch_size=32)
         tensors = next(iter(scdl))
+        tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
         inf_inputs = module._get_inference_input(tensors)
         inf_outputs = module.inference(**inf_inputs)
         gen_inputs = module._get_generative_input(tensors, inf_outputs)
@@ -1141,3 +1176,49 @@ class TestRegularizedMultimodalVI:
         import matplotlib.pyplot as plt
 
         plt.close(fig)
+
+    def test_string_bool_raises_multimodal(self, mdata):
+        """String boolean params raise TypeError in multimodal model."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        with pytest.raises(TypeError, match="must be bool"):
+            regularizedvi.RegularizedMultimodalVI(mdata, regularise_background="false")
+
+    def test_string_bool_all_params_raise_multimodal(self, mdata):
+        """Each boolean param raises TypeError when passed as string."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        for param in [
+            "use_batch_in_decoder",
+            "regularise_dispersion",
+            "regularise_background",
+            "compute_pearson",
+        ]:
+            with pytest.raises(TypeError, match=param):
+                regularizedvi.RegularizedMultimodalVI(mdata, **{param: "true"})
+
+
+class TestWandBUtilities:
+    """Tests for W&B utility functions (no-op when wandb_project is None)."""
+
+    def test_setup_wandb_none_is_noop(self):
+        """setup_wandb_logger returns (None, None) when wandb_project is None."""
+        from regularizedvi.utils import setup_wandb_logger
+
+        logger_list, run = setup_wandb_logger(wandb_project=None)
+        assert logger_list is None
+        assert run is None
+
+    def test_log_figure_no_run_is_noop(self):
+        """log_figure_to_wandb is safe when no W&B run is active."""
+        import matplotlib.pyplot as plt
+
+        from regularizedvi.utils import log_figure_to_wandb
+
+        fig, _ax = plt.subplots()
+        log_figure_to_wandb("test_figure", fig)  # should not raise
+        plt.close(fig)
+
+    def test_finish_wandb_no_run_is_noop(self):
+        """finish_wandb is safe when no W&B run is active."""
+        from regularizedvi.utils import finish_wandb
+
+        finish_wandb()  # should not raise
