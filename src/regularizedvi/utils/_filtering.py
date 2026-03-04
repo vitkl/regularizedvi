@@ -6,10 +6,55 @@ Copied from cell2location (BayraktarLab/cell2location) to avoid a dependency.
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy import sparse
+
+
+def _filter_genes_naive(adata, cell_count_cutoff=15, cell_percentage_cutoff2=0.05, nonz_mean_cutoff=1.12):
+    """Original filter_genes implementation (kept for testing).
+
+    Materializes a full boolean sparse matrix via ``X > 0``, which uses
+    O(nnz) extra memory. For large datasets (>1M cells), prefer
+    :func:`filter_genes` which computes stats in batches.
+    """
+    adata.var["n_cells"] = np.array((adata.X > 0).sum(0)).flatten()
+    adata.var["nonz_mean"] = np.array(adata.X.sum(0)).flatten() / adata.var["n_cells"]
+
+    cell_count_cutoff = np.log10(cell_count_cutoff)
+    cell_count_cutoff2 = np.log10(adata.shape[0] * cell_percentage_cutoff2)
+    nonz_mean_cutoff = np.log10(nonz_mean_cutoff)
+
+    gene_selection = (np.array(np.log10(adata.var["n_cells"]) > cell_count_cutoff2)) | (
+        np.array(np.log10(adata.var["n_cells"]) > cell_count_cutoff)
+        & np.array(np.log10(adata.var["nonz_mean"]) > nonz_mean_cutoff)
+    )
+    return adata.var_names[gene_selection]
+
+
+def _compute_gene_stats(X, batch_size=5000):
+    """Compute per-gene n_cells and sum in batches to limit memory.
+
+    Instead of ``(X > 0).sum(0)`` which allocates a full boolean sparse
+    matrix, this iterates over cell-batches and uses
+    ``chunk.getnnz(axis=0)`` (CSR pointer arithmetic, no copy).
+    """
+    n_cells_total = np.zeros(X.shape[1], dtype=np.int64)
+    gene_sum_total = np.zeros(X.shape[1], dtype=np.float64)
+    for start in range(0, X.shape[0], batch_size):
+        chunk = X[start : start + batch_size]
+        if sparse.issparse(chunk):
+            n_cells_total += np.array(chunk.getnnz(axis=0))
+            gene_sum_total += np.array(chunk.sum(axis=0)).flatten()
+        else:
+            n_cells_total += np.count_nonzero(chunk, axis=0)
+            gene_sum_total += chunk.sum(axis=0)
+    return n_cells_total, gene_sum_total
 
 
 def filter_genes(adata, cell_count_cutoff=15, cell_percentage_cutoff2=0.05, nonz_mean_cutoff=1.12):
     r"""Plot the gene filter given a set of cutoffs and return resulting list of genes.
+
+    Memory-efficient version that computes gene stats in batches of cells,
+    avoiding the full boolean sparse matrix from ``X > 0``.
 
     Parameters
     ----------
@@ -27,8 +72,9 @@ def filter_genes(adata, cell_count_cutoff=15, cell_percentage_cutoff2=0.05, nonz
     -------
     a list of selected var_names
     """
-    adata.var["n_cells"] = np.array((adata.X > 0).sum(0)).flatten()
-    adata.var["nonz_mean"] = np.array(adata.X.sum(0)).flatten() / adata.var["n_cells"]
+    n_cells, gene_sum = _compute_gene_stats(adata.X)
+    adata.var["n_cells"] = n_cells
+    adata.var["nonz_mean"] = gene_sum / np.where(n_cells > 0, n_cells, 1)
 
     cell_count_cutoff = np.log10(cell_count_cutoff)
     cell_count_cutoff2 = np.log10(adata.shape[0] * cell_percentage_cutoff2)
