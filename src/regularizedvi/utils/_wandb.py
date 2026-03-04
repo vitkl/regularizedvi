@@ -98,7 +98,10 @@ def setup_wandb_logger(
         wandb_dir = os.path.join(results_folder, "wandb")
         os.makedirs(wandb_dir, exist_ok=True)
 
-    # Initialize W&B run
+    # Initialize W&B run.
+    # console="off" prevents deadlocks when running under papermill:
+    # W&B's console capture patches sys.stdout/sys.stderr, which conflicts
+    # with papermill's kernel I/O interception (see wandb/wandb#10811).
     wandb_run = wandb.init(
         project=wandb_project,
         name=wandb_name,
@@ -109,6 +112,7 @@ def setup_wandb_logger(
         id=run_id,
         dir=wandb_dir,
         reinit=True,
+        settings=wandb.Settings(console="off"),
     )
 
     # Dual-logger: SimpleLogger first (for model.history_ via scvi-tools

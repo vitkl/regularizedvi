@@ -21,6 +21,7 @@ __pycache__/
 /data/
 **/results/
 **/data/
+**/wandb/
 *.h5ad
 /node_modules/
 /.coverage*
@@ -44,3 +45,4 @@ _make_subsample_nb.py
 _rename_vars.py
 _show_outputs.py
 _submit_gpu_jobs.sh
+_check_alive.sh
