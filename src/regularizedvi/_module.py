@@ -36,7 +36,9 @@ from regularizedvi._constants import (
     DEFAULT_COMPUTE_PEARSON,
     DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
     DEFAULT_FEATURE_SCALING_PRIOR_BETA,
+    DEFAULT_USE_FEATURE_SCALING,
     DISPERSION_KEY,
+    ENCODER_COVS_KEY,
     FEATURE_SCALING_COVS_KEY,
     LIBRARY_SIZE_KEY,
 )
@@ -118,8 +120,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         Number of input features (genes).
     n_batch
         Number of batches. If ``0``, no batch correction is performed.
-    n_labels
-        Number of labels.
     n_hidden
         Number of nodes per hidden layer for encoder and decoder.
     n_latent
@@ -205,14 +205,13 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self,
         n_input: int,
         n_batch: int = 0,
-        n_labels: int = 0,
         n_hidden: int = 128,
         n_latent: int = 10,
         n_layers: int = 1,
         n_continuous_cov: int = 0,
         n_cats_per_cov: list[int] | None = None,
         dropout_rate: float = 0.1,
-        dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene-batch",
+        dispersion: Literal["gene", "gene-batch", "gene-cell"] = "gene-batch",
         log_variational: bool = True,
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "zinb",
         latent_distribution: Literal["normal", "ln"] = "normal",
@@ -247,6 +246,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         n_cats_per_ambient_cov: list[int] | None = None,
         # Feature scaling covariates (cell2location-style per-feature multiplicative scaling)
         n_cats_per_feature_scaling_cov: list[int] | None = None,
+        # Encoder covariates (what categoricals the encoder sees, default=None → nothing)
+        n_cats_per_encoder_cov: list[int] | None = None,
+        use_feature_scaling: bool = DEFAULT_USE_FEATURE_SCALING,
         feature_scaling_prior_alpha: float = DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
         feature_scaling_prior_beta: float = DEFAULT_FEATURE_SCALING_PRIOR_BETA,
         # Dispersion covariate (controls per-group px_r, decoupled from batch_key)
@@ -266,7 +268,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.log_variational = log_variational
         self.gene_likelihood = gene_likelihood
         self.n_batch = n_batch
-        self.n_labels = n_labels
         self.latent_distribution = latent_distribution
         self.encode_covariates = encode_covariates
         self.use_size_factor_key = use_size_factor_key
@@ -319,17 +320,10 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 )
             else:
                 self.px_r = torch.nn.Parameter(torch.randn(n_input, n_disp))
-        elif self.dispersion == "gene-label":
-            if _px_r_init is not None:
-                self.px_r = torch.nn.Parameter(
-                    torch.full((n_input, n_labels), _px_r_init) + 0.1 * torch.randn(n_input, n_labels)
-                )
-            else:
-                self.px_r = torch.nn.Parameter(torch.randn(n_input, n_labels))
         elif self.dispersion == "gene-cell":
             pass
         else:
-            raise ValueError("`dispersion` must be one of 'gene', 'gene-batch', 'gene-label', 'gene-cell'.")
+            raise ValueError("`dispersion` must be one of 'gene', 'gene-batch', 'gene-cell'.")
 
         # Learnable dispersion prior rate (cell2location-style hierarchical prior)
         # Initialized at inverse_softplus(regularise_dispersion_prior) so that
@@ -341,10 +335,14 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             _raw_init = torch.log(torch.expm1(torch.tensor(_init_rate)))
             if self.dispersion == "gene-batch":
                 self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.expand(self.n_dispersion_cats).clone())
-            elif self.dispersion == "gene-label":
-                self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.expand(n_labels).clone())
             else:
                 self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.unsqueeze(0).clone())
+
+        # Encoder covariates (dedicated registry key, default=None → no encoder categoricals)
+        self.n_cats_per_encoder_cov = list(n_cats_per_encoder_cov) if n_cats_per_encoder_cov else []
+        self.n_total_encoder_cats = (
+            sum(int(c) for c in self.n_cats_per_encoder_cov) if self.n_cats_per_encoder_cov else 0
+        )
 
         # Ambient covariates (for additive background, decoupled from batch_key)
         self.n_cats_per_ambient_cov = list(n_cats_per_ambient_cov) if n_cats_per_ambient_cov is not None else []
@@ -365,18 +363,16 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             )
 
         # Feature scaling (cell2location-style per-covariate multiplicative scaling)
-        # Shape: (n_feature_scaling_rows, n_input) where n_feature_scaling_rows is either:
-        #   - sum(n_cats_per_feature_scaling_cov) when scaling covariates are provided
-        #   - 1 when no scaling covariates (single shared factor)
-        # Initialized at 0; softplus(0)/0.7 ≈ 0.99 (centered at ~1.0)
+        self.use_feature_scaling = use_feature_scaling
         self.n_cats_per_feature_scaling_cov = (
             list(n_cats_per_feature_scaling_cov) if n_cats_per_feature_scaling_cov else []
         )
         self.n_total_feature_scaling_cats = (
             sum(self.n_cats_per_feature_scaling_cov) if self.n_cats_per_feature_scaling_cov else 0
         )
-        n_feature_scaling_rows = self.n_total_feature_scaling_cats if self.n_total_feature_scaling_cats > 0 else 1
-        self.feature_scaling = torch.nn.Parameter(torch.zeros(n_feature_scaling_rows, n_input))
+        if self.use_feature_scaling:
+            n_feature_scaling_rows = self.n_total_feature_scaling_cats if self.n_total_feature_scaling_cats > 0 else 1
+            self.feature_scaling = torch.nn.Parameter(torch.zeros(n_feature_scaling_rows, n_input))
         self.feature_scaling_prior_alpha = feature_scaling_prior_alpha
         self.feature_scaling_prior_beta = feature_scaling_prior_beta
 
@@ -392,19 +388,16 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         use_layer_norm_encoder = use_layer_norm == "encoder" or use_layer_norm == "both"
         use_layer_norm_decoder = use_layer_norm == "decoder" or use_layer_norm == "both"
 
-        n_input_encoder = n_input + n_continuous_cov * encode_covariates
-        if self.batch_representation == "embedding":
-            n_input_encoder += batch_dim * encode_covariates
+        n_input_encoder = n_input + n_continuous_cov
+        if self.batch_representation == "embedding" and encode_covariates:
+            n_input_encoder += batch_dim
 
         # Encoder/decoder covariate composition (purpose-driven keys)
-        # Encoder sees: [concat_ambient] + [cat_covs...] + [library_size]
-        # ambient_covs and library_size are always injected (purpose-specific)
-        # cat_covs only if encode_covariates=True
+        # Encoder sees: only encoder_covs (from dedicated encoder_covariate_keys registry)
+        # Default: no encoder categoricals (matches scVI/MultiVI/PeakVI default)
         # Decoder sees: [cat_covs...] only (no batch injection by default)
-        _ambient_cats = [self.n_total_ambient_cats] if self.n_total_ambient_cats > 0 else []
+        encoder_cat_list = list(self.n_cats_per_encoder_cov) if self.n_cats_per_encoder_cov else None
         _cat_cats = list(n_cats_per_cov or [])
-        _lib_cats = [self.n_library_cats]
-        encoder_cat_list = _ambient_cats + (_cat_cats if encode_covariates else []) + _lib_cats
         _extra_encoder_kwargs = extra_encoder_kwargs or {}
         self.z_encoder = RegularizedEncoder(
             n_input_encoder,
@@ -486,7 +479,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 MODULE_KEYS.BATCH_INDEX_KEY: tensors[REGISTRY_KEYS.BATCH_KEY],
                 MODULE_KEYS.CONT_COVS_KEY: tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
                 MODULE_KEYS.CAT_COVS_KEY: tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
-                "ambient_covs": tensors.get(AMBIENT_COVS_KEY, None),
+                "encoder_covs": tensors.get(ENCODER_COVS_KEY, None),
                 "library_size_index": tensors.get(LIBRARY_SIZE_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
             }
         elif self.minified_data_type == ADATA_MINIFY_TYPE.LATENT_POSTERIOR:
@@ -512,7 +505,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             MODULE_KEYS.Z_KEY: inference_outputs[MODULE_KEYS.Z_KEY],
             MODULE_KEYS.LIBRARY_KEY: inference_outputs[MODULE_KEYS.LIBRARY_KEY],
             MODULE_KEYS.BATCH_INDEX_KEY: tensors[REGISTRY_KEYS.BATCH_KEY],
-            MODULE_KEYS.Y_KEY: tensors[REGISTRY_KEYS.LABELS_KEY],
             MODULE_KEYS.CONT_COVS_KEY: tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
             MODULE_KEYS.CAT_COVS_KEY: tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
             MODULE_KEYS.SIZE_FACTOR_KEY: size_factor,
@@ -552,7 +544,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         batch_index: torch.Tensor,
         cont_covs: torch.Tensor | None = None,
         cat_covs: torch.Tensor | None = None,
-        ambient_covs: torch.Tensor | None = None,
+        encoder_covs: torch.Tensor | None = None,
         library_size_index: torch.Tensor | None = None,
         n_samples: int = 1,
     ) -> dict[str, torch.Tensor | Distribution | None]:
@@ -563,28 +555,16 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         if self.log_variational:
             x_ = torch.log1p(x_)
 
-        if cont_covs is not None and self.encode_covariates:
+        if cont_covs is not None:
             encoder_input = torch.cat((x_, cont_covs), dim=-1)
         else:
             encoder_input = x_
 
-        # Build encoder categorical inputs: [concat_ambient] + [cat_covs...] + [library_size]
-        # ambient_covs and library_size are always injected (purpose-specific)
-        # cat_covs only if encode_covariates=True
+        # Build encoder categorical inputs from dedicated encoder_covariate_keys
+        # Default: no encoder categoricals (encoder_covs=None, matches scVI)
         encoder_categorical_input = ()
-        if ambient_covs is not None and self.n_cats_per_ambient_cov:
-            concat_ambient = torch.cat(
-                [
-                    one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float()
-                    for i, n_cats_i in enumerate(self.n_cats_per_ambient_cov)
-                ],
-                dim=-1,
-            )
-            encoder_categorical_input += (concat_ambient,)
-        if cat_covs is not None and self.encode_covariates:
-            encoder_categorical_input += torch.split(cat_covs, 1, dim=1)
-        _lib_idx = library_size_index if library_size_index is not None else batch_index
-        encoder_categorical_input += (_lib_idx.long(),)
+        if encoder_covs is not None and self.n_cats_per_encoder_cov:
+            encoder_categorical_input += torch.split(encoder_covs, 1, dim=1)
 
         if self.batch_representation == "embedding" and self.encode_covariates:
             batch_rep = self.compute_embedding(REGISTRY_KEYS.BATCH_KEY, batch_index)
@@ -651,7 +631,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         cont_covs: torch.Tensor | None = None,
         cat_covs: torch.Tensor | None = None,
         size_factor: torch.Tensor | None = None,
-        y: torch.Tensor | None = None,
         transform_batch: torch.Tensor | None = None,
         ambient_covs: torch.Tensor | None = None,
         feature_scaling_covs: torch.Tensor | None = None,
@@ -702,7 +681,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                     decoder_input,
                     size_factor,
                     *categorical_input,
-                    y,
                     additive_background=bg,
                 )
             else:
@@ -712,7 +690,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                     size_factor,
                     batch_index,
                     *categorical_input,
-                    y,
                     additive_background=bg,
                 )
         else:
@@ -722,15 +699,10 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 decoder_input,
                 size_factor,
                 *categorical_input,
-                y,
                 additive_background=bg,
             )
 
-        if self.dispersion == "gene-label":
-            px_r = linear(
-                one_hot(y.squeeze(-1), self.n_labels).float(), self.px_r
-            )  # px_r gets transposed - last dimension is nb genes
-        elif self.dispersion == "gene-batch":
+        if self.dispersion == "gene-batch":
             _disp_idx = dispersion_index if dispersion_index is not None else batch_index
             px_r = linear(one_hot(_disp_idx.squeeze(-1).long(), self.n_dispersion_cats).float(), self.px_r)
         elif self.dispersion == "gene":
@@ -739,19 +711,20 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         px_r = torch.exp(px_r)
 
         # Feature scaling (cell2location-style per-covariate multiplicative scaling)
-        fs_transformed = torch.nn.functional.softplus(self.feature_scaling) / 0.7
-        if feature_scaling_covs is not None and self.n_total_feature_scaling_cats > 0:
-            feature_scaling_indicator = torch.cat(
-                [
-                    one_hot(feature_scaling_covs[:, i].long(), int(n)).float()
-                    for i, n in enumerate(self.n_cats_per_feature_scaling_cov)
-                ],
-                dim=-1,
-            )
-            scaling = torch.matmul(feature_scaling_indicator, fs_transformed)
-        else:
-            scaling = fs_transformed  # (1, n_genes) broadcasts
-        px_rate = px_rate * scaling
+        if self.use_feature_scaling:
+            fs_transformed = torch.nn.functional.softplus(self.feature_scaling) / 0.7
+            if feature_scaling_covs is not None and self.n_total_feature_scaling_cats > 0:
+                feature_scaling_indicator = torch.cat(
+                    [
+                        one_hot(feature_scaling_covs[:, i].long(), int(n)).float()
+                        for i, n in enumerate(self.n_cats_per_feature_scaling_cov)
+                    ],
+                    dim=-1,
+                )
+                scaling = torch.matmul(feature_scaling_indicator, fs_transformed)
+            else:
+                scaling = fs_transformed  # (1, n_genes) broadcasts
+            px_rate = px_rate * scaling
 
         # GammaPoisson (= NB): concentration=theta, rate=theta/mu
         px = GammaPoissonWithScale(concentration=px_r, rate=px_r / px_rate, scale=px_scale)
@@ -855,21 +828,21 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             loss = loss + bg_penalty / n_obs
 
         # Feature scaling Gamma prior (cell2location-style)
-        from torch.distributions import Gamma
+        if self.use_feature_scaling:
+            from torch.distributions import Gamma
 
-        n_obs = x.shape[0]
-        fs_transformed = torch.nn.functional.softplus(self.feature_scaling) / 0.7
-        fs_penalty = (
-            -Gamma(self.feature_scaling_prior_alpha, self.feature_scaling_prior_beta).log_prob(fs_transformed).sum()
-        )
-        loss = loss + fs_penalty / n_obs
+            n_obs = x.shape[0]
+            fs_transformed = torch.nn.functional.softplus(self.feature_scaling) / 0.7
+            fs_penalty = (
+                -Gamma(self.feature_scaling_prior_alpha, self.feature_scaling_prior_beta).log_prob(fs_transformed).sum()
+            )
+            loss = loss + fs_penalty / n_obs
 
         # a payload to be used during autotune
         if self.extra_payload_autotune:
             extra_metrics_payload = {
                 "z": inference_outputs["z"],
                 "batch": tensors[REGISTRY_KEYS.BATCH_KEY],
-                "labels": tensors[REGISTRY_KEYS.LABELS_KEY],
             }
         else:
             extra_metrics_payload = {}

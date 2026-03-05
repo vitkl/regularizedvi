@@ -41,6 +41,7 @@ DEFAULT_REGULARISE_BACKGROUND = True
 # High alpha (200) gives tight prior: factors stay near 1 unless data demands otherwise.
 DEFAULT_FEATURE_SCALING_PRIOR_ALPHA = 200.0
 DEFAULT_FEATURE_SCALING_PRIOR_BETA = 200.0
+DEFAULT_USE_FEATURE_SCALING = True
 
 # Registry key for feature scaling covariates (separate from encoder/decoder covariates)
 FEATURE_SCALING_COVS_KEY = "feature_scaling_covs"
@@ -53,6 +54,9 @@ DISPERSION_KEY = "dispersion_cov"
 
 # Registry key for library size covariate (controls N(mu_s, sigma_s) prior, separate from batch_key)
 LIBRARY_SIZE_KEY = "library_size_cov"
+
+# Registry key for encoder covariates (controls what categoricals the encoder sees)
+ENCODER_COVS_KEY = "encoder_covs"
 
 # --- Network architecture ---
 DEFAULT_USE_BATCH_NORM = "none"

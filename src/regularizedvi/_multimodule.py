@@ -33,6 +33,7 @@ from regularizedvi._constants import (
     AMBIENT_COVS_KEY,
     DEFAULT_COMPUTE_PEARSON,
     DISPERSION_KEY,
+    ENCODER_COVS_KEY,
     FEATURE_SCALING_COVS_KEY,
     LIBRARY_SIZE_KEY,
 )
@@ -89,8 +90,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         Dict mapping modality name to number of input features.
     n_batch
         Number of batches.
-    n_labels
-        Number of labels.
     n_hidden
         Number of hidden units per modality. Scalar (shared) or dict per modality.
     n_latent
@@ -168,7 +167,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         modality_names: list[str],
         n_input_per_modality: dict[str, int],
         n_batch: int = 0,
-        n_labels: int = 0,
         n_hidden: dict[str, int] | int = 128,
         n_latent: dict[str, int] | int = 10,
         n_layers: dict[str, int] | int = 1,
@@ -208,6 +206,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         regularise_background: bool = True,
         # Ambient covariates (for additive background, decoupled from batch_key)
         n_cats_per_ambient_cov: list[int] | None = None,
+        # Encoder covariates (what categoricals the encoder sees, default=None → nothing)
+        n_cats_per_encoder_cov: list[int] | None = None,
         # Dispersion covariate (controls per-group px_r, decoupled from batch_key)
         n_dispersion_cats: int | None = None,
         # Library size covariate (controls per-group library prior, decoupled from batch_key)
@@ -224,7 +224,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.n_modalities = len(self.modality_names)
         self.n_input_per_modality = n_input_per_modality
         self.n_batch = n_batch
-        self.n_labels = n_labels
         self.log_variational = log_variational
         self.latent_mode = latent_mode
         self.modality_weights_mode = modality_weights
@@ -281,14 +280,16 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         use_layer_norm_decoder = use_layer_norm in ("decoder", "both")
 
         # Encoder/decoder covariate composition (purpose-driven keys)
-        # Encoder sees: [concat_ambient] + [cat_covs...] + [library_size]
+        # Encoder sees: only encoder_covs (from dedicated encoder_covariate_keys registry)
+        # Default: no encoder categoricals (matches scVI/MultiVI/PeakVI default)
         # Decoder sees: [cat_covs...] only (no batch injection by default)
         n_total_ambient_cats = sum(int(c) for c in n_cats_per_ambient_cov) if n_cats_per_ambient_cov else 0
-        _ambient_cats = [n_total_ambient_cats] if n_total_ambient_cats > 0 else []
+        self.n_cats_per_encoder_cov = list(n_cats_per_encoder_cov) if n_cats_per_encoder_cov else []
+        self.n_total_encoder_cats = (
+            sum(int(c) for c in self.n_cats_per_encoder_cov) if self.n_cats_per_encoder_cov else 0
+        )
+        encoder_cat_list = list(self.n_cats_per_encoder_cov) if self.n_cats_per_encoder_cov else None
         _cat_cats = list(n_cats_per_cov or [])
-        _lib_cats = [n_library_cats if n_library_cats is not None else n_batch]
-        encoder_cat_list = _ambient_cats + _cat_cats + _lib_cats
-        encoder_cat_list = encoder_cat_list if encode_covariates else None
 
         if not use_batch_in_decoder:
             decoder_cat_list = _cat_cats
@@ -319,7 +320,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # ---- Per-modality encoders ----
         self.encoders = nn.ModuleDict()
         for name in self.modality_names:
-            n_in = n_input_per_modality[name] + n_continuous_cov * encode_covariates
+            n_in = n_input_per_modality[name] + n_continuous_cov
             self.encoders[name] = RegularizedEncoder(
                 n_input=n_in,
                 n_output=n_latent_dict[name],
@@ -337,7 +338,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         # ---- Single encoder (for single_encoder mode) ----
         if latent_mode == "single_encoder":
-            total_input = sum(n_input_per_modality.values()) + n_continuous_cov * encode_covariates
+            total_input = sum(n_input_per_modality.values()) + n_continuous_cov
             # Use max n_hidden across modalities for single encoder
             max_n_hidden = max(n_hidden_dict.values())
             max_n_layers = max(n_layers_dict.values())
@@ -383,7 +384,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # ---- Per-modality library encoders (variational, low-capacity) ----
         self.l_encoders = nn.ModuleDict()
         for name in self.modality_names:
-            n_in = n_input_per_modality[name] + n_continuous_cov * encode_covariates
+            n_in = n_input_per_modality[name] + n_continuous_cov
             self.l_encoders[name] = RegularizedEncoder(
                 n_input=n_in,
                 n_output=1,
@@ -436,13 +437,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     )
                 else:
                     self.px_r[name] = nn.Parameter(torch.randn(n_feat, n_disp))
-            elif disp in ("gene-label", "region-label"):
-                if _px_r_init is not None:
-                    self.px_r[name] = nn.Parameter(
-                        torch.full((n_feat, n_labels), _px_r_init) + 0.1 * torch.randn(n_feat, n_labels)
-                    )
-                else:
-                    self.px_r[name] = nn.Parameter(torch.randn(n_feat, n_labels))
 
         # ---- Learnable dispersion prior rates (per modality) ----
         if self.regularise_dispersion:
@@ -454,8 +448,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     self.dispersion_prior_rate_raw[name] = nn.Parameter(
                         _raw_init.expand(self.n_dispersion_cats).clone()
                     )
-                elif disp in ("gene-label", "region-label"):
-                    self.dispersion_prior_rate_raw[name] = nn.Parameter(_raw_init.expand(n_labels).clone())
                 else:
                     self.dispersion_prior_rate_raw[name] = nn.Parameter(_raw_init.unsqueeze(0).clone())
 
@@ -498,7 +490,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             "batch_index": tensors[REGISTRY_KEYS.BATCH_KEY],
             "cont_covs": tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None),
             "cat_covs": tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None),
-            "ambient_covs": tensors.get(AMBIENT_COVS_KEY, None),
+            "encoder_covs": tensors.get(ENCODER_COVS_KEY, None),
             "library_size_index": tensors.get(LIBRARY_SIZE_KEY, tensors[REGISTRY_KEYS.BATCH_KEY]),
         }
         for name in self.modality_names:
@@ -530,7 +522,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         batch_index: torch.Tensor,
         cont_covs: torch.Tensor | None = None,
         cat_covs: torch.Tensor | None = None,
-        ambient_covs: torch.Tensor | None = None,
+        encoder_covs: torch.Tensor | None = None,
         library_size_index: torch.Tensor | None = None,
         n_samples: int = 1,
         **modality_inputs,
@@ -544,34 +536,20 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         cont_covs
             Continuous covariates.
         cat_covs
-            Categorical covariates (encoder/decoder injection).
-        ambient_covs
-            Ambient covariate indices (for encoder injection).
+            Categorical covariates (decoder injection only).
+        encoder_covs
+            Encoder covariate indices (from dedicated encoder_covariate_keys).
         library_size_index
-            Library size group index (for encoder injection).
+            Library size group index (unused, kept for API compat).
         n_samples
             Number of samples from posterior.
         **modality_inputs
             Per-modality inputs as x_{modality_name} tensors.
         """
-        # Build encoder categorical inputs: [concat_ambient] + [cat_covs...] + [library_size]
-        from torch.nn.functional import one_hot
-
+        # Build encoder categorical inputs from dedicated encoder_covariate_keys
         encoder_categorical_input = ()
-        if self.encode_covariates:
-            if ambient_covs is not None and self.n_cats_per_ambient_cov:
-                concat_ambient = torch.cat(
-                    [
-                        one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float()
-                        for i, n_cats_i in enumerate(self.n_cats_per_ambient_cov)
-                    ],
-                    dim=-1,
-                )
-                encoder_categorical_input += (concat_ambient,)
-            if cat_covs is not None:
-                encoder_categorical_input += torch.split(cat_covs, 1, dim=1)
-            _lib_idx = library_size_index if library_size_index is not None else batch_index
-            encoder_categorical_input += (_lib_idx,)
+        if encoder_covs is not None and self.n_cats_per_encoder_cov:
+            encoder_categorical_input += torch.split(encoder_covs, 1, dim=1)
 
         # Detect which modalities are present per cell (for masking)
         masks = {}
@@ -599,7 +577,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     )
                 if self.log_variational:
                     x = torch.log1p(x)
-                if cont_covs is not None and self.encode_covariates:
+                if cont_covs is not None:
                     x = torch.cat([x, cont_covs], dim=-1)
                 inputs.append(x)
             joint_input = torch.cat(inputs, dim=-1)
@@ -613,7 +591,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 if x is None:
                     continue
                 x_ = torch.log1p(x) if self.log_variational else x
-                if cont_covs is not None and self.encode_covariates:
+                if cont_covs is not None:
                     x_ = torch.cat([x_, cont_covs], dim=-1)
                 qz, z = self.encoders[name](x_, *encoder_categorical_input)
                 qz_per_modality[name] = qz
@@ -651,7 +629,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             if x is None:
                 continue
             x_ = torch.log1p(x) if self.log_variational else x
-            if cont_covs is not None and self.encode_covariates:
+            if cont_covs is not None:
                 x_ = torch.cat([x_, cont_covs], dim=-1)
             ql, lib = self.l_encoders[name](x_, *encoder_categorical_input)
             library[name] = lib
@@ -805,11 +783,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             if disp in ("gene-batch", "region-batch"):
                 px_r = torch.nn.functional.linear(
                     one_hot(_disp_idx.squeeze(-1).long(), self.n_dispersion_cats).float(),
-                    self.px_r[name],
-                )
-            elif disp in ("gene-label", "region-label"):
-                px_r = torch.nn.functional.linear(
-                    one_hot(batch_index.squeeze(-1), self.n_labels).float(),
                     self.px_r[name],
                 )
             elif disp in ("gene-cell", "region-cell"):

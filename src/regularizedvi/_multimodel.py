@@ -47,6 +47,7 @@ from regularizedvi._constants import (
     DEFAULT_USE_BATCH_NORM,
     DEFAULT_USE_LAYER_NORM,
     DISPERSION_KEY,
+    ENCODER_COVS_KEY,
     FEATURE_SCALING_COVS_KEY,
     LIBRARY_SIZE_KEY,
 )
@@ -287,7 +288,6 @@ class RegularizedMultimodalVI(
     def _init_module(self, modality_names: list[str]):
         """Initialize the module with data-dependent parameters."""
         n_batch = self.summary_stats.n_batch
-        n_labels = self.summary_stats.get("n_labels", 1)
 
         # Get n_input per modality from summary stats
         # MuDataLayerField stores n_vars as n_X_{name} in summary_stats
@@ -357,6 +357,10 @@ class RegularizedMultimodalVI(
         if DISPERSION_KEY in self.adata_manager.data_registry:
             n_dispersion_cats = len(self.adata_manager.get_state_registry(DISPERSION_KEY).categorical_mapping)
 
+        n_cats_per_encoder_cov = None
+        if ENCODER_COVS_KEY in self.adata_manager.data_registry:
+            n_cats_per_encoder_cov = self.adata_manager.get_state_registry(ENCODER_COVS_KEY).n_cats_per_key
+
         kwargs = dict(self._module_kwargs)
         # Remove keys that are passed separately
         for k in ["n_hidden", "n_latent", "n_layers", "dropout_rate"]:
@@ -366,7 +370,6 @@ class RegularizedMultimodalVI(
             modality_names=modality_names,
             n_input_per_modality=n_input_per_modality,
             n_batch=n_batch,
-            n_labels=n_labels,
             n_hidden=self._module_kwargs["n_hidden"],
             n_latent=self._module_kwargs["n_latent"],
             n_layers=self._module_kwargs["n_layers"],
@@ -377,6 +380,7 @@ class RegularizedMultimodalVI(
             library_log_vars=library_log_vars,
             n_cats_per_feature_scaling_cov=n_cats_per_feature_scaling_cov,
             n_cats_per_ambient_cov=n_cats_per_ambient_cov,
+            n_cats_per_encoder_cov=n_cats_per_encoder_cov,
             n_dispersion_cats=n_dispersion_cats,
             n_library_cats=n_library_cats,
             **kwargs,
@@ -395,6 +399,7 @@ class RegularizedMultimodalVI(
         nn_conditioning_covariate_keys: list[str] | None = None,
         nn_continuous_covariate_keys: list[str] | None = None,
         feature_scaling_covariate_keys: list[str] | None = None,
+        encoder_covariate_keys: list[str] | None | bool = False,
         **kwargs,
     ):
         """Set up MuData for RegularizedMultimodalVI.
@@ -427,8 +432,8 @@ class RegularizedMultimodalVI(
             If None and ``batch_key`` is provided, defaults to ``batch_key``.
         nn_conditioning_covariate_keys
             keys in ``adata.obs`` that correspond to categorical data.
-            One-hot encoded and fed into the encoder (if ``encode_covariates=True``)
-            and decoder neural networks as conditioning input.
+            One-hot encoded and fed into the decoder neural network as
+            conditioning input.
         nn_continuous_covariate_keys
             keys in ``adata.obs`` that correspond to continuous data.
             Fed into the encoder and decoder neural networks as conditioning input.
@@ -438,7 +443,29 @@ class RegularizedMultimodalVI(
             Registered separately from ``nn_conditioning_covariate_keys`` — these
             do NOT feed into encoder/decoder injection layers, they only
             control the per-feature multiplicative feature scaling.
+        encoder_covariate_keys
+            Categorical ``.obs`` keys to inject into the encoder as one-hot
+            covariates. Default is ``False`` (no encoder categoricals), which
+            matches standard scVI/MultiVI/PeakVI behavior and keeps the latent
+            space batch-free. Setting this to a list or ``None`` is non-standard
+            and may leak batch information into the latent space.
         """
+        # Encoder covariates: False = no encoder categoricals (default, matches scVI)
+        _encoder_cov_keys = None  # None → empty CategoricalJointObsField
+        if encoder_covariate_keys is not False:
+            import warnings as _warn
+
+            _warn.warn(
+                "encoder_covariate_keys is set to a non-default value. "
+                "Injecting categorical covariates into the encoder is non-standard "
+                "(scVI, MultiVI, PeakVI all default to no encoder categoricals) "
+                "and may leak batch information into the latent space, hurting "
+                "batch correction. Use with caution.",
+                UserWarning,
+                stacklevel=2,
+            )
+            _encoder_cov_keys = encoder_covariate_keys  # list[str] or None
+
         setup_method_args = cls._get_setup_method_args(**locals())
 
         if modalities is None:
@@ -538,6 +565,16 @@ class RegularizedMultimodalVI(
                 fields.MuDataCategoricalJointObsField(
                     FEATURE_SCALING_COVS_KEY,
                     feature_scaling_covariate_keys,
+                    mod_key=list(modalities.values())[0],
+                )
+            )
+
+        # Encoder covariates (dedicated key, default=None → no encoder categoricals)
+        if _encoder_cov_keys:
+            anndata_fields.append(
+                fields.MuDataCategoricalJointObsField(
+                    ENCODER_COVS_KEY,
+                    _encoder_cov_keys,
                     mod_key=list(modalities.values())[0],
                 )
             )
@@ -1374,6 +1411,65 @@ class RegularizedMultimodalVI(
                 offset += n
 
         return attribution, fig
+
+    def plot_attribution_scatter(
+        self,
+        adata,
+        basis: str = "X_umap_joint",
+        figsize_per_panel: tuple[float, float] = (5, 5),
+        size: float = 2,
+        **kwargs,
+    ) -> matplotlib.figure.Figure:
+        """Plot per-cell attribution values on UMAP.
+
+        Requires :meth:`store_attribution_results` to have been called first.
+        Shows one panel per modality (total_attr) plus log2 ratio for 2-modality case.
+
+        Parameters
+        ----------
+        adata
+            AnnData with attribution columns in ``.obs``.
+        basis
+            Embedding key in ``adata.obsm`` to use as coordinates.
+        figsize_per_panel
+            Size per panel.
+        size
+            Point size.
+        **kwargs
+            Passed to ``sc.pl.embedding``.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        import scanpy as sc
+
+        names = self.module.modality_names
+        color_keys = [f"{name}_decoder_total_attr" for name in names]
+        # Check required columns exist
+        for key in color_keys:
+            if key not in adata.obs:
+                raise ValueError(f"{key!r} not found in adata.obs. Call store_attribution_results() first.")
+
+        # Add log2 ratio panel for 2-modality case
+        has_ratio = len(names) == 2 and f"log2_{names[0]}_vs_{names[1]}_attr" in adata.obs
+        if has_ratio:
+            color_keys.append(f"log2_{names[0]}_vs_{names[1]}_attr")
+
+        n_panels = len(color_keys)
+        fig, axes = plt.subplots(1, n_panels, figsize=(figsize_per_panel[0] * n_panels, figsize_per_panel[1]))
+        if n_panels == 1:
+            axes = [axes]
+
+        for ax, key in zip(axes, color_keys, strict=False):
+            plot_kwargs = {"size": size, "show": False, "ax": ax, **kwargs}
+            if "log2_" in key:
+                plot_kwargs.setdefault("vcenter", 0)
+                plot_kwargs.setdefault("cmap", "RdBu_r")
+            sc.pl.embedding(adata, basis=basis, color=key, **plot_kwargs)
+
+        fig.tight_layout()
+        return fig
 
     def plot_umap_comparison(
         self,

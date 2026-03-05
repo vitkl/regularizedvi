@@ -62,8 +62,10 @@ from regularizedvi._constants import (
     DEFAULT_USE_ADDITIVE_BACKGROUND,
     DEFAULT_USE_BATCH_IN_DECODER,
     DEFAULT_USE_BATCH_NORM,
+    DEFAULT_USE_FEATURE_SCALING,
     DEFAULT_USE_LAYER_NORM,
     DISPERSION_KEY,
+    ENCODER_COVS_KEY,
     FEATURE_SCALING_COVS_KEY,
     LIBRARY_SIZE_KEY,
 )
@@ -198,7 +200,7 @@ class AmbientRegularizedSCVI(
         n_latent: int = 10,
         n_layers: int = 1,
         dropout_rate: float = 0.1,
-        dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = DEFAULT_DISPERSION,
+        dispersion: Literal["gene", "gene-batch", "gene-cell"] = DEFAULT_DISPERSION,
         gene_likelihood: Literal["zinb", "nb", "poisson", "normal"] = DEFAULT_GENE_LIKELIHOOD,
         latent_distribution: Literal["normal", "ln"] = "normal",
         # regularizedvi defaults (from _constants.py)
@@ -214,6 +216,7 @@ class AmbientRegularizedSCVI(
         additive_bg_prior_alpha: float = DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
         additive_bg_prior_beta: float = DEFAULT_ADDITIVE_BG_PRIOR_BETA,
         regularise_background: bool = DEFAULT_REGULARISE_BACKGROUND,
+        use_feature_scaling: bool = DEFAULT_USE_FEATURE_SCALING,
         feature_scaling_prior_alpha: float = DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
         feature_scaling_prior_beta: float = DEFAULT_FEATURE_SCALING_PRIOR_BETA,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_BATCH_NORM,
@@ -226,6 +229,7 @@ class AmbientRegularizedSCVI(
             use_batch_in_decoder=use_batch_in_decoder,
             regularise_dispersion=regularise_dispersion,
             regularise_background=regularise_background,
+            use_feature_scaling=use_feature_scaling,
             compute_pearson=compute_pearson,
         )
         super().__init__(adata)
@@ -252,6 +256,7 @@ class AmbientRegularizedSCVI(
             "additive_bg_prior_alpha": additive_bg_prior_alpha,
             "additive_bg_prior_beta": additive_bg_prior_beta,
             "regularise_background": regularise_background,
+            "use_feature_scaling": use_feature_scaling,
             "feature_scaling_prior_alpha": feature_scaling_prior_alpha,
             "feature_scaling_prior_beta": feature_scaling_prior_beta,
             "compute_pearson": compute_pearson,
@@ -289,6 +294,11 @@ class AmbientRegularizedSCVI(
             n_cats_per_feature_scaling_cov = (
                 self.adata_manager.get_state_registry(FEATURE_SCALING_COVS_KEY).n_cats_per_key
                 if FEATURE_SCALING_COVS_KEY in self.adata_manager.data_registry
+                else None
+            )
+            n_cats_per_encoder_cov = (
+                self.adata_manager.get_state_registry(ENCODER_COVS_KEY).n_cats_per_key
+                if ENCODER_COVS_KEY in self.adata_manager.data_registry
                 else None
             )
             n_dispersion_cats = (
@@ -337,11 +347,11 @@ class AmbientRegularizedSCVI(
             self.module = self._module_cls(
                 n_input=self.summary_stats.n_vars,
                 n_batch=n_batch,
-                n_labels=self.summary_stats.n_labels,
                 n_continuous_cov=self.summary_stats.get("n_extra_continuous_covs", 0),
                 n_cats_per_cov=n_cats_per_cov,
                 n_cats_per_ambient_cov=n_cats_per_ambient_cov,
                 n_cats_per_feature_scaling_cov=n_cats_per_feature_scaling_cov,
+                n_cats_per_encoder_cov=n_cats_per_encoder_cov,
                 n_dispersion_cats=n_dispersion_cats,
                 n_library_cats=n_library_cats,
                 n_hidden=n_hidden,
@@ -369,6 +379,7 @@ class AmbientRegularizedSCVI(
                 additive_bg_prior_alpha=additive_bg_prior_alpha,
                 additive_bg_prior_beta=additive_bg_prior_beta,
                 regularise_background=regularise_background,
+                use_feature_scaling=use_feature_scaling,
                 feature_scaling_prior_alpha=feature_scaling_prior_alpha,
                 feature_scaling_prior_beta=feature_scaling_prior_beta,
                 compute_pearson=compute_pearson,
@@ -432,7 +443,6 @@ class AmbientRegularizedSCVI(
         adata: AnnData,
         layer: str | None = None,
         batch_key: str | None = None,
-        labels_key: str | None = None,
         size_factor_key: str | None = None,
         nn_conditioning_covariate_keys: list[str] | None = None,
         nn_continuous_covariate_keys: list[str] | None = None,
@@ -440,6 +450,7 @@ class AmbientRegularizedSCVI(
         dispersion_key: str | None = None,
         library_size_key: str | None = None,
         feature_scaling_covariate_keys: list[str] | None = None,
+        encoder_covariate_keys: list[str] | None | bool = False,
         **kwargs,
     ):
         """%(summary)s.
@@ -449,12 +460,11 @@ class AmbientRegularizedSCVI(
         %(param_adata)s
         %(param_layer)s
         %(param_batch_key)s
-        %(param_labels_key)s
         %(param_size_factor_key)s
         nn_conditioning_covariate_keys
             keys in ``adata.obs`` that correspond to categorical data.
-            One-hot encoded and fed into the encoder (if ``encode_covariates=True``)
-            and decoder neural networks as conditioning input.
+            One-hot encoded and fed into the decoder neural network as
+            conditioning input.
         nn_continuous_covariate_keys
             keys in ``adata.obs`` that correspond to continuous data.
             Fed into the encoder and decoder neural networks as conditioning input.
@@ -483,6 +493,12 @@ class AmbientRegularizedSCVI(
             via one-hot indicator matmul. If None and
             ``nn_conditioning_covariate_keys`` is provided, defaults to the
             same keys.
+        encoder_covariate_keys
+            Categorical ``.obs`` keys to inject into the encoder as one-hot
+            covariates. Default is ``False`` (no encoder categoricals), which
+            matches standard scVI/MultiVI/PeakVI behavior and keeps the latent
+            space batch-free. Setting this to a list or ``None`` is non-standard
+            and may leak batch information into the latent space.
         """
         # Mutual exclusion: batch_key cannot be combined with purpose-specific keys
         if batch_key is not None and any([ambient_covariate_keys, dispersion_key, library_size_key]):
@@ -524,11 +540,26 @@ class AmbientRegularizedSCVI(
                 "batch_key is used as the default library size grouping."
             )
 
+        # Encoder covariates: False = no encoder categoricals (default, matches scVI)
+        _encoder_cov_keys = None  # None → empty CategoricalJointObsField
+        if encoder_covariate_keys is not False:
+            import warnings as _warn
+
+            _warn.warn(
+                "encoder_covariate_keys is set to a non-default value. "
+                "Injecting categorical covariates into the encoder is non-standard "
+                "(scVI, MultiVI, PeakVI all default to no encoder categoricals) "
+                "and may leak batch information into the latent space, hurting "
+                "batch correction. Use with caution.",
+                UserWarning,
+                stacklevel=2,
+            )
+            _encoder_cov_keys = encoder_covariate_keys  # list[str] or None
+
         setup_method_args = cls._get_setup_method_args(**locals())
         anndata_fields = [
             LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
-            CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, labels_key),
             NumericalObsField(REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False),
             CategoricalJointObsField(REGISTRY_KEYS.CAT_COVS_KEY, nn_conditioning_covariate_keys),
             NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, nn_continuous_covariate_keys),
@@ -536,6 +567,7 @@ class AmbientRegularizedSCVI(
             CategoricalObsField(DISPERSION_KEY, dispersion_key),
             CategoricalObsField(LIBRARY_SIZE_KEY, library_size_key),
             CategoricalJointObsField(FEATURE_SCALING_COVS_KEY, feature_scaling_covariate_keys),
+            CategoricalJointObsField(ENCODER_COVS_KEY, _encoder_cov_keys),
         ]
         # register new fields if the adata is minified
         adata_minify_type = _get_adata_minify_type(adata)
