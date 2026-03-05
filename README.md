@@ -36,33 +36,42 @@ The inference model uses amortised variational inference to fit all cell specifi
 
 **regularizedvi** adapts [cell2location](https://doi.org/10.1038/s41587-021-01139-4)/[cell2fate](https://doi.org/10.1038/s41592-025-02608-3) modelling principles to scVI. All learnable parameters are initialised at their prior means to improve training stability.
 
-**Latent variable and library size** — standard scVI structure with a constrained library prior. Library prior parameters $\ell\_p^{\mu}$, $\ell\_p^{\sigma^2}$ are computed per `library_size_key` group $p$ (one key, [`_module.py:270–275`](src/regularizedvi/_module.py#L270-L275)):
+**Latent variable and library size** — standard scVI structure with a constrained library prior. Library prior parameters $\ell\_p^{\mu}$, $\ell\_p^{\sigma^2}$ are computed per `library_size_key` group $p$ (one key, [`_module.py:291–300`](src/regularizedvi/_module.py#L291-L300)):
 
 $$z_n \sim \text{Normal}(0, I)$$
 $$\ell_n \sim \text{LogNormal}(\ell_p^{\mu},\; 0.05 \cdot \ell_p^{\sigma^2})$$
 
-**Decoder output** — batch-free decoder maps $z\_n$ and categorical covariates $c\_{k,n}$ (not ambient/library covariates) to non-negative gene expression via softplus. Categorical covariates are selected by `nn_conditioning_covariate_keys` (many keys, [`_module.py:654–685`](src/regularizedvi/_module.py#L654-L685), [`_components.py:461–462`](src/regularizedvi/_components.py#L461-L462)):
+**Decoder output** — batch-free decoder maps $z\_n$ and categorical covariates $c\_{k,n}$ (not ambient/library covariates) to non-negative gene expression via softplus. Categorical covariates are selected by `nn_conditioning_covariate_keys` (many keys, [`_module.py:674–703`](src/regularizedvi/_module.py#L674-L703), [`_components.py:461–462`](src/regularizedvi/_components.py#L461-L462)):
 
 $$\rho_{ng} = \text{softplus}\big(f_w(z_n, c_{k,n})\big) \in \mathbb{R}_{\geq 0}^G$$
 
-**Additive background** — per-gene ambient RNA with Gamma prior pushing $s\_{e,g}$ toward 0.01. Background parameters are indexed by `ambient_covariate_keys` (many keys, concatenated one-hot, [`_module.py:336–341`](src/regularizedvi/_module.py#L336-L341) init, [`_module.py:641–651`](src/regularizedvi/_module.py#L641-L651) one-hot selection, [`_module.py:790–798`](src/regularizedvi/_module.py#L790-L798) prior penalty):
+**Additive background** — per-gene ambient RNA with Gamma prior pushing $s\_{e,g}$ toward 0.01. Background parameters are indexed by `ambient_covariate_keys` (many keys, concatenated one-hot, [`_module.py:350–363`](src/regularizedvi/_module.py#L350-L363) init, [`_module.py:662–672`](src/regularizedvi/_module.py#L662-L672) one-hot selection, [`_module.py:818–828`](src/regularizedvi/_module.py#L818-L828) prior penalty):
 
 $$s_{e,g} = \exp(\beta_{e,g}), \qquad s_{e,g} \sim \text{Gamma}(1,\, 100)$$
 
-**Hierarchical dispersion prior** — two-level prior on inverse dispersion $\theta\_{g,d} = \exp(\phi\_{g,d})$ where `px_r` stores $\phi$. Dispersion groups $d$ are selected by `dispersion_key` (one key). A learned rate $\lambda\_d$ adapts regularisation strength per group ([`_module.py:750–786`](src/regularizedvi/_module.py#L750-L786) full block, [`_module.py:762`](src/regularizedvi/_module.py#L762) Level 1 softplus, [`_module.py:784–785`](src/regularizedvi/_module.py#L784-L785) Level 2 transform):
+**Feature scaling** — per-gene, per-covariate multiplicative scaling capturing systematic biases (e.g. PCR amplification, RT efficiency differences between protocols). Parameterised as $\text{softplus}(\gamma)/0.7$ with a tight Gamma prior centered at 1.0. Scaling covariates $t$ are selected by `feature_scaling_covariate_keys` (many keys); each covariate category gets its own scaling factor. When no scaling covariates are provided, a single $(1, G)$ fallback parameter is created ([`_module.py:365–377`](src/regularizedvi/_module.py#L365-L377) init, [`_module.py:714–727`](src/regularizedvi/_module.py#L714-L727) application, [`_module.py:830–839`](src/regularizedvi/_module.py#L830-L839) prior penalty):
+
+$$y_{t,g} = \text{softplus}(\gamma_{t,g})\,/\,0.7, \qquad y_{t,g} \sim \text{Gamma}(200,\, 200)$$
+
+**Hierarchical dispersion prior** — two-level prior on inverse dispersion $\theta\_{g,d} = \exp(\phi\_{g,d})$ where `px_r` stores $\phi$. Dispersion groups $d$ are selected by `dispersion_key` (one key). A learned rate $\lambda\_d$ adapts regularisation strength per group ([`_module.py:780–816`](src/regularizedvi/_module.py#L780-L816) full block, [`_module.py:792`](src/regularizedvi/_module.py#L792) Level 1 softplus, [`_module.py:813–815`](src/regularizedvi/_module.py#L813-L815) Level 2 transform):
 
 $$\lambda_d \sim \text{Gamma}(9,\, 3), \qquad 1/\sqrt{\theta_{g,d}} \sim \text{Exponential}(\lambda_d)$$
 
-**Observation model** — GammaPoisson (= negative binomial) with mean $\mu\_{ng} = \ell\_n \cdot (\rho\_{ng} + s\_{e\_n,g})$ ([`_components.py:467`](src/regularizedvi/_components.py#L467) rate computation):
+**Expected mean counts** — decoder output plus optional background, scaled by library size and feature scaling ([`_components.py:467`](src/regularizedvi/_components.py#L467) base rate, [`_module.py:714–727`](src/regularizedvi/_module.py#L714-L727) feature scaling):
 
-$$x_{ng} \sim \text{GammaPoisson}\Big(\text{concentration} = \theta_{g,d_n},\;\; \text{rate} = \frac{\theta_{g,d_n}}{\ell_n \cdot \big(\rho_{ng} + s_{e_n,g}\big)}\Big)$$
+$$\mu_{ng} = \ell_n \cdot \big(\rho_{ng} + s_{e_n,g}\big) \cdot y_{t_n,g}$$
+
+**Observation model** — GammaPoisson (= negative binomial) with mean $\mu\_{ng}$ and inverse dispersion $\theta\_{g,d}$:
+
+$$x_{ng} \sim \text{GammaPoisson}\Big(\text{concentration} = \theta_{g,d_n},\;\; \text{rate} = \frac{\theta_{g,d_n}}{\mu_{ng}}\Big)$$
 
 **Notation:**
 - $s\_{e,g} = \exp(\beta\_{e,g})$ — per-gene ambient background indexed by `ambient_covariate_keys` (many keys); $\beta$ is the unconstrained parameter (code: `additive_background`). When `batch_key` is used alone, $e$ = batch group.
-- $c\_{k,n}$ — categorical covariates (site, donor, etc.), selected by `nn_conditioning_covariate_keys` (many keys). Injected into encoder and decoder.
+- $c\_{k,n}$ — categorical covariates (site, donor, etc.), selected by `nn_conditioning_covariate_keys` (many keys). Injected into the decoder; optionally into the encoder via `encoder_covariate_keys`.
+- $y\_{t,g} = \text{softplus}(\gamma\_{t,g})/0.7$ — per-gene feature scaling indexed by `feature_scaling_covariate_keys` (many keys); tight $\text{Gamma}(200, 200)$ prior centered at 1.0
 - $\rho\_{ng} \in \mathbb{R}\_{\geq 0}^G$ — decoder output via softplus (not on the simplex), since $\rho\_{ng} + s\_{e,g}$ need not sum to 1
-- $\theta\_{g,d} = \exp(\phi\_{g,d})$ — inverse dispersion indexed by `dispersion_key` (one key); initialised at $\log(\lambda^2) \approx 2.2$ so $\theta \approx 9$ (equilibrium: $1/\sqrt{\theta} = 1/\lambda$) ([`_module.py:287–295`](src/regularizedvi/_module.py#L287-L295))
-- $\lambda\_d$ — learned Exponential rate, one per dispersion group; $\text{Gamma}(9, 3)$ hyper-prior has mean 3 ([`_module.py:314–323`](src/regularizedvi/_module.py#L314-L323))
+- $\theta\_{g,d} = \exp(\phi\_{g,d})$ — inverse dispersion indexed by `dispersion_key` (one key); initialised at $\log(\lambda^2) \approx 2.2$ so $\theta \approx 9$ (equilibrium: $1/\sqrt{\theta} = 1/\lambda$) ([`_module.py:302–320`](src/regularizedvi/_module.py#L302-L320))
+- $\lambda\_d$ — learned Exponential rate, one per dispersion group; $\text{Gamma}(9, 3)$ hyper-prior has mean 3 ([`_module.py:329–339`](src/regularizedvi/_module.py#L329-L339))
 - $\ell\_p^{\mu}$, $\ell\_p^{\sigma^2}$ — library prior mean and variance per `library_size_key` group $p$ (one key). $0.05$ scaling factor prevents library size from absorbing biological signal.
 - **Backward compat**: When `batch_key` is used alone, $e = d = p$ (all index the same batch groups) and $t = k$ (categorical and scaling covariates share groups).
 
@@ -85,27 +94,27 @@ where $d\_m$ is the latent dimensionality assigned to modality $m$ (e.g. `n_late
 
 The following equations describe how observed counts $x^{(m)}\_{nf}$ — UMIs for RNA, fragment counts for ATAC — are generated for cell $n$ and feature $f$ (gene or chromatin peak). All modalities share this structure; the optional terms in the mean $\mu^{(m)}\_{nf}$ are selectively activated per modality.
 
-**Library size** — always learned (observed totals include ambient contamination). A low-capacity encoder infers library size per cell, regularised by a tight LogNormal prior estimated per `library_size_key` group $p$ (one key, [`_multimodule.py:396–397`](src/regularizedvi/_multimodule.py#L396-L397) prior buffers, [`_multimodule.py:925–937`](src/regularizedvi/_multimodule.py#L925-L937) loss):
+**Library size** — always learned (observed totals include ambient contamination). A low-capacity encoder infers library size per cell, regularised by a tight LogNormal prior estimated per `library_size_key` group $p$ (one key, [`_multimodule.py:405–412`](src/regularizedvi/_multimodule.py#L405-L412) prior buffers, [`_multimodule.py:912–921`](src/regularizedvi/_multimodule.py#L912-L921) loss):
 
 $$\ell^{(m)}_n \sim \text{LogNormal}\big(\ell^{(m),\mu}_p,\; 0.05 \cdot \ell^{(m),\sigma^2}_p\big)$$
 
-**Decoder output** — maps joint latent code $z\_n$ and categorical covariates $c\_{k,n}$ (selected by `nn_conditioning_covariate_keys`, many keys) to non-negative feature signal via softplus ([`_multimodule.py:760–775`](src/regularizedvi/_multimodule.py#L760-L775)):
+**Decoder output** — maps joint latent code $z\_n$ and categorical covariates $c\_{k,n}$ (selected by `nn_conditioning_covariate_keys`, many keys) to non-negative feature signal via softplus ([`_multimodule.py:750–767`](src/regularizedvi/_multimodule.py#L750-L767)):
 
 $$\rho^{(m)}_{nf} = \text{softplus}\big(f^{(m)}_w(z_n,\, c_{k,n})\big) \in \mathbb{R}_{\geq 0}$$
 
-**Additive background** — per-feature ambient contamination with Gamma prior, indexed by `ambient_covariate_keys` (many keys, concatenated one-hot, [`_multimodule.py:458–465`](src/regularizedvi/_multimodule.py#L458-L465) init, [`_multimodule.py:756`](src/regularizedvi/_multimodule.py#L756) one-hot selection, [`_multimodule.py:991–1003`](src/regularizedvi/_multimodule.py#L991-L1003) prior penalty):
+**Additive background** — per-feature ambient contamination with Gamma prior, indexed by `ambient_covariate_keys` (many keys, concatenated one-hot, [`_multimodule.py:457–471`](src/regularizedvi/_multimodule.py#L457-L471) init, [`_multimodule.py:740–748`](src/regularizedvi/_multimodule.py#L740-L748) one-hot selection, [`_multimodule.py:978–990`](src/regularizedvi/_multimodule.py#L978-L990) prior penalty):
 
 $$s^{(m)}_{e,f} = \exp(\beta^{(m)}_{e,f}), \qquad s^{(m)}_{e,f} \sim \text{Gamma}(1,\, 100)$$
 
-**Feature scaling** — per-feature, per-covariate multiplicative scaling capturing systematic biases (GC content, mappability, peak caller sensitivity). Parameterised as $\text{softplus}(\gamma)/0.7$ with a tight Gamma prior centered at 1. Scaling covariates $t$ are selected by `feature_scaling_covariate_keys` (many keys); each covariate category gets its own factor ([`_multimodule.py:472–476`](src/regularizedvi/_multimodule.py#L472-L476) init, [`_multimodule.py:779–787`](src/regularizedvi/_multimodule.py#L779-L787) activation and selection, [`_multimodule.py:972–989`](src/regularizedvi/_multimodule.py#L972-L989) prior penalty):
+**Feature scaling** — per-feature, per-covariate multiplicative scaling capturing systematic biases (GC content, mappability, peak caller sensitivity). Parameterised as $\text{softplus}(\gamma)/0.7$ with a tight Gamma prior centered at 1. Scaling covariates $t$ are selected by `feature_scaling_covariate_keys` (many keys); each covariate category gets its own factor ([`_multimodule.py:473–480`](src/regularizedvi/_multimodule.py#L473-L480) init, [`_multimodule.py:769–779`](src/regularizedvi/_multimodule.py#L769-L779) activation and selection, [`_multimodule.py:959–976`](src/regularizedvi/_multimodule.py#L959-L976) prior penalty):
 
 $$y^{(m)}_{t,f} = \text{softplus}(\gamma^{(m)}_{t,f})\,/\,0.7, \qquad y^{(m)}_{t,f} \sim \text{Gamma}(200,\, 200)$$
 
-**Expected mean counts** — decoder output plus optional background, scaled by library size and feature scaling ([`_components.py:467`](src/regularizedvi/_components.py#L467) base rate, [`_multimodule.py:789`](src/regularizedvi/_multimodule.py#L789) feature scaling scaling):
+**Expected mean counts** — decoder output plus optional background, scaled by library size and feature scaling ([`_components.py:467`](src/regularizedvi/_components.py#L467) base rate, [`_multimodule.py:779`](src/regularizedvi/_multimodule.py#L779) feature scaling):
 
 $$\mu^{(m)}_{nf} = \ell^{(m)}_n \cdot \big(\rho^{(m)}_{nf} + s^{(m)}_{e_n,f}\big) \cdot y^{(m)}_{t_n,f}$$
 
-**Hierarchical dispersion prior** — same two-level structure as single-modality, per modality and `dispersion_key` group $d$ (one key, [`_multimodule.py:940–970`](src/regularizedvi/_multimodule.py#L940-L970)):
+**Hierarchical dispersion prior** — same two-level structure as single-modality, per modality and `dispersion_key` group $d$ (one key, [`_multimodule.py:926–957`](src/regularizedvi/_multimodule.py#L926-L957)):
 
 $$\lambda^{(m)}_d \sim \text{Gamma}(9,\, 3), \qquad 1/\sqrt{\theta^{(m)}_{f,d}} \sim \text{Exponential}(\lambda^{(m)}_d)$$
 
@@ -199,11 +208,12 @@ Using a single `batch_key` forces all components to share the same granularity, 
 
 | Parameter | Model component | Encoder | Decoder | Shape per modality |
 |-----------|----------------|---------|---------|-------------------|
-| `ambient_covariate_keys` | Additive background $s\_{e,g} = \exp(\beta\_{e,g})$: single parameter with concatenated one-hot across all ambient keys | Yes (concat one-hot) | No | `(n_feat, sum(n_cats))` |
-| `nn_conditioning_covariate_keys` | Standard scVI-style injection $c\_{k,n}$ into encoder/decoder | Yes (one-hot) | Yes (one-hot) | Standard |
+| `ambient_covariate_keys` | Additive background $s\_{e,g} = \exp(\beta\_{e,g})$: single parameter with concatenated one-hot across all ambient keys | No | No (additive on rate) | `(n_feat, sum(n_cats))` |
+| `nn_conditioning_covariate_keys` | Standard scVI-style injection $c\_{k,n}$ into decoder | No | Yes (one-hot) | Standard |
 | `feature_scaling_covariate_keys` | Feature scaling $y\_{t,g}$: multiplicative per-feature scaling | No | Multiplicative on rate | `(sum(n_cats), n_feat)` |
 | `dispersion_key` | Inverse dispersion $\theta\_{g,d}$: per-gene, per-group | No | Indexing | `(n_feat, n_disp_cats)` |
-| `library_size_key` | Library prior $\ell\_n \sim \text{LogNormal}(\ell\_p^{\mu}, 0.05 \cdot \ell\_p^{\sigma^2})$: per-group mean/var | Yes (one-hot) | No | `(1, n_lib_cats)` |
+| `library_size_key` | Library prior $\ell\_n \sim \text{LogNormal}(\ell\_p^{\mu}, 0.05 \cdot \ell\_p^{\sigma^2})$: per-group mean/var | No | No | `(1, n_lib_cats)` |
+| `encoder_covariate_keys` | Categorical covariates for encoder only | Yes (one-hot) | No | Standard |
 
 ### Default behaviour and backward compatibility
 
@@ -217,9 +227,9 @@ Using a single `batch_key` forces all components to share the same granularity, 
 
 The encoder and decoder receive different subsets of covariates:
 
-- **Encoder** receives: `[ambient_covs...] + [cat_covs (if encode_covariates)] + [library_size]` — ambient and library covariates are always injected, even when `encode_covariates=False`, because the encoder needs to know the expected background level and library size group.
+- **Encoder** receives: gene expression $x\_n$ + continuous covariates (if any) + `encoder_covariate_keys` categoricals (if any). By default `encoder_covariate_keys=False`, so the encoder sees **only expression and continuous covariates** — matching the scVI/MultiVI/PeakVI default. This keeps the latent space free of batch information. Setting `encoder_covariate_keys` to a list of keys (e.g. `["batch", "site"]`) injects those categoricals into the encoder; a warning is emitted for non-default values.
 
-- **Decoder** receives: `[cat_covs...]` only (batch-free by default). When `use_batch_in_decoder=True`, batch is additionally included.
+- **Decoder** receives: `[cat_covs...]` from `nn_conditioning_covariate_keys` only (batch-free by default). When `use_batch_in_decoder=True`, batch is additionally included.
 
 ### Example: 10x Chromium (simple)
 
