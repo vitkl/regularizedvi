@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
+import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -382,6 +383,14 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             )
 
         # ---- Per-modality library encoders (variational, low-capacity) ----
+        if library_n_hidden > 32:
+            warnings.warn(
+                f"library_n_hidden={library_n_hidden} is large. The library encoder "
+                f"should be low-capacity (16-32 hidden units) to prevent overfitting "
+                f"the library size. Consider setting library_n_hidden=16.",
+                UserWarning,
+                stacklevel=2,
+            )
         self.l_encoders = nn.ModuleDict()
         for name in self.modality_names:
             n_in = n_input_per_modality[name] + n_continuous_cov

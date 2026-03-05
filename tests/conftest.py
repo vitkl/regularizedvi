@@ -72,3 +72,61 @@ def mdata():
         adata.obs["pcr_well"] = adata.obs["pcr_well"].astype("category")
 
     return mu.MuData({"rna": adata_rna, "atac": adata_atac})
+
+
+@pytest.fixture
+def adata_distinct_covs():
+    """AnnData with distinct category counts per covariate (2,3,4,5,6,7,8).
+
+    Each purpose-driven covariate has a unique N so shape mixing is immediately caught.
+    """
+    n_obs, n_vars = 100, 50
+    rng = np.random.default_rng(42)
+    counts = rng.poisson(lam=5, size=(n_obs, n_vars)).astype(np.float32)
+    adata = ad.AnnData(X=counts)
+    adata.layers["counts"] = counts.copy()
+    adata.var_names = [f"gene_{i}" for i in range(n_vars)]
+    adata.obs["ambient_cov"] = [f"a{i % 2}" for i in range(n_obs)]  # 2 cats
+    adata.obs["nn_cov1"] = [f"n{i % 3}" for i in range(n_obs)]  # 3 cats
+    adata.obs["nn_cov2"] = [f"m{i % 4}" for i in range(n_obs)]  # 4 cats
+    adata.obs["fs_cov1"] = [f"f{i % 5}" for i in range(n_obs)]  # 5 cats
+    adata.obs["fs_cov2"] = [f"g{i % 6}" for i in range(n_obs)]  # 6 cats
+    adata.obs["disp_cov"] = [f"d{i % 7}" for i in range(n_obs)]  # 7 cats
+    adata.obs["library_cov"] = [f"l{i % 8}" for i in range(n_obs)]  # 8 cats
+    for col in ["ambient_cov", "nn_cov1", "nn_cov2", "fs_cov1", "fs_cov2", "disp_cov", "library_cov"]:
+        adata.obs[col] = adata.obs[col].astype("category")
+    return adata
+
+
+@pytest.fixture
+def mdata_distinct_covs():
+    """MuData with distinct category counts per covariate (2,3,4,5,6,7,8).
+
+    Same obs columns on both RNA and ATAC modalities.
+    """
+    n_obs = 100
+    n_rna, n_atac = 50, 30
+    rng = np.random.default_rng(42)
+
+    rna_counts = rng.poisson(lam=5, size=(n_obs, n_rna)).astype(np.float32)
+    adata_rna = ad.AnnData(X=rna_counts)
+    adata_rna.var_names = [f"gene_{i}" for i in range(n_rna)]
+    adata_rna.obs_names = [f"cell_{i}" for i in range(n_obs)]
+
+    atac_counts = rng.poisson(lam=2, size=(n_obs, n_atac)).astype(np.float32)
+    adata_atac = ad.AnnData(X=atac_counts)
+    adata_atac.var_names = [f"peak_{i}" for i in range(n_atac)]
+    adata_atac.obs_names = [f"cell_{i}" for i in range(n_obs)]
+
+    for a in [adata_rna, adata_atac]:
+        a.obs["ambient_cov"] = [f"a{i % 2}" for i in range(n_obs)]
+        a.obs["nn_cov1"] = [f"n{i % 3}" for i in range(n_obs)]
+        a.obs["nn_cov2"] = [f"m{i % 4}" for i in range(n_obs)]
+        a.obs["fs_cov1"] = [f"f{i % 5}" for i in range(n_obs)]
+        a.obs["fs_cov2"] = [f"g{i % 6}" for i in range(n_obs)]
+        a.obs["disp_cov"] = [f"d{i % 7}" for i in range(n_obs)]
+        a.obs["library_cov"] = [f"l{i % 8}" for i in range(n_obs)]
+        for col in ["ambient_cov", "nn_cov1", "nn_cov2", "fs_cov1", "fs_cov2", "disp_cov", "library_cov"]:
+            a.obs[col] = a.obs[col].astype("category")
+
+    return mu.MuData({"rna": adata_rna, "atac": adata_atac})

@@ -759,6 +759,82 @@ class TestGammaPoissonMode:
         loss_output = module.loss(tensors, inf_outputs, gen_outputs)
         assert loss_output.loss.isfinite()
 
+    def test_parameter_shapes_single_modal(self, adata_distinct_covs):
+        """Verify every parameter shape matches architecture expectations."""
+        adata = adata_distinct_covs
+        n_vars = 50
+        n_hidden = 17
+        n_latent = 13
+
+        # Covariate counts (each unique!)
+        n_ambient = 2
+        n_nn1, n_nn2 = 3, 4
+        n_fs1, n_fs2 = 5, 6
+        n_disp = 7
+        n_lib = 8
+
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            ambient_covariate_keys=["ambient_cov"],
+            nn_conditioning_covariate_keys=["nn_cov1", "nn_cov2"],
+            feature_scaling_covariate_keys=["fs_cov1", "fs_cov2"],
+            dispersion_key="disp_cov",
+            library_size_key="library_cov",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=n_hidden, n_latent=n_latent, n_layers=1)
+
+        # --- Expected shapes from architecture ---
+        # Encoder: no categoricals (encoder_covariate_keys=False default), no cont covs
+        cat_dim_enc = 0
+        n_enc_in = n_vars
+
+        # Decoder: nn_conditioning cats [3, 4], no batch (use_batch_in_decoder=False default)
+        cat_dim_dec = n_nn1 + n_nn2  # 3 + 4 = 7
+
+        expected = {
+            # Z encoder (n_layers=1)
+            "z_encoder.encoder.fc_layers.Layer 0.0.weight": (n_hidden, n_enc_in + cat_dim_enc),
+            "z_encoder.encoder.fc_layers.Layer 0.0.bias": (n_hidden,),
+            "z_encoder.mean_encoder.weight": (n_latent, n_hidden),
+            "z_encoder.mean_encoder.bias": (n_latent,),
+            "z_encoder.var_encoder.weight": (n_latent, n_hidden),
+            "z_encoder.var_encoder.bias": (n_latent,),
+            # Library encoder (n_layers=1, n_output=1, n_hidden=DEFAULT_LIBRARY_N_HIDDEN=16)
+            "l_encoder.encoder.fc_layers.Layer 0.0.weight": (16, n_enc_in + cat_dim_enc),
+            "l_encoder.encoder.fc_layers.Layer 0.0.bias": (16,),
+            "l_encoder.mean_encoder.weight": (1, 16),
+            "l_encoder.mean_encoder.bias": (1,),
+            "l_encoder.var_encoder.weight": (1, 16),
+            "l_encoder.var_encoder.bias": (1,),
+            # Decoder (n_layers=1)
+            "decoder.px_decoder.fc_layers.Layer 0.0.weight": (n_hidden, n_latent + cat_dim_dec),
+            "decoder.px_decoder.fc_layers.Layer 0.0.bias": (n_hidden,),
+            "decoder.px_scale_decoder.0.weight": (n_vars, n_hidden),
+            "decoder.px_scale_decoder.0.bias": (n_vars,),
+            "decoder.px_r_decoder.weight": (n_vars, n_hidden),
+            "decoder.px_r_decoder.bias": (n_vars,),
+            "decoder.px_dropout_decoder.weight": (n_vars, n_hidden),
+            "decoder.px_dropout_decoder.bias": (n_vars,),
+            # Purpose-driven params
+            "px_r": (n_vars, n_disp),
+            "dispersion_prior_rate_raw": (n_disp,),
+            "additive_background": (n_vars, n_ambient),
+            "feature_scaling": (n_fs1 + n_fs2, n_vars),
+            # Buffers (library prior, shape (1, n_lib) from reshape(1, -1))
+            "library_log_means": (1, n_lib),
+            "library_log_vars": (1, n_lib),
+        }
+
+        sd = model.module.state_dict()
+
+        for key, shape in expected.items():
+            assert key in sd, f"Missing parameter: {key}"
+            assert sd[key].shape == torch.Size(shape), f"{key}: expected {shape}, got {tuple(sd[key].shape)}"
+
+        for key in sd:
+            assert key in expected, f"Unexpected parameter in state_dict: {key} {tuple(sd[key].shape)}"
+
 
 class TestRegularizedMultimodalVI:
     """Tests for the RegularizedMultimodalVI multi-modal model."""
@@ -1458,6 +1534,162 @@ class TestRegularizedMultimodalVI:
 
         # X_umap should be restored to joint
         np.testing.assert_array_equal(adata_rna.obsm["X_umap"], adata_rna.obsm["X_umap_joint"])
+
+    def test_parameter_shapes_multimodal(self, mdata_distinct_covs):
+        """Verify every parameter shape matches architecture expectations."""
+        mdata = mdata_distinct_covs
+        n_rna, n_atac = 50, 30
+        n_hidden_rna, n_hidden_atac = 17, 19
+        n_latent_rna, n_latent_atac = 13, 11
+        total_latent = n_latent_rna + n_latent_atac  # 24
+        lib_n_hidden = 16  # multimodal default library_n_hidden
+
+        # Covariate counts (each unique!)
+        n_ambient = 2
+        n_nn1, n_nn2 = 3, 4
+        n_fs1, n_fs2 = 5, 6
+        n_disp = 7
+        n_lib = 8
+
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            ambient_covariate_keys=["ambient_cov"],
+            nn_conditioning_covariate_keys=["nn_cov1", "nn_cov2"],
+            feature_scaling_covariate_keys=["fs_cov1", "fs_cov2"],
+            dispersion_key="disp_cov",
+            library_size_key="library_cov",
+        )
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden={"rna": n_hidden_rna, "atac": n_hidden_atac},
+            n_latent={"rna": n_latent_rna, "atac": n_latent_atac},
+            n_layers=1,
+            additive_background_modalities=["rna", "atac"],
+            feature_scaling_modalities=["rna", "atac"],
+        )
+
+        # --- Expected shapes from architecture ---
+        # Encoder: no categoricals (encoder_covariate_keys=False default)
+        cat_dim_enc = 0
+        # Decoder: nn_conditioning cats [3, 4], no batch
+        cat_dim_dec = n_nn1 + n_nn2  # 7
+
+        expected = {}
+
+        # Per-modality encoders, decoders, library encoders
+        for name, n_feat, n_hid, n_lat in [
+            ("atac", n_atac, n_hidden_atac, n_latent_atac),
+            ("rna", n_rna, n_hidden_rna, n_latent_rna),
+        ]:
+            # Encoder (n_layers=1)
+            expected[f"encoders.{name}.encoder.fc_layers.Layer 0.0.weight"] = (n_hid, n_feat + cat_dim_enc)
+            expected[f"encoders.{name}.encoder.fc_layers.Layer 0.0.bias"] = (n_hid,)
+            expected[f"encoders.{name}.mean_encoder.weight"] = (n_lat, n_hid)
+            expected[f"encoders.{name}.mean_encoder.bias"] = (n_lat,)
+            expected[f"encoders.{name}.var_encoder.weight"] = (n_lat, n_hid)
+            expected[f"encoders.{name}.var_encoder.bias"] = (n_lat,)
+
+            # Library encoder (n_layers=1, n_output=1, n_hidden=lib_n_hidden=16)
+            expected[f"l_encoders.{name}.encoder.fc_layers.Layer 0.0.weight"] = (lib_n_hidden, n_feat + cat_dim_enc)
+            expected[f"l_encoders.{name}.encoder.fc_layers.Layer 0.0.bias"] = (lib_n_hidden,)
+            expected[f"l_encoders.{name}.mean_encoder.weight"] = (1, lib_n_hidden)
+            expected[f"l_encoders.{name}.mean_encoder.bias"] = (1,)
+            expected[f"l_encoders.{name}.var_encoder.weight"] = (1, lib_n_hidden)
+            expected[f"l_encoders.{name}.var_encoder.bias"] = (1,)
+
+            # Decoder (n_layers=1, input=total_latent)
+            expected[f"decoders.{name}.px_decoder.fc_layers.Layer 0.0.weight"] = (n_hid, total_latent + cat_dim_dec)
+            expected[f"decoders.{name}.px_decoder.fc_layers.Layer 0.0.bias"] = (n_hid,)
+            expected[f"decoders.{name}.px_scale_decoder.0.weight"] = (n_feat, n_hid)
+            expected[f"decoders.{name}.px_scale_decoder.0.bias"] = (n_feat,)
+            expected[f"decoders.{name}.px_r_decoder.weight"] = (n_feat, n_hid)
+            expected[f"decoders.{name}.px_r_decoder.bias"] = (n_feat,)
+            expected[f"decoders.{name}.px_dropout_decoder.weight"] = (n_feat, n_hid)
+            expected[f"decoders.{name}.px_dropout_decoder.bias"] = (n_feat,)
+
+            # Purpose-driven params (ParameterDict uses dot notation)
+            expected[f"px_r.{name}"] = (n_feat, n_disp)
+            expected[f"dispersion_prior_rate_raw.{name}"] = (n_disp,)
+            expected[f"additive_background.{name}"] = (n_feat, n_ambient)
+            expected[f"feature_scaling.{name}"] = (n_fs1 + n_fs2, n_feat)
+
+            # Buffers (register_buffer uses underscore naming)
+            expected[f"library_log_means_{name}"] = (1, n_lib)
+            expected[f"library_log_vars_{name}"] = (1, n_lib)
+
+        sd = model.module.state_dict()
+
+        for key, shape in expected.items():
+            assert key in sd, f"Missing parameter: {key}"
+            assert sd[key].shape == torch.Size(shape), f"{key}: expected {shape}, got {tuple(sd[key].shape)}"
+
+        for key in sd:
+            assert key in expected, f"Unexpected parameter in state_dict: {key} {tuple(sd[key].shape)}"
+
+    def test_initial_parameter_consistency(self, adata_distinct_covs, mdata_distinct_covs):
+        """Compare initial parameter values between single-modal and multi-modal RNA."""
+        # Single-modal setup
+        adata = adata_distinct_covs
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            ambient_covariate_keys=["ambient_cov"],
+            nn_conditioning_covariate_keys=["nn_cov1", "nn_cov2"],
+            feature_scaling_covariate_keys=["fs_cov1", "fs_cov2"],
+            dispersion_key="disp_cov",
+            library_size_key="library_cov",
+        )
+        sm_model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=17, n_latent=13, n_layers=1)
+
+        # Multi-modal setup (matching RNA architecture)
+        mdata = mdata_distinct_covs
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            ambient_covariate_keys=["ambient_cov"],
+            nn_conditioning_covariate_keys=["nn_cov1", "nn_cov2"],
+            feature_scaling_covariate_keys=["fs_cov1", "fs_cov2"],
+            dispersion_key="disp_cov",
+            library_size_key="library_cov",
+        )
+        mm_model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden={"rna": 17, "atac": 19},
+            n_latent={"rna": 13, "atac": 11},
+            n_layers=1,
+            additive_background_modalities=["rna"],
+            feature_scaling_modalities=["rna"],
+        )
+
+        sm_sd = sm_model.module.state_dict()
+        mm_sd = mm_model.module.state_dict()
+
+        # Shape match for comparable params
+        pairs = [
+            ("px_r", "px_r.rna"),
+            ("dispersion_prior_rate_raw", "dispersion_prior_rate_raw.rna"),
+            ("additive_background", "additive_background.rna"),
+            ("feature_scaling", "feature_scaling.rna"),
+        ]
+        for sm_key, mm_key in pairs:
+            assert sm_sd[sm_key].shape == mm_sd[mm_key].shape, (
+                f"Shape mismatch {sm_key} vs {mm_key}: {tuple(sm_sd[sm_key].shape)} vs {tuple(mm_sd[mm_key].shape)}"
+            )
+
+        # Deterministic params — exact match
+        assert torch.allclose(sm_sd["dispersion_prior_rate_raw"], mm_sd["dispersion_prior_rate_raw.rna"])
+        assert torch.allclose(sm_sd["feature_scaling"], mm_sd["feature_scaling.rna"])
+
+        # Stochastic params — mean should be close
+        assert torch.allclose(sm_sd["px_r"].mean(), mm_sd["px_r.rna"].mean(), atol=0.5)
+        assert torch.allclose(sm_sd["additive_background"].mean(), mm_sd["additive_background.rna"].mean(), atol=0.1)
+
+        # Encoder shapes match (same n_hidden, n_input for RNA)
+        sm_enc = sm_sd["z_encoder.encoder.fc_layers.Layer 0.0.weight"]
+        mm_enc = mm_sd["encoders.rna.encoder.fc_layers.Layer 0.0.weight"]
+        assert sm_enc.shape == mm_enc.shape
+
+        # Encoder weight init distributions similar
+        assert torch.allclose(sm_enc.std(), mm_enc.std(), rtol=0.5)
 
 
 class TestWandBUtilities:

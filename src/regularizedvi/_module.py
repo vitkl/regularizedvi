@@ -415,8 +415,18 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             **_extra_encoder_kwargs,
         )
         # l encoder goes from n_input-dimensional data to 1-d library size
-        # Use library_n_hidden for low-capacity library encoder
-        _library_n_hidden = library_n_hidden if library_n_hidden is not None else n_hidden
+        # Use library_n_hidden for low-capacity library encoder (default 16)
+        from regularizedvi._constants import DEFAULT_LIBRARY_N_HIDDEN
+
+        _library_n_hidden = library_n_hidden if library_n_hidden is not None else DEFAULT_LIBRARY_N_HIDDEN
+        if _library_n_hidden > 32:
+            warnings.warn(
+                f"library_n_hidden={_library_n_hidden} is large. The library encoder "
+                f"should be low-capacity (16-32 hidden units) to prevent overfitting "
+                f"the library size. Consider setting library_n_hidden=16.",
+                UserWarning,
+                stacklevel=2,
+            )
         self.l_encoder = RegularizedEncoder(
             n_input_encoder,
             1,
