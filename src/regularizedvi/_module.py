@@ -564,7 +564,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         # Default: no encoder categoricals (encoder_covs=None, matches scVI)
         encoder_categorical_input = ()
         if encoder_covs is not None and self.n_cats_per_encoder_cov:
-            encoder_categorical_input += torch.split(encoder_covs, 1, dim=1)
+            encoder_categorical_input += tuple(t.long() for t in torch.split(encoder_covs, 1, dim=1))
 
         if self.batch_representation == "embedding" and self.encode_covariates:
             batch_rep = self.compute_embedding(REGISTRY_KEYS.BATCH_KEY, batch_index)

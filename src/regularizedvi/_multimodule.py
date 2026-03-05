@@ -549,7 +549,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # Build encoder categorical inputs from dedicated encoder_covariate_keys
         encoder_categorical_input = ()
         if encoder_covs is not None and self.n_cats_per_encoder_cov:
-            encoder_categorical_input += torch.split(encoder_covs, 1, dim=1)
+            encoder_categorical_input += tuple(t.long() for t in torch.split(encoder_covs, 1, dim=1))
 
         # Detect which modalities are present per cell (for masking)
         masks = {}
