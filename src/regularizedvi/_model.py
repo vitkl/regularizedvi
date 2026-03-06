@@ -437,6 +437,11 @@ class AmbientRegularizedSCVI(
         if validation_batch_size is not None:
             datasplitter_kwargs.setdefault("val_batch_size", validation_batch_size)
 
+        # Auto-scale early_stopping_min_delta by n_features if not explicitly set
+        if early_stopping and "early_stopping_min_delta" not in trainer_kwargs:
+            n_features = self.summary_stats.n_vars
+            trainer_kwargs["early_stopping_min_delta"] = n_features * 0.0003
+
         return super().train(
             max_epochs=max_epochs,
             accelerator=accelerator,
