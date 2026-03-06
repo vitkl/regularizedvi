@@ -64,6 +64,18 @@ def _coerce_single(value: object, target_type: type | str, name: str) -> object:
             return None
         return value
 
+    # float_or_none: "None"/"none" → None, None → None, else float
+    if target_type == "float_or_none":
+        if isinstance(value, str) and value.lower() == "none":
+            return None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        try:
+            return float(value)
+        except (ValueError, TypeError) as e:
+            msg = f"Cannot coerce {name}={value!r} to float_or_none"
+            raise TypeError(msg) from e
+
     # Already correct type — passthrough
     if isinstance(value, target_type) and not (target_type is float and isinstance(value, bool)):
         return value

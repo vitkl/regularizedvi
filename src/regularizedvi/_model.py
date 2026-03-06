@@ -222,6 +222,11 @@ class AmbientRegularizedSCVI(
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_BATCH_NORM,
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
+        # Parameter initialization control (for ablation experiments)
+        px_r_init_mean: float | None = None,
+        px_r_init_std: float | None = None,
+        additive_bg_init_mean: float | None = None,
+        additive_bg_init_std: float | None = None,
         **kwargs,
     ):
         self._validate_bool_params(
@@ -260,6 +265,10 @@ class AmbientRegularizedSCVI(
             "feature_scaling_prior_alpha": feature_scaling_prior_alpha,
             "feature_scaling_prior_beta": feature_scaling_prior_beta,
             "compute_pearson": compute_pearson,
+            "px_r_init_mean": px_r_init_mean,
+            "px_r_init_std": px_r_init_std,
+            "additive_bg_init_mean": additive_bg_init_mean,
+            "additive_bg_init_std": additive_bg_init_std,
             **kwargs,
         }
         self._model_summary_string = (
@@ -383,6 +392,10 @@ class AmbientRegularizedSCVI(
                 feature_scaling_prior_alpha=feature_scaling_prior_alpha,
                 feature_scaling_prior_beta=feature_scaling_prior_beta,
                 compute_pearson=compute_pearson,
+                px_r_init_mean=px_r_init_mean,
+                px_r_init_std=px_r_init_std,
+                additive_bg_init_mean=additive_bg_init_mean,
+                additive_bg_init_std=additive_bg_init_std,
                 **kwargs,
             )
             self.module.minified_data_type = self.minified_data_type

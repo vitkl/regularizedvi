@@ -255,6 +255,11 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         n_dispersion_cats: int | None = None,
         # Library size covariate (controls per-group library prior, decoupled from batch_key)
         n_library_cats: int | None = None,
+        # Parameter initialization control
+        px_r_init_mean: float | None = None,
+        px_r_init_std: float | None = None,
+        additive_bg_init_mean: float | None = None,
+        additive_bg_init_std: float | None = None,
         # Training metrics
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
     ):
@@ -301,25 +306,29 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         # Initialize px_r at prior equilibrium when regularisation is active.
         # Containment prior: Exp(rate) on 1/sqrt(theta) → theta = rate² at equilibrium.
-        if self.regularise_dispersion:
+        # Override with px_r_init_mean/px_r_init_std for ablation experiments.
+        if px_r_init_mean is not None:
+            _px_r_init = px_r_init_mean
+        elif self.regularise_dispersion:
             _rate = regularise_dispersion_prior
             _px_r_init = math.log(_rate**2)  # log(9) ≈ 2.197
         else:
             _px_r_init = None
+        _px_r_std = px_r_init_std if px_r_init_std is not None else (0.1 if _px_r_init is not None else 1.0)
 
         if self.dispersion == "gene":
             if _px_r_init is not None:
-                self.px_r = torch.nn.Parameter(torch.full((n_input,), _px_r_init) + 0.1 * torch.randn(n_input))
+                self.px_r = torch.nn.Parameter(torch.full((n_input,), _px_r_init) + _px_r_std * torch.randn(n_input))
             else:
-                self.px_r = torch.nn.Parameter(torch.randn(n_input))
+                self.px_r = torch.nn.Parameter(_px_r_std * torch.randn(n_input))
         elif self.dispersion == "gene-batch":
             n_disp = self.n_dispersion_cats
             if _px_r_init is not None:
                 self.px_r = torch.nn.Parameter(
-                    torch.full((n_input, n_disp), _px_r_init) + 0.1 * torch.randn(n_input, n_disp)
+                    torch.full((n_input, n_disp), _px_r_init) + _px_r_std * torch.randn(n_input, n_disp)
                 )
             else:
-                self.px_r = torch.nn.Parameter(torch.randn(n_input, n_disp))
+                self.px_r = torch.nn.Parameter(_px_r_std * torch.randn(n_input, n_disp))
         elif self.dispersion == "gene-cell":
             pass
         else:
@@ -356,10 +365,15 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             sum(int(c) for c in self.n_cats_per_ambient_cov) if self.n_cats_per_ambient_cov else 0
         )
         if self.use_additive_background and self.n_total_ambient_cats > 0:
-            _bg_init = math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
+            _bg_mean = (
+                additive_bg_init_mean
+                if additive_bg_init_mean is not None
+                else math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
+            )
+            _bg_std = additive_bg_init_std if additive_bg_init_std is not None else 0.01
             self.additive_background = torch.nn.Parameter(
-                torch.full((n_input, self.n_total_ambient_cats), _bg_init)
-                + 0.01 * torch.randn(n_input, self.n_total_ambient_cats)
+                torch.full((n_input, self.n_total_ambient_cats), _bg_mean)
+                + _bg_std * torch.randn(n_input, self.n_total_ambient_cats)
             )
 
         # Feature scaling (cell2location-style per-covariate multiplicative scaling)
