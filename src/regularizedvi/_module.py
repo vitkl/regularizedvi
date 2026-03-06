@@ -231,6 +231,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         batch_embedding_kwargs: dict | None = None,
         # regularizedvi-specific parameters
         library_log_vars_weight: float | None = None,
+        library_log_means_centering_sensitivity: float = 1.0,
         library_n_hidden: int | None = None,
         scale_activation: str | None = None,
         use_additive_background: bool = False,
@@ -297,7 +298,12 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             if library_log_means is None or library_log_vars is None:
                 raise ValueError("If not using observed_lib_size, must provide library_log_means and library_log_vars.")
 
-            self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
+            # Center library_log_means: subtract global mean, shift by log(sensitivity)
+            # This makes exp(library) ≈ sensitivity at initialization instead of raw total counts.
+            log_means = torch.from_numpy(library_log_means).float()
+            global_log_mean = log_means.mean()
+            log_means = log_means - global_log_mean + math.log(library_log_means_centering_sensitivity)
+            self.register_buffer("library_log_means", log_means)
             # Scale library_log_vars by weight to constrain the prior
             log_vars = torch.from_numpy(library_log_vars).float()
             if library_log_vars_weight is not None:

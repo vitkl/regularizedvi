@@ -205,6 +205,7 @@ class AmbientRegularizedSCVI(
         latent_distribution: Literal["normal", "ln"] = "normal",
         # regularizedvi defaults (from _constants.py)
         library_log_vars_weight: float = DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
+        library_log_means_centering_sensitivity: float = 1.0,
         library_n_hidden: int = DEFAULT_LIBRARY_N_HIDDEN,
         scale_activation: str = DEFAULT_SCALE_ACTIVATION,
         use_additive_background: bool = DEFAULT_USE_ADDITIVE_BACKGROUND,
@@ -250,6 +251,7 @@ class AmbientRegularizedSCVI(
             "use_batch_norm": use_batch_norm,
             "use_layer_norm": use_layer_norm,
             "library_log_vars_weight": library_log_vars_weight,
+            "library_log_means_centering_sensitivity": library_log_means_centering_sensitivity,
             "library_n_hidden": library_n_hidden,
             "scale_activation": scale_activation,
             "use_additive_background": use_additive_background,
@@ -377,6 +379,7 @@ class AmbientRegularizedSCVI(
                 use_batch_norm=use_batch_norm,
                 use_layer_norm=use_layer_norm,
                 library_log_vars_weight=library_log_vars_weight,
+                library_log_means_centering_sensitivity=library_log_means_centering_sensitivity,
                 library_n_hidden=library_n_hidden,
                 scale_activation=scale_activation,
                 use_additive_background=use_additive_background,

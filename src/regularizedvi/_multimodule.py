@@ -183,6 +183,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         library_log_means: dict[str, np.ndarray] | None = None,
         library_log_vars: dict[str, np.ndarray] | None = None,
         library_log_vars_weight: float | None = None,
+        library_log_means_centering_sensitivity: dict[str, float] | None = None,
         library_n_hidden: int = 16,
         scale_activation: str = "softplus",
         use_batch_in_decoder: bool = False,
@@ -411,9 +412,14 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # ---- Per-modality library priors ----
         library_log_means = library_log_means or {}
         library_log_vars = library_log_vars or {}
+        _sensitivity = library_log_means_centering_sensitivity or {}
         for name in self.modality_names:
             if name in library_log_means and name in library_log_vars:
                 means = torch.from_numpy(library_log_means[name]).float()
+                # Center library_log_means: subtract global mean, shift by log(sensitivity)
+                _sens = _sensitivity.get(name, 1.0)
+                global_log_mean = means.mean()
+                means = means - global_log_mean + math.log(_sens)
                 vars_ = torch.from_numpy(library_log_vars[name]).float()
                 if library_log_vars_weight is not None:
                     vars_ = vars_ * library_log_vars_weight
