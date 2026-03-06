@@ -417,9 +417,10 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             if name in library_log_means and name in library_log_vars:
                 means = torch.from_numpy(library_log_means[name]).float()
                 # Center library_log_means: subtract global mean, shift by log(sensitivity)
-                _sens = _sensitivity.get(name, 1.0)
-                global_log_mean = means.mean()
-                means = means - global_log_mean + math.log(_sens)
+                _sens = _sensitivity.get(name, None)
+                if _sens is not None:
+                    global_log_mean = means.mean()
+                    means = means - global_log_mean + math.log(_sens)
                 vars_ = torch.from_numpy(library_log_vars[name]).float()
                 if library_log_vars_weight is not None:
                     vars_ = vars_ * library_log_vars_weight

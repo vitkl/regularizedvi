@@ -205,7 +205,7 @@ class AmbientRegularizedSCVI(
         latent_distribution: Literal["normal", "ln"] = "normal",
         # regularizedvi defaults (from _constants.py)
         library_log_vars_weight: float = DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
-        library_log_means_centering_sensitivity: float = 1.0,
+        library_log_means_centering_sensitivity: float | None = None,
         library_n_hidden: int = DEFAULT_LIBRARY_N_HIDDEN,
         scale_activation: str = DEFAULT_SCALE_ACTIVATION,
         use_additive_background: bool = DEFAULT_USE_ADDITIVE_BACKGROUND,
