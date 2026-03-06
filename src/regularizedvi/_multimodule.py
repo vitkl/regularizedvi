@@ -429,23 +429,27 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         else:
             _px_r_init = None
 
-        self.px_r = nn.ParameterDict()
+        _log_sigma_init = math.log(0.1)
+        self.px_r_mu = nn.ParameterDict()
+        self.px_r_log_sigma = nn.ParameterDict()
         for name in self.modality_names:
             n_feat = n_input_per_modality[name]
             disp = dispersion_dict[name]
             if disp in ("gene", "region"):
                 if _px_r_init is not None:
-                    self.px_r[name] = nn.Parameter(torch.full((n_feat,), _px_r_init) + 0.1 * torch.randn(n_feat))
+                    self.px_r_mu[name] = nn.Parameter(torch.full((n_feat,), _px_r_init) + 0.1 * torch.randn(n_feat))
                 else:
-                    self.px_r[name] = nn.Parameter(torch.randn(n_feat))
+                    self.px_r_mu[name] = nn.Parameter(torch.randn(n_feat))
+                self.px_r_log_sigma[name] = nn.Parameter(torch.full((n_feat,), _log_sigma_init))
             elif disp in ("gene-batch", "region-batch"):
                 n_disp = self.n_dispersion_cats
                 if _px_r_init is not None:
-                    self.px_r[name] = nn.Parameter(
+                    self.px_r_mu[name] = nn.Parameter(
                         torch.full((n_feat, n_disp), _px_r_init) + 0.1 * torch.randn(n_feat, n_disp)
                     )
                 else:
-                    self.px_r[name] = nn.Parameter(torch.randn(n_feat, n_disp))
+                    self.px_r_mu[name] = nn.Parameter(torch.randn(n_feat, n_disp))
+                self.px_r_log_sigma[name] = nn.Parameter(torch.full((n_feat, n_disp), _log_sigma_init))
 
         # ---- Learnable dispersion prior rates (per modality) ----
         if self.regularise_dispersion:
@@ -737,6 +741,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             feature_scaling_indicator = None
 
         px_dict = {}
+        px_r_mu_dict = {}
+        px_r_log_sigma_dict = {}
+        px_r_sampled_dict = {}
         for name in self.modality_names:
             if name not in library:
                 continue
@@ -787,24 +794,37 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     scaling = rf_transformed
                 px_rate = px_rate * scaling
 
-            # Resolve dispersion (use dispersion_index for gene-batch, fallback to batch_index)
+            # Resolve dispersion via variational LogNormal posterior
             _disp_idx = dispersion_index if dispersion_index is not None else batch_index
             if disp in ("gene-batch", "region-batch"):
-                px_r = torch.nn.functional.linear(
-                    one_hot(_disp_idx.squeeze(-1).long(), self.n_dispersion_cats).float(),
-                    self.px_r[name],
-                )
+                _oh = one_hot(_disp_idx.squeeze(-1).long(), self.n_dispersion_cats).float()
+                _px_r_mu = torch.nn.functional.linear(_oh, self.px_r_mu[name])
+                _px_r_log_sigma = torch.nn.functional.linear(_oh, self.px_r_log_sigma[name])
             elif disp in ("gene-cell", "region-cell"):
                 px_r = px_r_cell
+                _px_r_mu = None
+                _px_r_log_sigma = None
             else:
-                px_r = self.px_r[name]
+                _px_r_mu = self.px_r_mu[name]
+                _px_r_log_sigma = self.px_r_log_sigma[name]
 
-            px_r = torch.exp(px_r)
+            if _px_r_mu is not None:
+                _px_r_sigma = torch.exp(_px_r_log_sigma)
+                if self.training:
+                    px_r = torch.exp(_px_r_mu + _px_r_sigma * torch.randn_like(_px_r_mu))
+                else:
+                    px_r = torch.exp(_px_r_mu)
+            else:
+                px_r = torch.exp(px_r)
 
             # GammaPoisson (= NB): concentration=theta, rate=theta/mu
             px = GammaPoissonWithScale(concentration=px_r, rate=px_r / px_rate, scale=px_scale)
 
             px_dict[name] = px
+            if _px_r_mu is not None:
+                px_r_mu_dict[name] = _px_r_mu
+                px_r_log_sigma_dict[name] = _px_r_log_sigma
+            px_r_sampled_dict[name] = px_r
 
         # Prior on z
         pz = Normal(torch.zeros_like(z), torch.ones_like(z))
@@ -832,6 +852,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             "px": px_dict,
             "pz": pz,
             "pl": pl_dict,
+            "px_r_mu": px_r_mu_dict,
+            "px_r_log_sigma": px_r_log_sigma_dict,
+            "px_r_sampled": px_r_sampled_dict,
         }
 
     def loss(
@@ -932,14 +955,19 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # ---- Weighted loss ----
         loss = torch.mean(recon_loss + kl_weight * kl_z + kl_l)
 
-        # ---- Hierarchical dispersion priors ----
+        # ---- Variational dispersion regularisation (replaces MAP with proper posterior) ----
         if self.regularise_dispersion:
             n_obs = recon_loss.shape[0]
             dispersion_penalty = torch.tensor(0.0, device=recon_loss.device)
 
             for name in self.modality_names:
-                if name not in self.px_r:
+                if name not in self.px_r_mu:
                     continue
+
+                # Use raw parameter tensors for KL (not per-cell resolved)
+                px_r_log_sigma = self.px_r_log_sigma[name]
+                px_r_sigma = torch.exp(px_r_log_sigma)
+
                 # Level 1: learned rate with Gamma hyper-prior
                 learned_rate = torch.nn.functional.softplus(self.dispersion_prior_rate_raw[name])
                 neg_log_hyper = (
@@ -951,17 +979,23 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 # Level 2: Exponential prior on dispersion
                 disp = self.dispersion_dict[name]
                 if disp in ("gene-batch", "region-batch"):
-                    rate = learned_rate.unsqueeze(0).expand_as(self.px_r[name])
+                    rate = learned_rate.unsqueeze(0).expand_as(self.px_r_mu[name])
                 elif disp in ("gene-label", "region-label"):
-                    rate = learned_rate.unsqueeze(0).expand_as(self.px_r[name])
+                    rate = learned_rate.unsqueeze(0).expand_as(self.px_r_mu[name])
                 else:
-                    rate = learned_rate.expand_as(self.px_r[name])
+                    rate = learned_rate.expand_as(self.px_r_mu[name])
 
-                # Containment prior: Exp on 1/sqrt(theta) (cell2location direction)
-                px_r_transformed = torch.exp(-self.px_r[name]).pow(0.5)
+                # Analytic LogNormal entropy
+                entropy = (px_r_log_sigma + 0.5 * math.log(2 * math.pi * math.e)).sum()
 
-                neg_log_prior = -Exponential(rate).log_prob(px_r_transformed).sum()
-                dispersion_penalty = dispersion_penalty + neg_log_prior + neg_log_hyper
+                # MC estimate of E_q[log p(1/sqrt(theta))] using fresh sample
+                px_r_sample = torch.exp(self.px_r_mu[name] + px_r_sigma * torch.randn_like(self.px_r_mu[name]))
+                px_r_transformed = (1.0 / px_r_sample).pow(0.5)
+                log_prior = Exponential(rate).log_prob(px_r_transformed).sum()
+
+                # KL = -entropy - E_q[log p]
+                dispersion_kl = -entropy - log_prior
+                dispersion_penalty = dispersion_penalty + dispersion_kl + neg_log_hyper
 
             loss = loss + dispersion_penalty / n_obs
 

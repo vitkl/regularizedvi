@@ -1,5 +1,7 @@
 """Tests for AmbientRegularizedSCVI and RegularizedMultimodalVI models."""
 
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -100,7 +102,8 @@ class TestAmbientRegularizedSCVI:
         n_vars = adata.shape[1]
         n_batch = len(adata.obs["batch"].cat.categories)
 
-        assert model.module.px_r.shape == (n_vars, n_batch)
+        assert model.module.px_r_mu.shape == (n_vars, n_batch)
+        assert model.module.px_r_log_sigma.shape == (n_vars, n_batch)
 
     def test_train_short(self, adata):
         """Test that training runs for a few epochs without error."""
@@ -550,22 +553,24 @@ class TestParameterInitialization:
     # --- RNA-only model (AmbientRegularizedSCVI) ---
 
     def test_px_r_init_at_prior_mean_gamma_poisson(self, adata):
-        """px_r should be initialized near log(rate^2) for gamma_poisson."""
+        """px_r_mu should be initialized near log(rate^2) for gamma_poisson."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
         model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
         # Default: gamma_poisson, regularise_dispersion_prior=3.0
-        # Expected: px_r ≈ log(9) = 2.197, theta = exp(px_r) ≈ 9.0
-        theta = torch.exp(model.module.px_r).detach()
+        # Expected: px_r_mu ≈ log(9) = 2.197, theta = exp(px_r_mu) ≈ 9.0
+        theta = torch.exp(model.module.px_r_mu).detach()
         assert theta.mean().item() == pytest.approx(9.0, rel=0.2)
-        # Noise scale: std of px_r should be ~0.1
-        assert model.module.px_r.detach().std().item() == pytest.approx(0.1, abs=0.05)
+        # Noise scale: std of px_r_mu should be ~0.1
+        assert model.module.px_r_mu.detach().std().item() == pytest.approx(0.1, abs=0.05)
+        # log_sigma should be initialized at log(0.1)
+        assert model.module.px_r_log_sigma.detach().mean().item() == pytest.approx(math.log(0.1), abs=0.01)
 
     def test_px_r_init_no_regularisation(self, adata):
-        """Without regularisation, px_r uses standard randn init."""
+        """Without regularisation, px_r_mu uses standard randn init."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
         model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, regularise_dispersion=False)
         # randn init: theta = exp(randn) has median ~1.0
-        theta = torch.exp(model.module.px_r).detach()
+        theta = torch.exp(model.module.px_r_mu).detach()
         assert theta.median().item() < 3.0
 
     def test_additive_background_init_at_prior_mean(self, adata):
@@ -587,11 +592,11 @@ class TestParameterInitialization:
     # --- Multimodal model (RegularizedMultimodalVI) ---
 
     def test_px_r_init_multimodal_gamma_poisson(self, mdata):
-        """Multimodal px_r should be initialized near log(rate^2) per modality."""
+        """Multimodal px_r_mu should be initialized near log(rate^2) per modality."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
         for name in model.module.modality_names:
-            theta = torch.exp(model.module.px_r[name]).detach()
+            theta = torch.exp(model.module.px_r_mu[name]).detach()
             assert theta.mean().item() == pytest.approx(9.0, rel=0.2), f"Failed for {name}"
 
     def test_additive_background_init_multimodal(self, mdata):
@@ -626,11 +631,11 @@ class TestParameterInitialization:
             assert rate.mean().item() == pytest.approx(3.0, rel=0.01), f"Failed for {name}"
 
     def test_px_r_init_custom_prior(self, adata):
-        """px_r initialization adapts to custom regularise_dispersion_prior."""
+        """px_r_mu initialization adapts to custom regularise_dispersion_prior."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
         model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, regularise_dispersion_prior=5.0)
-        # rate=5 → theta = 25 → px_r ≈ log(25) = 3.219
-        theta = torch.exp(model.module.px_r).detach()
+        # rate=5 → theta = 25 → px_r_mu ≈ log(25) = 3.219
+        theta = torch.exp(model.module.px_r_mu).detach()
         assert theta.mean().item() == pytest.approx(25.0, rel=0.2)
 
     def test_additive_bg_prior_stored(self, adata):
@@ -852,7 +857,8 @@ class TestGammaPoissonMode:
             "decoder.px_dropout_decoder.weight": (n_vars, n_hidden),
             "decoder.px_dropout_decoder.bias": (n_vars,),
             # Purpose-driven params
-            "px_r": (n_vars, n_disp),
+            "px_r_mu": (n_vars, n_disp),
+            "px_r_log_sigma": (n_vars, n_disp),
             "dispersion_prior_rate_raw": (n_disp,),
             "additive_background": (n_vars, n_ambient),
             "feature_scaling": (n_fs1 + n_fs2, n_vars),
@@ -904,10 +910,11 @@ class TestRegularizedMultimodalVI:
 
         assert set(module.encoders.keys()) == {"rna", "atac"}
         assert set(module.decoders.keys()) == {"rna", "atac"}
-        assert set(module.px_r.keys()) == {"rna", "atac"}
+        assert set(module.px_r_mu.keys()) == {"rna", "atac"}
+        assert set(module.px_r_log_sigma.keys()) == {"rna", "atac"}
         n_batch = 3
-        assert module.px_r["rna"].shape == (50, n_batch)  # n_rna genes × n_batch (gene-batch default)
-        assert module.px_r["atac"].shape == (30, n_batch)  # n_atac peaks × n_batch
+        assert module.px_r_mu["rna"].shape == (50, n_batch)  # n_rna genes × n_batch (gene-batch default)
+        assert module.px_r_mu["atac"].shape == (30, n_batch)  # n_atac peaks × n_batch
 
     def test_default_additive_background_and_region_factors(self, mdata):
         """Test default additive background on RNA, feature scaling on ATAC."""
@@ -1050,8 +1057,8 @@ class TestRegularizedMultimodalVI:
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, dispersion="gene-batch")
         module = model.module
         n_batch = 3
-        assert module.px_r["rna"].shape == (50, n_batch)
-        assert module.px_r["atac"].shape == (30, n_batch)
+        assert module.px_r_mu["rna"].shape == (50, n_batch)
+        assert module.px_r_mu["atac"].shape == (30, n_batch)
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
 
     def test_extra_metrics_in_loss(self, mdata):
@@ -1672,7 +1679,8 @@ class TestRegularizedMultimodalVI:
             expected[f"decoders.{name}.px_dropout_decoder.bias"] = (n_feat,)
 
             # Purpose-driven params (ParameterDict uses dot notation)
-            expected[f"px_r.{name}"] = (n_feat, n_disp)
+            expected[f"px_r_mu.{name}"] = (n_feat, n_disp)
+            expected[f"px_r_log_sigma.{name}"] = (n_feat, n_disp)
             expected[f"dispersion_prior_rate_raw.{name}"] = (n_disp,)
             expected[f"additive_background.{name}"] = (n_feat, n_ambient)
             expected[f"feature_scaling.{name}"] = (n_fs1 + n_fs2, n_feat)
@@ -1729,7 +1737,8 @@ class TestRegularizedMultimodalVI:
 
         # Shape match for comparable params
         pairs = [
-            ("px_r", "px_r.rna"),
+            ("px_r_mu", "px_r_mu.rna"),
+            ("px_r_log_sigma", "px_r_log_sigma.rna"),
             ("dispersion_prior_rate_raw", "dispersion_prior_rate_raw.rna"),
             ("additive_background", "additive_background.rna"),
             ("feature_scaling", "feature_scaling.rna"),
@@ -1742,9 +1751,10 @@ class TestRegularizedMultimodalVI:
         # Deterministic params — exact match
         assert torch.allclose(sm_sd["dispersion_prior_rate_raw"], mm_sd["dispersion_prior_rate_raw.rna"])
         assert torch.allclose(sm_sd["feature_scaling"], mm_sd["feature_scaling.rna"])
+        assert torch.allclose(sm_sd["px_r_log_sigma"], mm_sd["px_r_log_sigma.rna"])
 
         # Stochastic params — mean should be close
-        assert torch.allclose(sm_sd["px_r"].mean(), mm_sd["px_r.rna"].mean(), atol=0.5)
+        assert torch.allclose(sm_sd["px_r_mu"].mean(), mm_sd["px_r_mu.rna"].mean(), atol=0.5)
         assert torch.allclose(sm_sd["additive_background"].mean(), mm_sd["additive_background.rna"].mean(), atol=0.1)
 
         # Encoder shapes match (same n_hidden, n_input for RNA)

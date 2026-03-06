@@ -304,8 +304,10 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 log_vars = log_vars * library_log_vars_weight
             self.register_buffer("library_log_vars", log_vars)
 
-        # Initialize px_r at prior equilibrium when regularisation is active.
-        # Containment prior: Exp(rate) on 1/sqrt(theta) → theta = rate² at equilibrium.
+        # Initialize px_r variational posterior at prior equilibrium when regularisation is active.
+        # Variational LogNormal posterior: q(theta) = LogNormal(mu, sigma)
+        # mu is initialized at log(rate^2) so E[theta] ≈ rate^2 at init.
+        # log_sigma is initialized at log(0.1) for small initial variance.
         # Override with px_r_init_mean/px_r_init_std for ablation experiments.
         if px_r_init_mean is not None:
             _px_r_init = px_r_init_mean
@@ -315,20 +317,23 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         else:
             _px_r_init = None
         _px_r_std = px_r_init_std if px_r_init_std is not None else (0.1 if _px_r_init is not None else 1.0)
+        _log_sigma_init = math.log(0.1)
 
         if self.dispersion == "gene":
             if _px_r_init is not None:
-                self.px_r = torch.nn.Parameter(torch.full((n_input,), _px_r_init) + _px_r_std * torch.randn(n_input))
+                self.px_r_mu = torch.nn.Parameter(torch.full((n_input,), _px_r_init) + _px_r_std * torch.randn(n_input))
             else:
-                self.px_r = torch.nn.Parameter(_px_r_std * torch.randn(n_input))
+                self.px_r_mu = torch.nn.Parameter(_px_r_std * torch.randn(n_input))
+            self.px_r_log_sigma = torch.nn.Parameter(torch.full((n_input,), _log_sigma_init))
         elif self.dispersion == "gene-batch":
             n_disp = self.n_dispersion_cats
             if _px_r_init is not None:
-                self.px_r = torch.nn.Parameter(
+                self.px_r_mu = torch.nn.Parameter(
                     torch.full((n_input, n_disp), _px_r_init) + _px_r_std * torch.randn(n_input, n_disp)
                 )
             else:
-                self.px_r = torch.nn.Parameter(_px_r_std * torch.randn(n_input, n_disp))
+                self.px_r_mu = torch.nn.Parameter(_px_r_std * torch.randn(n_input, n_disp))
+            self.px_r_log_sigma = torch.nn.Parameter(torch.full((n_input, n_disp), _log_sigma_init))
         elif self.dispersion == "gene-cell":
             pass
         else:
@@ -728,11 +733,19 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         if self.dispersion == "gene-batch":
             _disp_idx = dispersion_index if dispersion_index is not None else batch_index
-            px_r = linear(one_hot(_disp_idx.squeeze(-1).long(), self.n_dispersion_cats).float(), self.px_r)
+            _oh = one_hot(_disp_idx.squeeze(-1).long(), self.n_dispersion_cats).float()
+            px_r_mu = linear(_oh, self.px_r_mu)
+            px_r_log_sigma = linear(_oh, self.px_r_log_sigma)
         elif self.dispersion == "gene":
-            px_r = self.px_r
+            px_r_mu = self.px_r_mu
+            px_r_log_sigma = self.px_r_log_sigma
 
-        px_r = torch.exp(px_r)
+        # Variational LogNormal posterior: sample during training, use mean at inference
+        px_r_sigma = torch.exp(px_r_log_sigma)
+        if self.training:
+            px_r = torch.exp(px_r_mu + px_r_sigma * torch.randn_like(px_r_mu))
+        else:
+            px_r = torch.exp(px_r_mu)
 
         # Feature scaling (cell2location-style per-covariate multiplicative scaling)
         if self.use_feature_scaling:
@@ -769,6 +782,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             MODULE_KEYS.PX_KEY: px,
             MODULE_KEYS.PL_KEY: pl,
             MODULE_KEYS.PZ_KEY: pz,
+            "px_r_mu": px_r_mu,
+            "px_r_log_sigma": px_r_log_sigma,
+            "px_r_sampled": px_r,
         }
 
     def loss(
@@ -801,16 +817,21 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         loss = torch.mean(reconst_loss + weighted_kl_local)
 
-        # Hierarchical dispersion regularisation (cell2location-style).
+        # Variational dispersion regularisation (replaces MAP with proper posterior).
         # Two-level prior:
         #   Level 1: alpha_g_phi_hyp ~ Gamma(alpha_prior, beta_prior)  [learned rate]
         #   Level 2: 1/sqrt(theta) ~ Exponential(alpha_g_phi_hyp)      [per-gene dispersion]
-        # The learned rate adapts regularisation strength during training.
+        # Variational posterior: q(log_theta) = Normal(mu, sigma) → theta = exp(mu + sigma*eps)
+        # KL = -entropy(q) - E_q[log p(1/sqrt(theta))]
         # Scaled by 1/N (number of observations in mini-batch).
         if self.regularise_dispersion:
             from torch.distributions import Gamma
 
             n_obs = x.shape[0]
+
+            # Use raw parameter tensors for KL (not per-cell resolved)
+            px_r_log_sigma = self.px_r_log_sigma
+            px_r_sigma = torch.exp(px_r_log_sigma)
 
             # Level 1: learned rate with Gamma hyper-prior
             learned_rate = torch.nn.functional.softplus(self.dispersion_prior_rate_raw)
@@ -824,20 +845,25 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             )
 
             # Level 2: Exponential prior on dispersion with learned rate
-            # Broadcast rate to match px_r shape
+            # Broadcast rate to match px_r_mu shape
             if self.dispersion == "gene-batch":
-                # learned_rate: (n_dispersion_cats,), px_r: (n_input, n_dispersion_cats)
-                rate = learned_rate.unsqueeze(0).expand_as(self.px_r)
+                rate = learned_rate.unsqueeze(0).expand_as(self.px_r_mu)
             elif self.dispersion == "gene-label":
-                rate = learned_rate.unsqueeze(0).expand_as(self.px_r)
+                rate = learned_rate.unsqueeze(0).expand_as(self.px_r_mu)
             else:
-                # learned_rate: (1,), px_r: (n_input,)
-                rate = learned_rate.expand_as(self.px_r)
+                rate = learned_rate.expand_as(self.px_r_mu)
 
-            # Containment prior: Exp on 1/sqrt(theta) (cell2location direction)
-            px_r_transformed = torch.exp(-self.px_r).pow(0.5)
-            neg_log_prior = -Exponential(rate).log_prob(px_r_transformed).sum()
-            loss = loss + (neg_log_prior + neg_log_hyper_prior) / n_obs
+            # Analytic LogNormal entropy: H[q] = sum(log_sigma + 0.5*log(2*pi*e))
+            entropy = (px_r_log_sigma + 0.5 * math.log(2 * math.pi * math.e)).sum()
+
+            # MC estimate of E_q[log p(1/sqrt(theta))] using fresh sample from parameter-level posterior
+            px_r_sample = torch.exp(self.px_r_mu + px_r_sigma * torch.randn_like(self.px_r_mu))
+            px_r_transformed = (1.0 / px_r_sample).pow(0.5)
+            log_prior = Exponential(rate).log_prob(px_r_transformed).sum()
+
+            # KL = -entropy - E_q[log p]
+            dispersion_kl = -entropy - log_prior
+            loss = loss + (dispersion_kl + neg_log_hyper_prior) / n_obs
 
         # Additive background Gamma prior (cell2location-style s_g_gene_add).
         # Gamma(alpha, beta) on exp(additive_background) pushes background small.
