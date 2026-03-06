@@ -232,37 +232,38 @@ def build_gastrula_mudata(
     rds_dir = os.path.join(data_dir, rds_subdir)
     t_start = time.time()
 
-    # --- Step 1: Load RNA h5ad ---
+    # --- Step 1: Load obs-only from RNA h5ad (backed mode — no X in memory) ---
     h5ad_path = os.path.join(data_dir, "gastrula_to_pup_rna_qc.h5ad")
-    _print(f"Loading {h5ad_path}...", verbose)
-    adata = sc.read_h5ad(h5ad_path)
-    _print(f"RNA: {adata.shape}, dtype={adata.X.dtype}, RSS={_rss_gb():.1f}GB", verbose)
+    _print(f"Loading obs from {h5ad_path} (backed)...", verbose)
+    adata_backed = sc.read_h5ad(h5ad_path, backed="r")
+    obs = adata_backed.obs.copy()  # ~1GB DataFrame, NOT the 188GB X matrix
+    var_names = adata_backed.var_names.copy()
+    n_total = len(obs)
+    _print(f"RNA: ({n_total}, {len(var_names)}), RSS={_rss_gb():.1f}GB", verbose)
 
     # --- Step 2: Load scrublet scores (auto-detect) ---
     scrublet_csv = os.path.join(data_dir, "scrublet_scores.csv")
     if os.path.exists(scrublet_csv):
         scores = pd.read_csv(scrublet_csv, index_col="cell_id")
-        adata.obs["doublet_score"] = scores["doublet_score"].reindex(adata.obs_names).values
-        adata.obs["predicted_doublet"] = scores["predicted_doublet"].reindex(adata.obs_names).fillna(False).values
-        n_scored = scores.index.isin(adata.obs_names).sum()
-        _print(f"Scrublet scores: {n_scored:,} / {adata.n_obs:,} cells", verbose)
+        obs["doublet_score"] = scores["doublet_score"].reindex(obs.index).values
+        obs["predicted_doublet"] = scores["predicted_doublet"].reindex(obs.index).fillna(False).values
+        n_scored = scores.index.isin(obs.index).sum()
+        _print(f"Scrublet scores: {n_scored:,} / {n_total:,} cells", verbose)
         del scores
     else:
         _print(f"Scrublet scores not found at {scrublet_csv} — skipping", verbose)
 
-    # --- Step 3: Cell QC filter (EARLY, before loading RDS) ---
-    obs = adata.obs
+    # --- Step 3: Cell QC filter (EARLY, before loading any X data) ---
     cell_mask = (
         (obs["n_genes_by_counts"] > min_genes)
         & (obs["total_counts"] > min_counts)
         & (obs["total_counts"] < max_counts)
         & (obs["mt_frac"] < max_mt_frac)
     )
-    n_before = adata.n_obs
     n_after = cell_mask.sum()
     _print(
-        f"Cell QC: {n_before:,} -> {n_after:,} cells "
-        f"({n_before - n_after:,} removed, {100 * (n_before - n_after) / n_before:.1f}%)",
+        f"Cell QC: {n_total:,} -> {n_after:,} cells "
+        f"({n_total - n_after:,} removed, {100 * (n_total - n_after) / n_total:.1f}%)",
         verbose,
     )
 
@@ -277,39 +278,38 @@ def build_gastrula_mudata(
         )
         del obs_prefilter
 
-    # Save passing cell IDs and obs BEFORE subsetting (to avoid double-memory peak)
     passing_idx = cell_mask.values
-    passing_cell_names = adata.obs_names[passing_idx]
+    passing_cell_names = obs.index[passing_idx]
     passing_cells = set(passing_cell_names)
-    shared_obs = adata.obs.loc[passing_idx].copy()
+    shared_obs = obs.loc[passing_idx].copy()
     del cell_mask
-    _print(f"RSS before freeing full RNA: {_rss_gb():.1f}GB", verbose)
+    _print(f"RSS after QC (obs-only): {_rss_gb():.1f}GB", verbose)
 
-    # --- Step 5: Shared genes + RNA gene filtering ---
-    # Get shared genes BEFORE freeing adata (need var_names)
+    # --- Step 5: Shared genes + load RNA X for passing cells only ---
     _print("Getting shared genes from first RDS file...", verbose)
     _exon = read_rds(os.path.join(rds_dir, "embryo_1_exp_exon.rds"))
     rds_gene_index = pd.Index(list(_exon.dimnames[0]))
     del _exon
     gc.collect()
 
-    shared_genes = adata.var_names.intersection(rds_gene_index)
-    _print(f"Shared genes: {len(shared_genes)} / {adata.n_vars} (RNA) / {len(rds_gene_index)} (RDS)", verbose)
+    shared_genes = var_names.intersection(rds_gene_index)
+    _print(f"Shared genes: {len(shared_genes)} / {len(var_names)} (RNA) / {len(rds_gene_index)} (RDS)", verbose)
 
     # Precompute column indices for RDS → shared_genes mapping
     col_indices = rds_gene_index.get_indexer(shared_genes)
     assert (col_indices >= 0).all(), "Some shared genes not found in RDS gene index"
 
-    # Subset RNA to passing cells + shared genes, then gene filter
-    # Use direct indexing on the view to avoid full copy of original
-    adata_sub = adata[passing_idx][:, shared_genes]
-    n_vars_orig = adata.n_vars
-    del adata  # free the 188GB original BEFORE copying the subset
+    # Read ONLY passing cells + shared genes from backed h5ad (never loads full 188GB X)
+    _print(f"Reading X for {n_after:,} passing cells from backed h5ad...", verbose)
+    shared_gene_mask = var_names.isin(shared_genes)
+    adata_sub = adata_backed[passing_idx, shared_gene_mask].to_memory()
+    adata_backed.file.close()
+    del adata_backed, obs
     gc.collect()
-    _print(f"RSS after freeing original RNA: {_rss_gb():.1f}GB", verbose)
+    _print(f"RNA subset: {adata_sub.shape}, dtype={adata_sub.X.dtype}, RSS={_rss_gb():.1f}GB", verbose)
 
-    adata_sub = adata_sub.copy()  # materialize the view (now only ~120GB)
-    gc.collect()
+    n_vars_orig = len(var_names)
+    del var_names
 
     selected_rna = filter_genes(adata_sub, **gene_filter_kwargs)
     adata_rna = adata_sub[:, selected_rna].copy()
