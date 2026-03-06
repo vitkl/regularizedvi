@@ -442,6 +442,41 @@ class TestAmbientRegularizedSCVI:
         assert any("leiden" in p for p in saved)
         assert any("distances" in p for p in saved)
 
+    def test_save_load_roundtrip(self, adata, tmp_path):
+        """Test model save/load round-trip works."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            ambient_covariate_keys=["batch"],
+            dispersion_key="batch",
+            library_size_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, n_layers=1)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        save_dir = str(tmp_path / "model")
+        model.save(save_dir, overwrite=True)
+        loaded = regularizedvi.AmbientRegularizedSCVI.load(save_dir, adata=adata)
+        assert loaded.is_trained_
+        np.testing.assert_array_equal(model.get_latent_representation(), loaded.get_latent_representation())
+
+    def test_save_load_roundtrip_encoder_covs(self, adata, tmp_path):
+        """Test save/load with encoder_covariate_keys (regression test for pickle bug)."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            ambient_covariate_keys=["batch"],
+            dispersion_key="batch",
+            library_size_key="batch",
+            encoder_covariate_keys=["batch", "site"],
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, n_layers=1)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        save_dir = str(tmp_path / "model")
+        model.save(save_dir, overwrite=True)
+        loaded = regularizedvi.AmbientRegularizedSCVI.load(save_dir, adata=adata)
+        assert loaded.is_trained_
+        np.testing.assert_array_equal(model.get_latent_representation(), loaded.get_latent_representation())
+
     def test_plot_umap_comparison(self, adata):
         """Test plot_umap_comparison returns a figure without mutating X_umap."""
         import matplotlib
@@ -1431,6 +1466,35 @@ class TestRegularizedMultimodalVI:
         assert len(saved) > 0
         assert any("joint" in p for p in saved)
         assert any("distances" in p for p in saved)
+
+    def test_save_load_roundtrip_multimodal(self, mdata, tmp_path):
+        """Test multimodal model save/load round-trip works."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        save_dir = str(tmp_path / "model")
+        model.save(save_dir, overwrite=True)
+        loaded = regularizedvi.RegularizedMultimodalVI.load(save_dir, adata=mdata)
+        assert loaded.is_trained_
+        np.testing.assert_array_equal(model.get_latent_representation(), loaded.get_latent_representation())
+
+    def test_save_load_roundtrip_multimodal_encoder_covs(self, mdata, tmp_path):
+        """Test multimodal save/load with encoder_covariate_keys (regression test for pickle bug)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            ambient_covariate_keys=["batch"],
+            dispersion_key="batch",
+            library_size_key="batch",
+            nn_conditioning_covariate_keys=["site"],
+            encoder_covariate_keys=["batch", "site"],
+        )
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        save_dir = str(tmp_path / "model")
+        model.save(save_dir, overwrite=True)
+        loaded = regularizedvi.RegularizedMultimodalVI.load(save_dir, adata=mdata)
+        assert loaded.is_trained_
+        np.testing.assert_array_equal(model.get_latent_representation(), loaded.get_latent_representation())
 
     def test_plot_modality_attribution(self, mdata):
         """Test plot_modality_attribution returns attribution dict and figure."""

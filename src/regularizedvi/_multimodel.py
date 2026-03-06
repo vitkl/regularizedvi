@@ -453,9 +453,7 @@ class RegularizedMultimodalVI(
         # Encoder covariates: False = no encoder categoricals (default, matches scVI)
         _encoder_cov_keys = None  # None → empty CategoricalJointObsField
         if encoder_covariate_keys is not False:
-            import warnings as _warn
-
-            _warn.warn(
+            warnings.warn(
                 "encoder_covariate_keys is set to a non-default value. "
                 "Injecting categorical covariates into the encoder is non-standard "
                 "(scVI, MultiVI, PeakVI all default to no encoder categoricals) "

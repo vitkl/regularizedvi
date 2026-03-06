@@ -49,3 +49,7 @@ _check_alive.sh
 _add_cell_ids.py
 _check_h5mu_obs.py
 _fix_notebook_sources.py
+_check_model.py
+_check_model.sh
+_extract_traceback.py
+_extract_traceback.sh
