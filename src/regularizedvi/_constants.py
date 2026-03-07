@@ -66,6 +66,9 @@ DEFAULT_DROPOUT_ON_INPUT = True
 # --- Training metrics ---
 DEFAULT_COMPUTE_PEARSON = False
 
+# --- Early stopping ---
+DEFAULT_EARLY_STOPPING_MIN_DELTA_PER_FEATURE = 0.0003
+
 # --- Recommended training defaults (documented, not enforced) ---
 # These are not enforced in code but recommended in docs/tutorial:
 # n_hidden=512, n_latent=128, n_layers=1
