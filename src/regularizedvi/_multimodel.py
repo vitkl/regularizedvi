@@ -245,6 +245,7 @@ class RegularizedMultimodalVI(
         datasplitter_kwargs: dict | None = None,
         plan_kwargs: dict | None = None,
         validation_batch_size: int | None = None,
+        early_stopping_min_delta_per_feature: float | None = None,
         **trainer_kwargs,
     ):
         """Train the model with optional larger validation batch size.
@@ -255,18 +256,26 @@ class RegularizedMultimodalVI(
             Batch size for the validation DataLoader. If ``None`` (default),
             uses the same ``batch_size`` as training. Larger values (e.g. 8192)
             reduce noise in Pearson correlation metrics computed on validation.
+        early_stopping_min_delta_per_feature
+            Per-feature scaling factor for auto-computed ``early_stopping_min_delta``.
+            The total ``min_delta = n_features * early_stopping_min_delta_per_feature``.
+            Only used when ``early_stopping=True`` and ``early_stopping_min_delta``
+            is not explicitly set in ``trainer_kwargs``. Default from constants.
         **kwargs
             All other arguments are passed to
             :meth:`~scvi.model.base.UnsupervisedTrainingMixin.train`.
         """
+        from regularizedvi._constants import DEFAULT_EARLY_STOPPING_MIN_DELTA_PER_FEATURE
+
         datasplitter_kwargs = datasplitter_kwargs or {}
         if validation_batch_size is not None:
             datasplitter_kwargs.setdefault("val_batch_size", validation_batch_size)
 
         # Auto-scale early_stopping_min_delta by total n_features if not explicitly set
         if early_stopping and "early_stopping_min_delta" not in trainer_kwargs:
+            _per_feat = early_stopping_min_delta_per_feature or DEFAULT_EARLY_STOPPING_MIN_DELTA_PER_FEATURE
             n_features = sum(self.summary_stats.get(f"n_X_{name}", 0) for name in self.module.modality_names)
-            trainer_kwargs["early_stopping_min_delta"] = n_features * 0.0003
+            trainer_kwargs["early_stopping_min_delta"] = n_features * _per_feat
 
         return super().train(
             max_epochs=max_epochs,
@@ -1484,6 +1493,7 @@ class RegularizedMultimodalVI(
         size: float = 2,
         show_legend: bool = False,
         figsize_per_panel: tuple[float, float] = (7, 7),
+        palette: list[str] | None = None,
     ) -> matplotlib.figure.Figure:
         """Side-by-side UMAP comparison across latent representations.
 
@@ -1502,12 +1512,18 @@ class RegularizedMultimodalVI(
             Whether to show legend on each panel.
         figsize_per_panel
             Size of each individual panel.
+        palette
+            Color palette for categorical variables. If None, uses an extended
+            150-color palette from scanpy.
 
         Returns
         -------
         matplotlib.figure.Figure
         """
         import scanpy as sc
+
+        if palette is None:
+            palette = sc.pl.palettes.default_102 + sc.pl.palettes.zeileis_28 + sc.pl.palettes.vega_20_scanpy
 
         if umap_keys is None:
             umap_keys = []
@@ -1540,6 +1556,7 @@ class RegularizedMultimodalVI(
                     show=False,
                     title=f"{title} - {color_key}" if n_colors > 1 else title,
                     legend_loc="right margin" if show_legend else "none",
+                    palette=palette,
                 )
 
         fig.tight_layout()
