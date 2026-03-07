@@ -73,3 +73,21 @@
     Multimodal: regularise_background=False, centering=ON for both modalities.
     RNA sensitivity=1.0, ATAC sensitivity=0.2.
     Tests whether centering both modalities (with lower ATAC sensitivity) improves joint latent.
+
+# ── Lower early stopping sensitivity (10x less aggressive) ──
+
+- job_name: exp8_mm_ctr_both_lowes
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp8_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r early_stopping_min_delta_per_feature 0.00003 -r results_folder results/exp8_mm_ctr_both_lowes/"
+  description: >-
+    Same as exp7 but with 10x lower early stopping sensitivity (0.00003 vs default 0.0003).
+    Exp7 stopped at only 134 epochs — this tests whether longer training improves results.
+
+- job_name: exp9_rna_nobg_ctr_lowes
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp9_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r early_stopping_min_delta_per_feature 0.00003 -r results_folder results/exp9_rna_nobg_ctr_lowes/"
+  description: >-
+    Same as exp4 (RNA, bg=F, centering=ON) but with 10x lower early stopping sensitivity.
+    Tests whether RNA model also benefits from longer training.
