@@ -7,102 +7,69 @@
 #   output:      output notebook path (papermill writes executed notebook here)
 #   overrides:   extra papermill -r flags (empty = use notebook defaults)
 #   description: what this ablation tests
+#
+# All experiments use variational LogNormal dispersion posterior (always active).
+# New variables tested:
+#   regularise_background: True/False — Gamma prior on additive background
+#   library_log_means_centering_sensitivity: None (skip) / 1.0 (center to mean=0)
 
-# ── Single-modal (RNA-only GammaPoisson) ──
+# ── Single-modal RNA: regularise_background x centering (4 experiments) ──
 
-- job_name: gp_es_default
+- job_name: exp1_rna_bg_noctr
   notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
-  output: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping_out.ipynb
-  overrides: ""
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp1_out.ipynb
+  overrides: "-r regularise_background 1 -r results_folder results/exp1_rna_bg_noctr/"
   description: >-
-    Baseline single-modal RNA model with all regularisation enabled.
-    Uses GammaPoisson likelihood, additive background prior (alpha=1, beta=100),
-    per-covariate feature scaling (site + donor), and early stopping.
+    regularise_background=True, centering=OFF.
+    Background prior active, library prior at original scale (~7.5 log-mean).
 
-- job_name: gp_es_nobg
+- job_name: exp2_rna_nobg_noctr
   notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
-  output: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping_nobg_out.ipynb
-  overrides: "-r regularise_background 0"
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp2_out.ipynb
+  overrides: "-r regularise_background 0 -r results_folder results/exp2_rna_nobg_noctr/"
   description: >-
-    Ablation: disable additive ambient RNA background prior.
-    Tests whether the per-batch background correction term improves
-    reconstruction and latent quality on the bone marrow RNA dataset.
+    regularise_background=False, centering=OFF.
+    No background prior, library prior at original scale.
 
-- job_name: gp_es_beta5
+- job_name: exp3_rna_bg_ctr
   notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
-  output: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping_beta5_out.ipynb
-  overrides: "-r additive_bg_prior_beta 5.0"
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp3_out.ipynb
+  overrides: "-r regularise_background 1 -r library_log_means_centering_sensitivity 1.0 -r results_folder results/exp3_rna_bg_ctr/"
   description: >-
-    Ablation: weaker background prior (beta=5 vs default beta=100).
-    Prior mean shifts from 0.01 to 0.2, allowing larger background estimates.
-    Tests sensitivity of reconstruction quality to background prior strength.
+    regularise_background=True, centering=ON (sensitivity=1.0).
+    Background prior active, library prior centered to mean=0 (encoder starts near prior).
 
-# ── Multimodal (RNA+ATAC, concatenation latent) ──
+- job_name: exp4_rna_nobg_ctr
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp4_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r results_folder results/exp4_rna_nobg_ctr/"
+  description: >-
+    regularise_background=False, centering=ON (sensitivity=1.0).
+    No background prior, library prior centered to mean=0.
 
-- job_name: mm_es_default
+# ── Multimodal RNA+ATAC: centering variations (3 experiments) ──
+
+- job_name: exp5_mm_noctr
   notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
-  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_out.ipynb
-  overrides: ""
+  output: docs/notebooks/bone_marrow_mm_es_exp5_out.ipynb
+  overrides: "-r regularise_background 0 -r results_folder results/exp5_mm_noctr/"
   description: >-
-    Baseline multimodal RNA+ATAC model with all regularisation enabled.
-    Uses concatenation latent (separate z_rna + z_atac), additive background
-    prior (alpha=1, beta=100), feature scaling for both modalities, and
-    early stopping.
+    Multimodal baseline: regularise_background=False, centering=OFF for both modalities.
+    Library priors at original scale.
 
-- job_name: mm_es_nobg
+- job_name: exp6_mm_ctr_rna
   notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
-  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_nobg_out.ipynb
-  overrides: "-r regularise_background 0"
+  output: docs/notebooks/bone_marrow_mm_es_exp6_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r results_folder results/exp6_mm_ctr_rna/"
   description: >-
-    Ablation: disable additive ambient RNA background prior in multimodal model.
-    Tests whether per-batch background correction improves joint latent quality
-    and cross-modality integration on bone marrow RNA+ATAC data.
+    Multimodal: regularise_background=False, centering=ON for RNA only (sensitivity=1.0).
+    ATAC library prior at original scale. Tests whether RNA centering alone helps.
 
-- job_name: mm_es_beta5
+- job_name: exp7_mm_ctr_both
   notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
-  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_beta5_out.ipynb
-  overrides: "-r additive_bg_prior_beta 5.0"
+  output: docs/notebooks/bone_marrow_mm_es_exp7_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r results_folder results/exp7_mm_ctr_both/"
   description: >-
-    Ablation: weaker background prior (beta=5 vs default beta=100) in
-    multimodal model. Tests sensitivity of joint latent and per-modality
-    reconstruction to background prior strength.
-
-- job_name: mm_es_nofs
-  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
-  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_nofs_out.ipynb
-  overrides: "-r use_feature_scaling 0"
-  description: >-
-    Ablation: disable per-covariate multiplicative feature scaling.
-    Background prior remains enabled. Tests whether the Gamma(alpha, beta)
-    per-gene scaling factors (conditioned on site/donor) improve latent
-    quality beyond what batch correction alone provides.
-
-- job_name: mm_es_nofs_nobg
-  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
-  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_nofs_nobg_out.ipynb
-  overrides: "-r use_feature_scaling 0 -r regularise_background 0"
-  description: >-
-    Minimal model: both feature scaling and background prior disabled.
-    Only batch correction via encoder conditioning remains. Serves as
-    a lower bound to quantify the combined benefit of both regularisation
-    components.
-
-- job_name: mm_es_nobg_fs
-  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
-  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_nobg_fs_out.ipynb
-  overrides: "-r regularise_background 0 -r use_feature_scaling 1"
-  description: >-
-    Ablation: feature scaling ON, background prior OFF. Isolates the
-    contribution of per-covariate feature scaling when background
-    correction is absent. Compare with mm_es_nofs_nobg (both off)
-    and mm_es_nobg (scaling off, bg off) to disentangle effects.
-
-- job_name: mm_es_rerun
-  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
-  output: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping_rerun_out.ipynb
-  overrides: ""
-  description: >-
-    Rerun of default multimodal model with bug fixes applied: corrected
-    Pearson metric normalisation (per-cell proportions instead of
-    library-scaled px_rate), fixed bool('0') papermill coercion bug,
-    and W&B logging enabled. Verifies reproducibility against mm_es_default.
+    Multimodal: regularise_background=False, centering=ON for both modalities.
+    RNA sensitivity=1.0, ATAC sensitivity=0.2.
+    Tests whether centering both modalities (with lower ATAC sensitivity) improves joint latent.
