@@ -39,6 +39,7 @@ from regularizedvi._constants import (
     DEFAULT_FEATURE_SCALING_PRIOR_BETA,
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
     DEFAULT_LIBRARY_N_HIDDEN,
+    DEFAULT_MODALITY_SCALE_PRIOR_CONCENTRATION,
     DEFAULT_REGULARISE_BACKGROUND,
     DEFAULT_REGULARISE_DISPERSION,
     DEFAULT_REGULARISE_DISPERSION_PRIOR,
@@ -162,6 +163,8 @@ class RegularizedMultimodalVI(
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_BATCH_NORM,
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
+        learnable_modality_scaling: bool = False,
+        modality_scale_prior_concentration: float = DEFAULT_MODALITY_SCALE_PRIOR_CONCENTRATION,
         **kwargs,
     ):
         AmbientRegularizedSCVI._validate_bool_params(
@@ -211,6 +214,8 @@ class RegularizedMultimodalVI(
             "use_batch_norm": use_batch_norm,
             "use_layer_norm": use_layer_norm,
             "compute_pearson": compute_pearson,
+            "learnable_modality_scaling": learnable_modality_scaling,
+            "modality_scale_prior_concentration": modality_scale_prior_concentration,
             **kwargs,
         }
 

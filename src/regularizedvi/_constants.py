@@ -43,6 +43,9 @@ DEFAULT_FEATURE_SCALING_PRIOR_ALPHA = 200.0
 DEFAULT_FEATURE_SCALING_PRIOR_BETA = 200.0
 DEFAULT_USE_FEATURE_SCALING = True
 
+# --- Learnable per-modality scaling (global scale factor on size factors) ---
+DEFAULT_MODALITY_SCALE_PRIOR_CONCENTRATION = 5.0
+
 # Registry key for feature scaling covariates (separate from encoder/decoder covariates)
 FEATURE_SCALING_COVS_KEY = "feature_scaling_covs"
 

@@ -1765,6 +1765,67 @@ class TestRegularizedMultimodalVI:
         # Encoder weight init distributions similar
         assert torch.allclose(sm_enc.std(), mm_enc.std(), rtol=0.5)
 
+    # --- Learnable modality scaling ---
+
+    def test_learnable_modality_scaling_default_off(self, mdata):
+        """No modality_scale_raw params when learnable_modality_scaling=False (default)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        module = model.module
+        assert len(module.modality_scale_raw) == 0
+        assert len(module.modality_scale_init) == 0
+        assert module.learnable_modality_scaling is False
+
+    def test_learnable_modality_scaling_enabled(self, mdata):
+        """Params created with correct init, model trains, metrics in history."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            learnable_modality_scaling=True,
+            library_log_means_centering_sensitivity={"rna": 1.0, "atac": 0.2},
+        )
+        module = model.module
+        assert module.learnable_modality_scaling is True
+        assert set(module.modality_scale_raw.keys()) == {"rna", "atac"}
+        assert set(module.modality_scale_init.keys()) == {"rna", "atac"}
+
+        # Check init values: softplus(raw)/0.7 ≈ init_val
+        for name, expected in [("rna", 1.0), ("atac", 0.2)]:
+            actual = torch.nn.functional.softplus(module.modality_scale_raw[name]) / 0.7
+            assert abs(actual.item() - expected) < 0.01, f"{name}: expected {expected}, got {actual.item()}"
+
+        # Train and check history
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        history = model.history_
+        assert "modality_scale_rna_train" in history
+        assert "modality_scale_atac_train" in history
+
+    def test_learnable_modality_scaling_init_from_centering(self, mdata):
+        """When centering sensitivity provided, init values match; without → default 1.0."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        # With centering sensitivity
+        model1 = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            learnable_modality_scaling=True,
+            library_log_means_centering_sensitivity={"rna": 0.5, "atac": 0.3},
+        )
+        assert model1.module.modality_scale_init["rna"] == 0.5
+        assert model1.module.modality_scale_init["atac"] == 0.3
+
+        # Without centering sensitivity → default 1.0 for all
+        model2 = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            learnable_modality_scaling=True,
+        )
+        assert model2.module.modality_scale_init["rna"] == 1.0
+        assert model2.module.modality_scale_init["atac"] == 1.0
+
 
 class TestWandBUtilities:
     """Tests for W&B utility functions (no-op when wandb_project is None)."""

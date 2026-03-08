@@ -216,6 +216,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         n_library_cats: int | None = None,
         # Training metrics
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
+        # Learnable per-modality scaling on size factors
+        learnable_modality_scaling: bool = False,
+        modality_scale_prior_concentration: float = 5.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -500,6 +503,21 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         for name in feature_scaling_modalities:
             n_feat = n_input_per_modality[name]
             self.feature_scaling[name] = nn.Parameter(torch.zeros(n_feature_scaling_rows, n_feat))
+
+        # ---- Learnable per-modality scaling on size factors ----
+        self.learnable_modality_scaling = learnable_modality_scaling
+        self.modality_scale_prior_concentration = modality_scale_prior_concentration
+        self.modality_scale_raw = nn.ParameterDict()
+        self.modality_scale_init = {}
+        if learnable_modality_scaling:
+            _sensitivity = library_log_means_centering_sensitivity or {}
+            for name in self.modality_names:
+                init_val = _sensitivity.get(name, 1.0)
+                self.modality_scale_init[name] = init_val
+                # softplus(raw)/0.7 = init_val → raw = inverse_softplus(init_val * 0.7)
+                target = init_val * 0.7
+                raw_init = math.log(math.exp(target) - 1) if target < 20 else target
+                self.modality_scale_raw[name] = nn.Parameter(torch.tensor(raw_init))
 
     def _get_inference_input(
         self,
@@ -801,6 +819,11 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     scaling = rf_transformed
                 px_rate = px_rate * scaling
 
+            # Learnable per-modality scaling (global scale factor on expected counts)
+            if name in self.modality_scale_raw:
+                mod_scale = torch.nn.functional.softplus(self.modality_scale_raw[name]) / 0.7
+                px_rate = px_rate * mod_scale
+
             # Resolve dispersion via variational LogNormal posterior
             _disp_idx = dispersion_index if dispersion_index is not None else batch_index
             if disp in ("gene-batch", "region-batch"):
@@ -902,6 +925,13 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 rl = rl * masks[name].float()
             extra_metrics[f"recon_loss_{name}"] = rl.mean().detach()
             recon_loss = recon_loss + rl
+
+        # ---- Modality scaling metrics (log current values) ----
+        if self.learnable_modality_scaling:
+            for name in self.modality_names:
+                if name in self.modality_scale_raw:
+                    w = torch.nn.functional.softplus(self.modality_scale_raw[name]) / 0.7
+                    extra_metrics[f"modality_scale_{name}"] = w.detach()
 
         # ---- KL divergence on Z ----
         qz_per_modality = inference_outputs["qz_per_modality"]
@@ -1038,6 +1068,20 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 )
                 bg_penalty = bg_penalty + neg_log_prior
             loss = loss + bg_penalty / n_obs
+
+        # ---- Modality scaling Gamma prior ----
+        if self.learnable_modality_scaling and self.modality_scale_init:
+            n_obs = recon_loss.shape[0]
+            ms_penalty = torch.tensor(0.0, device=recon_loss.device)
+            for name, init_val in self.modality_scale_init.items():
+                if name not in self.modality_scale_raw:
+                    continue
+                w = torch.nn.functional.softplus(self.modality_scale_raw[name]) / 0.7
+                conc = self.modality_scale_prior_concentration
+                # Gamma(conc, conc/init_val) has mean=init_val
+                neg_log_prior = -Gamma(conc, conc / init_val).log_prob(w).sum()
+                ms_penalty = ms_penalty + neg_log_prior
+            loss = loss + ms_penalty / n_obs
 
         # ---- Pearson correlation metrics (per modality) ----
         # Normalize to per-cell proportions to remove library size confound:

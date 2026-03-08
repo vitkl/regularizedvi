@@ -91,3 +91,42 @@
   description: >-
     Same as exp4 (RNA, bg=F, centering=ON) but with 10x lower early stopping sensitivity.
     Tests whether RNA model also benefits from longer training.
+
+# ── Wider library prior variance (hypothesis E) ──
+
+- job_name: exp10a_mm_libvar_0.1
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10a_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.1 -r results_folder results/exp10a_mm_libvar_0.1/"
+  description: >-
+    Same as exp7 + 2x wider library prior variance (weight=0.1 vs 0.05).
+    Prior std goes from 0.105 to ~0.15.
+
+- job_name: exp10b_mm_libvar_0.2
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10b_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.2 -r results_folder results/exp10b_mm_libvar_0.2/"
+  description: >-
+    Same as exp7 + 4x wider library prior variance (weight=0.2 vs 0.05).
+    Prior std goes from 0.105 to ~0.21.
+
+- job_name: exp12_rna_libvar_0.2
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp12_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.2 -r results_folder results/exp12_rna_libvar_0.2/"
+  description: >-
+    Same as exp4 (RNA, bg=F, ctr=ON) + 4x wider library prior variance.
+    Tests if wider lib var helps single-modal RNA too.
+
+# ── Learnable per-modality scaling (hypothesis D) ──
+
+- job_name: exp11_mm_learnable_scale
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp11_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r learnable_modality_scaling 1 -r results_folder results/exp11_mm_learnable_scale/"
+  description: >-
+    Same as exp7 + learnable per-modality size factor scaling.
+    Init from centering sensitivity: RNA=1.0, ATAC=0.2.
+    Gamma prior: RNA Gamma(5,5) mean=1.0, ATAC Gamma(5,25) mean=0.2.
+    Applied to px_rate in generative (modifies expected counts).
+    Tests whether learnable modality scaling prevents dispersion drift.
