@@ -130,3 +130,39 @@
     Gamma prior: RNA Gamma(5,5) mean=1.0, ATAC Gamma(5,25) mean=0.2.
     Applied to px_rate in generative (modifies expected counts).
     Tests whether learnable modality scaling prevents dispersion drift.
+
+# ── Stratified validation split (hypothesis C) ──
+# Same hyperparams as originals but with stratified train/val split by l1_cell_type+batch.
+# Tests whether random validation cell selection was causing variable metrics.
+
+- job_name: exp8stratified
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp8stratified_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r early_stopping_min_delta_per_feature 0.00003 -r stratify_validation_key l1_cell_type+batch -r results_folder results/exp8stratified/"
+  description: >-
+    Same as exp8 (MM, centering both, lowES=0.00003) + stratified validation split.
+    Tests if stratified split changes early stopping behavior and dispersion drift.
+
+- job_name: exp9stratified
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp9stratified_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r early_stopping_min_delta_per_feature 0.00003 -r stratify_validation_key l1_cell_type+batch -r results_folder results/exp9stratified/"
+  description: >-
+    Same as exp9 (RNA, centering ON, lowES=0.00003) + stratified validation split.
+    Tests if stratified split changes early stopping behavior for RNA model.
+
+- job_name: exp10bstratified
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10bstratified_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.2 -r stratify_validation_key l1_cell_type+batch -r results_folder results/exp10bstratified/"
+  description: >-
+    Same as exp10b (MM, wider lib var 0.2) + stratified validation split.
+    Tests if stratified split improves wider library variance experiment.
+
+- job_name: exp12stratified
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp12stratified_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.2 -r stratify_validation_key l1_cell_type+batch -r results_folder results/exp12stratified/"
+  description: >-
+    Same as exp12 (RNA, wider lib var 0.2) + stratified validation split.
+    Tests if stratified split improves wider library variance for RNA model.
