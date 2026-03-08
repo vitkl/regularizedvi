@@ -40,104 +40,135 @@ STANDARD_OBS_COLS = [
     "fragment_file_path",
 ]
 
-# Harmonization mappings (original_label -> harmonized_name) per dataset.
-# Derived from annotation_harmonization.md.
+# Harmonization mappings are loaded from annotation_harmonization.md (single
+# source of truth).  Edit the markdown file to change mappings — the Python
+# code reads it at runtime via _get_harmonization_maps().
 
-BONE_MARROW_MAP = {
-    "CD8+ T activated": "CD8+ T",
-    "CD14+ Mono": "CD14+ Mono",
-    "NK": "NK",
-    "CD4+ T activated": "CD4+ T activated",
-    "Naive CD20+ B": "Naive B",
-    "Erythroblast": "Erythroblast",
-    "CD4+ T naive": "CD4+ T naive",
-    "Transitional B": "Transitional B",
-    "Proerythroblast": "Proerythroblast",
-    "CD16+ Mono": "CD16+ Mono",
-    "B1 B": "B1 B",
-    "Normoblast": "Normoblast",
-    "Early Lymphoid": "Lymph prog",
-    "G/M prog": "G/M prog",
-    "pDC": "pDC",
-    "HSC": "HSC",
-    "CD8+ T naive": "CD8+ T naive",
-    "MK/E prog": "MK/E prog",
-    "cDC2": "cDC2",
-    "ILC": "ILC",
-    "Plasma": "Plasma cell",
-    "Other Myeloid": "ID2-hi myeloid prog",
-}
+_HARMONIZATION_MAPS = None
+_HIERARCHY_DF = None
 
-TEA_SEQ_MAP = {
-    "CD4 Naive": "CD4+ T naive",
-    "CD4 TCM": "CD4+ T central memory",
-    "B naive": "Naive B",
-    "CD14 Mono": "CD14+ Mono",
-    "CD8 TEM": "CD8+ T effector memory",
-    "CD8 Naive": "CD8+ T naive",
-    "NK": "NK",
-    "CD4 TEM": "CD4+ T effector memory",
-    "B intermediate": "B intermediate",
-    "MAIT": "MAIT",
-    "Treg": "Treg",
-    "CD16 Mono": "CD16+ Mono",
-    "B memory": "B memory",
-    "gdT": "gamma-delta T",
-    "CD8 TCM": "CD8+ T central memory",
-    "NK_CD56bright": "NK CD56bright",
-    "HSPC": "HSC",
-    "cDC2": "cDC2",
-    "NK Proliferating": "NK proliferating",
-    "dnT": "double-negative T",
-    "Platelet": "Platelet",
-    "ILC": "ILC",
-    "ASDC": "ASDC",
-    "Plasmablast": "Plasma cell",
-    "CD4 CTL": "CD4+ T CTL",
-    "CD8 Proliferating": "CD8+ T proliferating",
-}
 
-NEAT_SEQ_MAP = {
-    "C1": "CD4+ T recently activated",
-    "C2": "Treg",
-    "C3": "Th17",
-    "C4": "CD4+ T central memory",
-    "C5": "Th2",
-    "C6": "Th1",
-    "C7": "CD4+ T uncommitted memory",
-}
+def _parse_harmonization_md(md_path):
+    """Parse annotation_harmonization.md into per-dataset mapping dicts.
 
-CROHNS_MAP = {
-    "CD14+ Monocytes": "CD14+ Mono",
-    "Tcm": "T central memory",
-    "Naive CD4+ T Cells": "CD4+ T naive",
-    "NK Cells": "NK",
-    "CD8+ Cytotoxic T Cells": "CD8+ T",
-    "Transitional B Cells": "Transitional B",
-    "FCGR3A+ Monocytes": "CD16+ Mono",
-    "Resting Naive B Cells": "Naive B",
-    "MAIT Cells": "MAIT",
-    "Th1/Th17 Cells": "Th1/Th17",
-    "GdT Cells": "gamma-delta T",
-    "Activated B Cells": "Activated B",
-    "IFN Responding T Cells": "IFN-responding T",
-    "Conventional Dendritic Cells": "cDC",
-    "Proinflammatory Monocytes": "Proinflammatory Mono",
-    "Plasmacytoid Dendritic Cells": "pDC",
-    "Plasma B Cells": "Plasma cell",
-    "TGFB1+ NK Cells": "NK TGFB1+",
-}
+    Parameters
+    ----------
+    md_path : str or Path
+        Path to annotation_harmonization.md.
 
-LUNG_SPLEEN_MAP = {
-    "Memory_B": "B memory",
-    "CD8_T": "CD8+ T",
-    "NK": "NK",
-    "CD4_T": "CD4+ T",
-    "Naive_B": "Naive B",
-    "Th17": "Th17",
-    "Other": "Other",
-    "Treg": "Treg",
-}
+    Returns
+    -------
+    dict[str, dict[str, str]]
+        ``{source_dataset: {original_label: harmonized_name}}``.
+        Skips section headers (bold text) and entries with empty
+        harmonized_name.
+    """
+    maps = {}
+    with open(md_path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip() for c in line.split("|")]
+            # split on "|" gives empty strings at start/end
+            cells = [c for c in cells if c != ""]
+            if len(cells) < 4:
+                continue
+            original, harmonized, dataset, _col = cells[0], cells[1], cells[2], cells[3]
+            # Skip header row, separator row, section headers, and notes
+            if original in ("original_label", "---") or original.startswith("**") or original.startswith("("):
+                continue
+            if dataset.startswith("---"):
+                continue
+            if not harmonized or not dataset or dataset == "—":
+                continue
+            maps.setdefault(dataset, {})[original] = harmonized
+    return maps
+
+
+def _parse_hierarchy_md(md_path):
+    """Parse annotation_hierarchy.md into a DataFrame.
+
+    Parameters
+    ----------
+    md_path : str or Path
+        Path to annotation_hierarchy.md.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: harmonized_name, level_1, level_2, level_3, level_4.
+        Skips section headers (bold rows with empty level columns).
+    """
+    rows = []
+    with open(md_path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip() for c in line.split("|")]
+            cells = [c for c in cells if c != ""]
+            if len(cells) < 5:
+                continue
+            name, l1, l2, l3, l4 = cells[0], cells[1], cells[2], cells[3], cells[4]
+            # Skip header, separator, and section headers (bold with empty levels)
+            if name in ("harmonized_name", "---") or name.startswith("**"):
+                continue
+            if l1.startswith("---"):
+                continue
+            rows.append({"harmonized_name": name, "level_1": l1, "level_2": l2, "level_3": l3, "level_4": l4})
+    return pd.DataFrame(rows)
+
+
+def _get_harmonization_maps():
+    """Load and cache harmonization maps from annotation_harmonization.md."""
+    global _HARMONIZATION_MAPS
+    if _HARMONIZATION_MAPS is None:
+        md_path = Path(__file__).parent / "annotation_harmonization.md"
+        _HARMONIZATION_MAPS = _parse_harmonization_md(md_path)
+    return _HARMONIZATION_MAPS
+
+
+def _get_hierarchy_df():
+    """Load and cache hierarchy from annotation_hierarchy.md."""
+    global _HIERARCHY_DF
+    if _HIERARCHY_DF is None:
+        md_path = Path(__file__).parent / "annotation_hierarchy.md"
+        _HIERARCHY_DF = _parse_hierarchy_md(md_path)
+    return _HIERARCHY_DF
+
+
+def update_annotations(adata, rename_map=None, add_hierarchy=False, hierarchy_md_path=None):
+    """Update harmonized annotations and optionally add hierarchy levels.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have ``obs["harmonized_annotation"]``.
+    rename_map : dict, optional
+        ``{old_name: new_name}`` for renaming cell types.
+    add_hierarchy : bool
+        If True, join hierarchy levels from annotation_hierarchy.md.
+    hierarchy_md_path : str or Path, optional
+        Override path to hierarchy markdown.  Defaults to
+        ``annotation_hierarchy.md`` next to this file.
+
+    Returns
+    -------
+    AnnData
+        adata with updated obs columns (modified in-place and returned).
+    """
+    if rename_map is not None:
+        adata.obs["harmonized_annotation"] = adata.obs["harmonized_annotation"].map(lambda x: rename_map.get(x, x))
+    if add_hierarchy:
+        if hierarchy_md_path is not None:
+            hier = _parse_hierarchy_md(hierarchy_md_path)
+        else:
+            hier = _get_hierarchy_df()
+        hier = hier.set_index("harmonized_name")
+        for col in ["level_1", "level_2", "level_3", "level_4"]:
+            adata.obs[col] = adata.obs["harmonized_annotation"].map(hier[col].to_dict()).values
+    return adata
 
 
 # ---------------------------------------------------------------------------
@@ -382,15 +413,15 @@ def load_bone_marrow(data_folder: str = "data/") -> sc.AnnData:
 
     # Set obs columns
     adata.obs["batch"] = adata.obs["batch"].values
-    adata.obs["site"] = adata.obs["Site"].values
-    adata.obs["donor"] = adata.obs["DonorNumber"].values
+    adata.obs["site"] = adata.obs["site"].values
+    adata.obs["donor"] = adata.obs["donor"].values
     adata.obs["dataset"] = "bone_marrow"
     adata.obs["tissue"] = "bone_marrow"
     adata.obs["condition"] = "healthy"
     adata.obs["age_group"] = "adult"
     adata.obs["sex"] = "unknown"
     adata.obs["original_annotation"] = adata.obs["l2_cell_type"].values
-    adata.obs["harmonized_annotation"] = adata.obs["l2_cell_type"].map(BONE_MARROW_MAP).values
+    adata.obs["harmonized_annotation"] = adata.obs["l2_cell_type"].map(_get_harmonization_maps()["bone_marrow"]).values
     adata.obs["fragment_file_path"] = [
         os.path.join(data_folder_abs, b, "atac_fragments.tsv.gz") for b in adata.obs["batch"]
     ]
@@ -436,7 +467,7 @@ def load_neat_seq_cd4t() -> sc.AnnData:
     adata.obs["age_group"] = "adult"
     adata.obs["sex"] = "unknown"
     adata.obs["original_annotation"] = adata.obs["Clusters"].values
-    adata.obs["harmonized_annotation"] = adata.obs["Clusters"].map(NEAT_SEQ_MAP).values
+    adata.obs["harmonized_annotation"] = adata.obs["Clusters"].map(_get_harmonization_maps()["neat_seq_cd4t"]).values
     adata.obs["fragment_file_path"] = adata.obs["lane"].map({"lane1": frag_lane1, "lane2": frag_lane2}).values
 
     adata = _finalize(adata)
@@ -520,7 +551,7 @@ def load_tea_seq_pbmc() -> sc.AnnData:
     adata.obs.loc[gsm4949911_mask, "original_annotation"] = annotations.values
 
     # harmonized_annotation via TEA_SEQ_MAP
-    adata.obs["harmonized_annotation"] = adata.obs["original_annotation"].map(TEA_SEQ_MAP)
+    adata.obs["harmonized_annotation"] = adata.obs["original_annotation"].map(_get_harmonization_maps()["pbmc_tea_seq"])
 
     # Clean up temporary column
     adata.obs.drop(columns=["sample_id"], inplace=True)
@@ -688,16 +719,19 @@ def load_crohns_pbmc_gse244831() -> sc.AnnData:
     frag_map = dict(zip(sample_mapping["sample_id"], sample_mapping["fragment_file_path"], strict=True))
 
     # Set standardized obs columns
-    adata.obs["batch"] = adata.obs["Sample"].values
+    # Use "sample" (from _read_10x_mtx, always populated) not "Sample" (from
+    # annotation CSV, NaN for ~28% unmatched cells).
+    adata.obs["batch"] = adata.obs["sample"].values
     adata.obs["site"] = "emory"
-    adata.obs["donor"] = adata.obs["Donors_IDs"].values
+    # Donors_IDs from annotation; fall back to sample for unannotated cells
+    adata.obs["donor"] = adata.obs["Donors_IDs"].fillna(adata.obs["sample"]).values
     adata.obs["dataset"] = "crohns_pbmc"
     adata.obs["tissue"] = "pbmc"
-    adata.obs["condition"] = adata.obs["Status"].str.lower().values
+    adata.obs["condition"] = adata.obs["Status"].str.lower().fillna("unknown").values
     adata.obs["age_group"] = "adult"
-    adata.obs["sex"] = adata.obs["Sex"].values
+    adata.obs["sex"] = adata.obs["Sex"].fillna("unknown").values
     adata.obs["original_annotation"] = adata.obs["Celltypes"].values
-    adata.obs["harmonized_annotation"] = adata.obs["Celltypes"].map(CROHNS_MAP).values
+    adata.obs["harmonized_annotation"] = adata.obs["Celltypes"].map(_get_harmonization_maps()["crohns_pbmc"]).values
     adata.obs["fragment_file_path"] = [frag_map.get(s, np.nan) for s in adata.obs["sample"].values]
 
     adata = _finalize(adata)
@@ -844,7 +878,9 @@ def load_lung_spleen_gse319044() -> sc.AnnData:
     adata.obs.loc[common_cells, "original_annotation"] = ann_matched["CellType"].values
 
     adata.obs["harmonized_annotation"] = np.nan
-    adata.obs.loc[common_cells, "harmonized_annotation"] = ann_matched["CellType"].map(LUNG_SPLEEN_MAP).values
+    adata.obs.loc[common_cells, "harmonized_annotation"] = (
+        ann_matched["CellType"].map(_get_harmonization_maps()["lung_spleen_gse319044"]).values
+    )
 
     # Condition from Asthmatic.status
     asthmatic_map = {

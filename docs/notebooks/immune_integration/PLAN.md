@@ -403,29 +403,93 @@ results_folder = "results/immune_integration/"
 
 ---
 
-## Next steps (Notebook 2 — future phase)
+## Notebook 2a: RNA-only training (`immune_integration/bm_pbmc_rna_training.ipynb`)
 
-After Notebook 1 produces `adata_rna.h5ad` and `adata_atac_tiles.h5ad`:
+**Reference notebook**: `model_comparisons/bone_marrow_gp_es_exp4_out.ipynb`
 
-1. **RNA-only model training** (`AmbientRegularizedSCVI`)
-   - Covariates: `ambient_covariate_keys=["batch"]`, `nn_conditioning_covariate_keys=["site","donor","dataset"]`, `feature_scaling_covariate_keys=["site","donor","dataset"]`, `dispersion_key="batch"`, `library_size_key="batch"`
-   - Architecture: n_hidden=512, n_layers=1, n_latent=128
-   - Early stopping: patience=20, max_epochs=4000
-   - **Important**: NEAT-seq is sorted CD4 T cells — very different ambient profile from whole-tissue samples. Per-batch ambient model handles this.
-   - **Important**: ~100 batches total — may need larger batch_size or adjusted learning rate
+### Pre-training steps (in this notebook, not Notebook 1)
+1. **Cell filtering** — using both RNA and ATAC QC metrics from Notebook 1
+   - MT fraction, total counts, n_genes, doublet score thresholds
+   - ATAC counts/features thresholds (from `adata_atac_tiles.h5ad` obs)
+2. **Gene filtering** — `filter_genes()` (copied into `data_loading_utils.py`)
 
-2. **Clustering & annotation transfer**
+### Model configuration
+- **Architecture**: n_hidden=512, n_layers=1, n_latent=128
+- **Covariates** (REVIEW NEEDED — depends on actual batch/donor/site counts):
+  - `ambient_covariate_keys=["batch"]`
+  - `nn_conditioning_covariate_keys=["site", "donor"]` (or add `"dataset"`)
+  - `feature_scaling_covariate_keys=["site", "donor"]` (or add `"dataset"`)
+  - `dispersion_key="batch"`
+  - `library_size_key="batch"`
+  - `encoder_covariate_keys=False`
+- **Training**:
+  - `max_epochs=4000`, `batch_size=1024`, `train_size=0.9`
+  - `early_stopping=True`, `early_stopping_patience=20`, `early_stopping_monitor="elbo_validation"`
+  - `early_stopping_min_delta_per_feature=0.0001`
+  - Checkpoint every 200 epochs
+- **Other params** (from reference):
+  - `use_additive_background=True`, `regularise_background=False`
+  - `additive_bg_prior_alpha=1.0`, `additive_bg_prior_beta=100.0`
+  - `compute_pearson=True`, `use_feature_scaling=True`
+  - `library_log_means_centering_sensitivity=1.0`
+- **Important**: NEAT-seq is sorted CD4 T cells — very different ambient profile from whole-tissue samples. Per-batch ambient model handles this.
+- **Important**: ~100 batches total — may need larger batch_size or adjusted learning rate
+
+### Post-training
+- Latent space extraction, UMAP, Leiden clustering
+- UMAP colored by batch, site, dataset, cell type annotations
+- Marker gene dotplots
+- Save model + adata with latent/UMAP
+
+## Notebook 2b: RNA+ATAC multimodal training (`immune_integration/bm_pbmc_multimodal_training.ipynb`)
+
+**Reference notebook**: `bone_marrow_mm_es_exp8_out.ipynb`
+
+### Pre-training steps
+1. **Cell filtering** — same as Notebook 2a
+2. **Gene filtering** for RNA — `filter_genes()`
+3. **ATAC feature selection** — `filter_genes()` on tile matrix (or peak selection)
+4. **Create MuData** — `mu.MuData({"rna": adata_rna, "atac": adata_atac})`
+
+### Model configuration
+- **Architecture**: n_hidden={"rna": 512, "atac": 256}, n_latent={"rna": 128, "atac": 64}, n_layers=1
+- **Latent mode**: concatenation (total latent dim = 192)
+- **Covariates** (REVIEW NEEDED):
+  - `ambient_covariate_keys=["batch"]`
+  - `nn_conditioning_covariate_keys=["site", "donor"]`
+  - `feature_scaling_covariate_keys=["site", "donor"]`
+  - `dispersion_key="batch"`, `library_size_key="batch"`
+  - `encoder_covariate_keys=False`
+- **Training**:
+  - `max_epochs=4000`, `batch_size=1024`, `train_size=0.9`
+  - `early_stopping=True`, `early_stopping_patience=20`, `early_stopping_monitor="elbo_validation"`
+  - `early_stopping_min_delta_per_feature=0.0001`
+  - Checkpoint every 1000 epochs
+- **Per-modality flags**:
+  - `additive_background_modalities=["rna"]` (ambient correction for RNA only)
+  - `feature_scaling_modalities=["rna", "atac"]`
+  - `dispersion="gene-batch"`, `regularise_dispersion=True`
+- **Other params**: same as RNA-only
+
+### Post-training
+- Latent space extraction, UMAP (per-modality + joint)
+- `model.plot_umap_comparison()`
+- Decoder attribution analysis (`model.plot_modality_attribution()`)
+- Attribution-weighted UMAPs
+- Marker gene dotplots
+- Save model + adata
+
+## Future steps (after Notebooks 2a/2b)
+
+1. **Clustering & annotation transfer**
    - Leiden clustering on latent space
    - Majority vote annotation from labeled cells to unlabeled (GSE239799, GSE311423, TEA-seq non-GSM4949911)
    - Attach hierarchy levels
 
-3. **CRE selection** (from ATAC tiles)
+2. **CRE selection** (from ATAC tiles)
    - Pseudobulk tiles by sample x cell_cluster
    - Correlation workflow against annotation hierarchy
    - TopN CRE selection
-
-4. **Multimodal model training** (`RegularizedMultimodalVI`)
-   - MuData with RNA + selected CREs
 
 ---
 
