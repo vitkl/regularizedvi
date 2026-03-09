@@ -1826,6 +1826,71 @@ class TestRegularizedMultimodalVI:
         assert model2.module.modality_scale_init["rna"] == 1.0
         assert model2.module.modality_scale_init["atac"] == 1.0
 
+    def test_modality_lr_multiplier_param_groups(self, mdata):
+        """get_parameter_groups creates correct groups with right LRs."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        module = model.module
+
+        groups = module.get_parameter_groups(
+            base_lr=1e-3,
+            modality_lr_multiplier={"atac": 2.0},
+        )
+
+        # Should have groups for atac, rna, and possibly shared
+        assert len(groups) >= 2
+
+        # Check every requires_grad param is in exactly one group
+        all_group_ids = []
+        for g in groups:
+            all_group_ids.extend(id(p) for p in g["params"])
+        all_requires_grad = [p for p in module.parameters() if p.requires_grad]
+        assert len(all_group_ids) == len(all_requires_grad)
+        assert len(set(all_group_ids)) == len(all_group_ids)  # no duplicates
+
+        # Check LR values
+        lr_by_param_id = {}
+        for g in groups:
+            for p in g["params"]:
+                lr_by_param_id[id(p)] = g["lr"]
+
+        # ATAC encoder param should have 2x LR
+        atac_enc_param = next(module.encoders["atac"].parameters())
+        assert lr_by_param_id[id(atac_enc_param)] == pytest.approx(2e-3)
+
+        # RNA encoder param should have base LR
+        rna_enc_param = next(module.encoders["rna"].parameters())
+        assert lr_by_param_id[id(rna_enc_param)] == pytest.approx(1e-3)
+
+    def test_train_with_modality_lr_multiplier(self, mdata):
+        """Training with modality_lr_multiplier completes without error."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(
+            max_epochs=2,
+            train_size=1.0,
+            batch_size=32,
+            plan_kwargs={"modality_lr_multiplier": {"atac": 2.0}},
+        )
+        assert "elbo_train" in model.history_
+
+    def test_train_without_modality_lr_multiplier(self, mdata):
+        """Training without modality_lr_multiplier uses default behavior."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        assert "elbo_train" in model.history_
+
+    def test_modality_lr_multiplier_unknown_modality(self, mdata):
+        """Unknown modality name in multiplier raises ValueError."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        with pytest.raises(ValueError, match="Unknown modality"):
+            model.module.get_parameter_groups(
+                base_lr=1e-3,
+                modality_lr_multiplier={"protein": 2.0},
+            )
+
 
 class TestWandBUtilities:
     """Tests for W&B utility functions (no-op when wandb_project is None)."""

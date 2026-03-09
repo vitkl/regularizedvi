@@ -32,3 +32,77 @@ Systematic comparison of regularizedvi vs standard scVI on the NeurIPS 2021 bone
 Architecture notation: `n_hidden/n_latent/n_layers`. "default" training = scVI defaults (~400 epochs, batch_size=128).
 
 Epochs for Lueken-adjusted training: `round(400 * (20000/N) * (batch_size/128))` = 1375 for N=46534, batch_size=1024.
+
+## Ablation experiments (exp1–12+)
+
+Systematic ablation study investigating dispersion drift with longer training. All experiments use GammaPoisson likelihood with variational LogNormal dispersion posterior and early stopping. Executed via `_gpu_jobs.yaml` + papermill. Diagnostics in `parameter_diagnostics.ipynb`.
+
+### Single-modal RNA (exp1–4): regularise_background x centering
+
+| Exp | bg prior | centering | ES | theta_rna | Key finding |
+|-----|----------|-----------|-----|-----------|-------------|
+| exp1 | True | OFF | default | 70.7 | Uncentered: theta explosion |
+| exp2 | False | OFF | default | 67.5 | bg prior has no effect without centering |
+| exp3 | True | ON (1.0) | default | 11.5 | Centering fixes theta |
+| exp4 | False | ON (1.0) | default | 11.7 | Best RNA baseline |
+
+**Conclusion**: Library centering (`library_log_means_centering_sensitivity=1.0`) is the key fix. Background prior (`regularise_background`) has minimal effect.
+
+### Multimodal RNA+ATAC (exp5–7): centering variations
+
+| Exp | centering | ES | theta_rna | Key finding |
+|-----|-----------|-----|-----------|-------------|
+| exp5 | OFF | default | 19.1 | MM uncentered baseline |
+| exp6 | RNA only (1.0) | default | 16.7 | RNA centering helps |
+| exp7 | RNA (1.0) + ATAC (0.2) | default | 11.3 | Best MM baseline |
+
+**Conclusion**: Centering both modalities (with lower ATAC sensitivity) gives best results.
+
+### Lower early stopping sensitivity (exp8–9): longer training
+
+| Exp | Model | centering | ES | theta_rna | Key finding |
+|-----|-------|-----------|-----|-----------|-------------|
+| exp8 | MM | RNA+ATAC | lowES (0.00003) | 20.4 | Longer training worsens theta |
+| exp9 | RNA | ON (1.0) | lowES (0.00003) | 17.9 | Same — theta drifts up |
+
+**Conclusion**: With 10x lower ES sensitivity, models train longer but dispersion drifts upward. Default ES catches this at the right time.
+
+### Wider library prior variance (exp10a/b, exp12): hypothesis E
+
+Tests whether relaxing the tight library prior (`library_log_vars_weight=0.05` → 0.1 or 0.2) allows the encoder to capture more per-cell variation, reducing pressure on dispersion.
+
+| Exp | Model | lib var weight | ES | Purpose |
+|-----|-------|---------------|-----|---------|
+| exp10a | MM | 0.1 (2x wider) | default | Moderate relaxation |
+| exp10b | MM | 0.2 (4x wider) | default | Aggressive relaxation |
+| exp12 | RNA | 0.2 (4x wider) | default | Same test for single-modal |
+
+### Learnable modality scaling (exp11): hypothesis D
+
+| Exp | Model | Feature | ES | Purpose |
+|-----|-------|---------|-----|---------|
+| exp11 | MM | learnable per-modality scaling | default | Per-modality scalar on px_rate, initialized from centering sensitivity (RNA=1.0, ATAC=0.2), Gamma(5, 5/init) prior |
+
+Tests whether a learnable per-modality scale factor prevents dispersion drift by allowing the model to adjust per-modality expected counts.
+
+### Stratified validation split (hypothesis C): default ES
+
+All stratified experiments use default ES (0.0003), making them directly comparable to exp7 (MM baseline) and exp4 (RNA baseline). The stratified split ensures proportional representation of cell types and batches in the validation set.
+
+| Exp | Base hyperparams | ES | Purpose |
+|-----|-----------------|-----|---------|
+| exp8stratified | exp8 (MM, ctr=both) | default (0.0003) | Stratified split, comparable to exp7 |
+| exp9stratified | exp9 (RNA, ctr=ON) | default (0.0003) | Stratified split, comparable to exp4 |
+| exp10bstratified | exp10b (MM, lib var 0.2) | default (0.0003) | Stratified + wider lib var |
+| exp11stratified | exp11 (MM, learnable scale) | default (0.0003) | Stratified + learnable scaling |
+| exp12stratified | exp12 (RNA, lib var 0.2) | default (0.0003) | Stratified + wider lib var |
+
+Tests whether stratified validation split (by `l1_cell_type+batch`) produces more stable metrics than random splitting.
+
+### Hypotheses for dispersion drift
+
+- **(A)** Pearson correlation is misleading; reconstruction loss is the correct metric
+- **(B)** Both RNA and ATAC overfit by early stopping — default ES catches this just in time
+- **(C)** Random validation cell selection gives variable metrics → stratified experiments test this
+- **(D)** Modalities need learnable scaling factors → exp11 tests this
+- **(E)** Library prior variance too tight → exp10a/b, exp12 test this

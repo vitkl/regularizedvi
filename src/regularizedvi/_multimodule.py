@@ -1114,3 +1114,77 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             },
             extra_metrics=extra_metrics,
         )
+
+    _PER_MODALITY_CONTAINERS = [
+        "encoders",
+        "l_encoders",
+        "decoders",
+        "px_r_mu",
+        "px_r_log_sigma",
+        "dispersion_prior_rate_raw",
+        "additive_background",
+        "feature_scaling",
+        "modality_scale_raw",
+    ]
+
+    def get_parameter_groups(
+        self,
+        base_lr: float,
+        modality_lr_multiplier: dict[str, float],
+    ) -> list[dict]:
+        """Build optimizer parameter groups with per-modality learning rates.
+
+        Parameters
+        ----------
+        base_lr
+            Base learning rate for shared parameters and modalities without a multiplier.
+        modality_lr_multiplier
+            Mapping from modality name to LR multiplier (e.g., ``{"atac": 2.0}``).
+            Modalities not listed use ``base_lr``.
+
+        Returns
+        -------
+        List of dicts compatible with PyTorch optimizer param groups.
+        """
+        unknown = set(modality_lr_multiplier) - set(self.modality_names)
+        if unknown:
+            msg = f"Unknown modality names in modality_lr_multiplier: {unknown}. Available: {self.modality_names}"
+            raise ValueError(msg)
+
+        # Collect param ids per modality
+        modality_param_ids: dict[str, set[int]] = {name: set() for name in self.modality_names}
+        for container_name in self._PER_MODALITY_CONTAINERS:
+            container = getattr(self, container_name, None)
+            if container is None:
+                continue
+            for name in self.modality_names:
+                if name not in container:
+                    continue
+                entry = container[name]
+                if isinstance(entry, nn.Module):
+                    for p in entry.parameters():
+                        if p.requires_grad:
+                            modality_param_ids[name].add(id(p))
+                elif isinstance(entry, nn.Parameter):
+                    if entry.requires_grad:
+                        modality_param_ids[name].add(id(entry))
+
+        # All assigned param ids
+        all_assigned = set()
+        for ids in modality_param_ids.values():
+            all_assigned |= ids
+
+        # Build groups
+        param_groups = []
+        for name in self.modality_names:
+            params = [p for p in self.parameters() if p.requires_grad and id(p) in modality_param_ids[name]]
+            if params:
+                lr = base_lr * modality_lr_multiplier.get(name, 1.0)
+                param_groups.append({"params": params, "lr": lr})
+
+        # Shared params (not assigned to any modality)
+        shared_params = [p for p in self.parameters() if p.requires_grad and id(p) not in all_assigned]
+        if shared_params:
+            param_groups.append({"params": shared_params, "lr": base_lr})
+
+        return param_groups

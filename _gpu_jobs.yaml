@@ -166,3 +166,50 @@
   description: >-
     Same as exp12 (RNA, wider lib var 0.2) + stratified validation split.
     Tests if stratified split improves wider library variance for RNA model.
+
+- job_name: exp11stratified
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp11stratified_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r learnable_modality_scaling 1 -r stratify_validation_key l1_cell_type+batch -r results_folder results/exp11stratified/"
+  description: >-
+    Same as exp11 (MM, learnable modality scaling) + stratified validation split.
+    Tests if stratified split + learnable scaling together prevent dispersion drift.
+
+# ── Stricter ATAC filtering (fragments > 2000) ──
+
+- job_name: exp10bstratified_filtered
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10bstratified_filtered_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.2 -r stratify_validation_key l1_cell_type+batch -r results_folder results/exp10bstratified_filtered/"
+  description: >-
+    Same as exp10bstratified but with stricter ATAC filtering (fragments > 2000 vs > 1000).
+    Tests whether removing low-quality ATAC cells improves joint latent and attribution.
+
+# ── Lower early stopping (3x smaller min_delta) + stratified ──
+
+- job_name: exp10bstratified_lowes
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10bstratified_lowes_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.2 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0001 -r results_folder results/exp10bstratified_lowes/"
+  description: >-
+    Same as exp10bstratified + 3x lower ES (0.0001 vs 0.0003).
+    Tests whether longer training with wider lib var + stratified split improves results.
+
+- job_name: exp11stratified_lowes
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp11stratified_lowes_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r learnable_modality_scaling 1 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0001 -r results_folder results/exp11stratified_lowes/"
+  description: >-
+    Same as exp11stratified + 3x lower ES (0.0001 vs 0.0003).
+    Tests whether longer training with learnable scaling + stratified split improves results.
+
+# ── Per-modality learning rate (hypothesis F) ──
+
+- job_name: exp10bstratified_filtered_lowes_ataclr2
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10bstratified_filtered_lowes_ataclr2_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.2 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0001 -r modality_lr_multiplier_atac 2.0 -r results_folder results/exp10bstratified_filtered_lowes_ataclr2/"
+  description: >-
+    exp10bstratified_filtered + lowES (0.0001) + ATAC LR 2x.
+    Tests whether 2x ATAC learning rate speeds up ATAC training without hurting RNA.
+    Uses ATAC>2k filtering, stratified split, wider lib var 0.2.

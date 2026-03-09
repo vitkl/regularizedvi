@@ -54,6 +54,7 @@ from regularizedvi._constants import (
 )
 from regularizedvi._model import AmbientRegularizedSCVI
 from regularizedvi._multimodule import RegularizedMultimodalVAE
+from regularizedvi._training_plan import MultimodalTrainingPlan
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -67,6 +68,8 @@ class RegularizedMultimodalVI(
     UnsupervisedTrainingMixin,
     BaseModelClass,
 ):
+    _training_plan_cls = MultimodalTrainingPlan
+
     """Regularized multi-modal VI for paired RNA + ATAC (and more).
 
     N-modality extensible model using symmetric regularized components.
