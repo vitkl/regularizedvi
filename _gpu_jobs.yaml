@@ -203,6 +203,14 @@
     Same as exp11stratified + 3x lower ES (0.0001 vs 0.0003).
     Tests whether longer training with learnable scaling + stratified split improves results.
 
+- job_name: exp10bstratified_filtered_lowes
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10bstratified_filtered_lowes_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.2 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0001 -r results_folder results/exp10bstratified_filtered_lowes/"
+  description: >-
+    Same as exp10bstratified_filtered (ATAC>2k) + lowES (0.0001).
+    Direct comparison to ataclr2 variant — same settings without ATAC LR boost.
+
 # ── Per-modality learning rate (hypothesis F) ──
 
 - job_name: exp10bstratified_filtered_lowes_ataclr2
