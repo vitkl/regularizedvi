@@ -1,8 +1,37 @@
 # Plan: Multi-dataset RNA + ATAC integration (7 datasets)
 
+## Progress (updated 2026-03-09)
+
+| Step | Status | Notes |
+|------|--------|-------|
+| Notebook 1: RNA loading | **DONE** | 776,742 cells x 25,629 genes, 99 batches, 99 donors, 38 cell types |
+| Notebook 2: Scrublet | **RUNNING** | Started 2026-03-09, loading 13 GB h5ad |
+| SnapATAC2 jobs | **SUBMITTED** | 99 bsub jobs on `normal` queue (cell2state scripts, `cell2state_v2026_cuda124_torch25` env) |
+| Notebook 3: ATAC loading | PENDING | Waiting for SnapATAC2 jobs |
+| Notebook 4: QC summary | PENDING | Waiting for notebooks 2+3 |
+| Notebook 5: RNA training | PENDING | Waiting for notebook 4 |
+| Notebook 6: Multimodal | PENDING | Waiting for notebook 5 |
+
+### Known issues
+- TEA-seq PBMC: 0/59k cells annotated (expected ~8k from GSM4949911 only) — annotation mapping needs investigation
+- Crohn's PBMC: 69k/106k annotated (some samples lack annotations)
+- Lung/Spleen: 20k/132k annotated (only subset has CellType column)
+
+### Bug fix applied (2026-03-09)
+- `data_loading_utils.py`: Fixed `.str` accessor crash on all-NaN `harmonized_annotation` columns (COVID, spleen datasets) — added `.astype(object)` in `_apply_hierarchy()`
+
 ## Context
 
-Build a combined single-cell dataset from **7 multiome sources** spanning bone marrow, PBMC, lung, and spleen for cell2state training. This plan covers **Phase 1 only**: loading, QC, harmonization, and producing two h5ad objects (RNA + ATAC tiles). Model training is deferred to Notebook 2.
+Build a combined single-cell dataset from **7 multiome sources** spanning bone marrow, PBMC, lung, and spleen for cell2state training. The pipeline is split into **6 notebooks** + supporting scripts:
+
+1. **Notebook 1** — RNA data loading + concat + save h5ad (**DONE** — 776k cells x 25.6k genes, 2026-03-09)
+2. **Notebook 2** — Scrublet doublet scoring on saved RNA h5ad (**RUNNING** — started 2026-03-09)
+3. **Notebook 3** — ATAC tile loading from pre-cached snapatac h5ad + save
+4. **Notebook 4** — QC summary, annotation comparison, covariate review for model settings
+5. **Notebook 5** — RNA-only training (`AmbientRegularizedSCVI`)
+6. **Notebook 6** — Multimodal RNA+ATAC training (`RegularizedMultimodalVI`)
+
+Plus a **bash script** to submit parallel bsub jobs for SnapATAC2 preprocessing (run between notebooks 1 and 3).
 
 ## Plan file path
 `/nfs/users/nfs_v/vk7/.claude/plans/curried-yawning-comet.md`
@@ -13,34 +42,40 @@ Build a combined single-cell dataset from **7 multiome sources** spanning bone m
 
 | # | Dataset | GSE | Tissue | Samples | ~Cells | Cell types | Format | Annotations |
 |---|---------|-----|--------|---------|--------|------------|--------|-------------|
-| 1 | Bone marrow NeurIPS | — | BM | 13 batches | 69k | 22 | h5ad | Full (l2_cell_type) |
-| 2 | TEA-seq PBMC | GSE158013 | PBMC | 7 wells | 52k | 26 | 10x H5 | Partial (GSM4949911 only) |
-| 3 | NEAT-seq CD4 T | GSE178707 | sorted CD4 T | 2 lanes | 8.5k | 7 | h5ad | Full (C1-C7) |
-| 4 | Crohn's PBMC | GSE244831 | PBMC | 13 | 76k | 18 | MTX | Full (Celltypes) |
-| 5 | COVID infant PBMC | GSE239799 | PBMC | 43 | ? | 0 | MTX | None |
-| 6 | Lung/Spleen immune | GSE319044 | lung+spleen | 16 | 54k | 8 | MTX | Full (CellType) |
-| 7 | Infant/Adult Spleen | GSE311423 | spleen | 5 | ? | 0 | 10x H5 | None |
+| 1 | Bone marrow NeurIPS | — | BM | 13 batches | 69,247 | 22 | h5ad | Full (l2_cell_type) |
+| 2 | TEA-seq PBMC | GSE158013 | PBMC | 7 wells | 59,151 | 26 | 10x H5 | Partial (GSM4949911 only, needs fix) |
+| 3 | NEAT-seq CD4 T | GSE178707 | sorted CD4 T | 2 lanes | 8,457 | 7 | h5ad | Full (C1-C7) |
+| 4 | Crohn's PBMC | GSE244831 | PBMC | 13 | 106,296 | 18 | MTX | Partial (69k/106k annotated) |
+| 5 | COVID infant PBMC | GSE239799 | PBMC | 43 | 360,624 | 0 | MTX | None |
+| 6 | Lung/Spleen immune | GSE319044 | lung+spleen | 16 | 132,241 | 8 | MTX | Partial (20k/132k annotated) |
+| 7 | Infant/Adult Spleen | GSE311423 | spleen | 5 | 40,726 | 0 | 10x H5 | None |
 
 ---
 
 ## Deliverables
 
-### Files to create (all in `docs/notebooks/immune_integration/`)
+### Files to create/modify (all in `docs/notebooks/immune_integration/`)
 
-0. **`docs/notebooks/immune_integration/PLAN.md`** — Copy of this plan for discoverability
-1. **`docs/notebooks/immune_integration/bm_pbmc_data_loading.ipynb`** — Notebook 1: data loading, QC, harmonization
-2. **`docs/notebooks/immune_integration/bm_pbmc_model_training.ipynb`** — Notebook 2 (stub/next phase): model training
-3. **`docs/notebooks/immune_integration/data_loading_utils.py`** — Per-dataset loader functions + harmonization logic
-4. **`docs/notebooks/immune_integration/annotation_harmonization.md`** — Cell type name mapping table (reviewable markdown)
-5. **`docs/notebooks/immune_integration/annotation_hierarchy.md`** — Unified hierarchy table (reviewable markdown)
-6. **`docs/notebooks/immune_integration/metadata_harmonization.md`** — Covariate harmonization table (reviewable markdown)
+| # | File | Status | Description |
+|---|------|--------|-------------|
+| 0 | `PLAN.md` | EXISTS | Copy of this plan |
+| 1 | `data_loading_utils.py` | EXISTS | Per-dataset loader functions + harmonization logic |
+| 2 | `annotation_harmonization.md` | EXISTS | Cell type name mapping table |
+| 3 | `annotation_hierarchy.md` | EXISTS | Unified hierarchy table |
+| 4 | `metadata_harmonization.md` | EXISTS | Covariate harmonization table |
+| 5 | `bm_pbmc_data_loading.ipynb` | **DONE** | Notebook 1: RNA loading + concat + save (776k cells x 25.6k genes) |
+| 6 | `bm_pbmc_scrublet.ipynb` | **RUNNING** | Notebook 2: load RNA h5ad, scrublet, update h5ad |
+| 7 | (use cell2state scripts) | **SUBMITTED** | SnapATAC2 jobs (99 bsub jobs submitted 2026-03-09) |
+| 8 | `bm_pbmc_atac_loading.ipynb` | CREATE | Notebook 3: load cached snapatac h5ad, tile matrix, save ATAC h5ad |
+| 9 | `bm_pbmc_qc_summary.ipynb` | CREATE | Notebook 4: QC summary, annotation comparison, covariate review |
+| 10 | `bm_pbmc_rna_training.ipynb` | CREATE | Notebook 5: RNA-only training (AmbientRegularizedSCVI) |
+| 11 | `bm_pbmc_multimodal_training.ipynb` | CREATE | Notebook 6: Multimodal training (RegularizedMultimodalVI) |
 
-### Outputs from Notebook 1 (saved to `results/`)
-- `adata_rna.h5ad` — Combined RNA anndata (all datasets, QC-filtered, harmonized obs)
-- `adata_atac_tiles.h5ad` — Combined ATAC tile anndata (1000bp bins, same cells as RNA)
-
-### Step 0: Save plan
-Copy this plan to `docs/notebooks/immune_integration/PLAN.md` so it is discoverable alongside the code.
+### Outputs (saved to `results/immune_integration/`)
+- `adata_rna.h5ad` — Combined RNA (all cells, harmonized obs, QC metrics, doublet scores)
+- `adata_atac_tiles.h5ad` — Combined ATAC tiles (1000bp bins, same cells)
+- `obs_metadata.csv` — Full obs table for inspection
+- `path_sample_df.csv` — Fragment paths CSV for SnapATAC2 jobs
 
 ---
 
@@ -239,141 +274,415 @@ fragment_file_path, seq_batch
 
 ---
 
-## Notebook 1: Data Loading & QC (`immune_integration/bm_pbmc_data_loading.ipynb`)
+## Notebook 1: RNA Data Loading (`bm_pbmc_data_loading.ipynb`) — MODIFY EXISTING
 
-### Architecture: `immune_integration/data_loading_utils.py`
+**Status**: EXISTS, needs scrublet/ATAC cells removed. Currently has all 7 loaders working.
 
-One loader function per dataset, all returning the same standardized anndata:
+Modify the existing notebook to **only** load RNA, concat, compute RNA QC metrics, and save. Remove scrublet, ATAC loading, and ATAC QC cells.
 
-```python
-def load_bone_marrow() -> sc.AnnData:
-def load_tea_seq_pbmc() -> sc.AnnData:
-def load_neat_seq_cd4t() -> sc.AnnData:
-def load_crohns_pbmc_gse244831() -> sc.AnnData:
-def load_covid_pbmc_gse239799() -> sc.AnnData:
-def load_lung_spleen_gse319044() -> sc.AnnData:
-def load_infant_adult_spleen_gse311423() -> sc.AnnData:
+### Cells to keep
+1. Imports + setup
+2. Load all 7 datasets (7 cells)
+3. Per-dataset summary table
+4. Gene intersection + concat (save SYMBOL before concat, restore after)
+5. RNA QC metrics (MT genes, `sc.pp.calculate_qc_metrics`)
+6. RNA QC distribution plots per dataset
+7. Save `adata_rna.h5ad` + `obs_metadata.csv`
+8. **NEW**: Save `path_sample_df.csv` — extract unique `(fragment_file_path, batch)` pairs for SnapATAC2 jobs
+
+### Cells to REMOVE
+- Scrublet cell (moved to Notebook 2)
+- Doublet score histogram (moved to Notebook 2)
+- ATAC tile loading (moved to Notebook 3)
+- ATAC QC (moved to Notebook 3)
+- Save ATAC (moved to Notebook 3)
+- Final summary (moved to Notebook 4)
+
+### Key implementation details
+- Crohn's batch fix: use `adata.obs["sample"]` not `adata.obs["Sample"]` (already fixed in data_loading_utils.py)
+- SYMBOL preservation: save `symbol_map` before concat, restore after (already in notebook)
+- uint16 dtype for counts
+
+---
+
+## Notebook 2: Scrublet (`bm_pbmc_scrublet.ipynb`) — CREATE
+
+**Purpose**: Load saved RNA h5ad, run scrublet per batch, update h5ad with doublet scores.
+
+### Cells
+1. Imports + load `adata_rna.h5ad`
+2. Per-batch scrublet with small-batch handling:
+   ```python
+   MIN_CELLS_SCRUBLET = 50
+   for batch_name in batch_counts.index:
+       mask = adata.obs["batch"] == batch_name
+       n_cells = mask.sum()
+       if n_cells < MIN_CELLS_SCRUBLET:
+           skipped.append((batch_name, n_cells))
+           continue
+       adata_batch = adata[mask].copy()
+       n_comps = min(30, n_cells - 1)
+       sc.pp.scrublet(adata_batch, threshold=0.25, n_prin_comps=n_comps)
+       # copy scores back
+   ```
+3. Doublet score distribution plot
+4. Overwrite `adata_rna.h5ad` with doublet scores added
+5. Print summary (n_doublets, skipped batches)
+
+### Why separate
+- Scrublet on ~100 batches x 776k cells takes ~10-30 min
+- Isolates a common failure point (small batches, PCA issues)
+- Can re-run scrublet without re-loading all 7 datasets
+
+---
+
+## SnapATAC2 Pre-computation — USE CELL2STATE SCRIPTS
+
+**Purpose**: Convert `atac_fragments.tsv.gz` → `atac_fragments.h5ad` in parallel via bsub. SnapATAC2's `import_data` is IO-intensive, so fragment files must be copied to node-local `/var/tmp` before processing and results copied back.
+
+### Scripts (from cell2state package)
+
+Use the generic scripts from the cell2state package — no local copies needed:
+- `/nfs/team205/vk7/sanger_projects/my_packages/cell2state/scripts/submit_snapatac_jobs.sh`
+- `/nfs/team205/vk7/sanger_projects/my_packages/cell2state/scripts/run_snapatac_one_sample.sh`
+
+See `cell2state/scripts/readme.md` for full documentation.
+
+### `path_sample_df.csv` format
+- Column 1: `fragment_file_path` — full path to `atac_fragments.tsv.gz`
+- Column 2: `sample_id` — the batch identifier (used as sample name by snapatac2)
+- Generated by Notebook 1 from unique `(fragment_file_path, batch)` pairs in `adata.obs`
+
+### Usage
+
+```bash
+# Dry run first
+bash /nfs/team205/vk7/sanger_projects/my_packages/cell2state/scripts/submit_snapatac_jobs.sh \
+  /nfs/team205/vk7/sanger_projects/my_packages/regularizedvi/results/immune_integration/path_sample_df.csv \
+  /nfs/srpipe_references/downloaded_from_10X/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/ \
+  /nfs/team205/vk7/sanger_projects/my_packages/regularizedvi/results/immune_integration/ \
+  --dry-run
+
+# Submit (remove --dry-run)
+bash /nfs/team205/vk7/sanger_projects/my_packages/cell2state/scripts/submit_snapatac_jobs.sh \
+  /nfs/team205/vk7/sanger_projects/my_packages/regularizedvi/results/immune_integration/path_sample_df.csv \
+  /nfs/srpipe_references/downloaded_from_10X/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/ \
+  /nfs/team205/vk7/sanger_projects/my_packages/regularizedvi/results/immune_integration/
 ```
 
-Each function:
-1. Loads raw data (h5ad, 10x H5, or MTX) — using `read_10x_output()` pattern from `multiome_rna_exploratory_embryo_sections_njc.ipynb` for H5/MTX files
-2. Extracts GEX features only (filters out ATAC peaks if present in H5)
-3. Sets var to ENSEMBL IDs as var_names, SYMBOL in `var["SYMBOL"]`
-4. Loads cell annotations from dataset-specific annotation files
-5. Applies harmonization mapping (reads `annotation_harmonization.md` or a derived CSV)
-6. Sets standardized obs columns: `batch, site, donor, dataset, tissue, condition, age_group, original_annotation, harmonized_annotation, fragment_file_path`
-7. Returns anndata with `.X` = raw counts, `.layers["counts"]` = raw counts
+### Features (built into cell2state scripts)
+- `--dry-run` flag for testing
+- Skip-if-done (checks for existing h5ad) in both submit and worker scripts
+- Conda activation built into per-sample worker script
+- Configurable `--conda-env`, `--queue`, `--mem`, `--ncores`
+- Auto-locates `load_atac_snapatac2.py` relative to script dir
+- Error counting and summary stats
+- Copies fragments to node-local `/var/tmp` for ~10x IO speedup
 
-### Data loading details per dataset
+### Caching mechanism
+- `load_atac_snapatac2` calls `load_atac()` which:
+  - Takes `{dir}/atac_fragments.tsv.gz` → creates `{dir}/atac_fragments.h5ad`
+  - If h5ad exists and `overwrite=False`, reads cached version
+- After jobs complete, Notebook 3's `load_one_sample_tiles()` finds the cached h5ad automatically
 
-#### 1. `load_bone_marrow()`
-- Source: `download_bone_marrow_dataset()` → h5ad
-- Extract GEX: `adata[:, adata.var["feature_types"] == "GEX"]`
-- Annotations: `l2_cell_type` column in obs
-- Fragment files: `/nfs/team283/vk7/sanger_projects/large_data/bone_marrow/{batch}/atac_fragments.tsv.gz` (one per batch: s1d1..s4d9)
-- Map `batch` → fragment path in obs `fragment_file_path` column
+---
 
-#### 2. `load_tea_seq_pbmc()`
-- Source: `sample_mapping.csv` → per-sample `sc.read_10x_h5()`, filter to `Gene Expression`
-- 7 samples, concatenate with `anndata.concat`
-- Annotations: Figure4_SourceData2_TypeLabelsUMAP.csv → `predicted.celltype.l2` for GSM4949911 only
-- QC metrics: from annotation CSVs (nCount_RNA, nCount_ATAC, etc.)
-- Fragment files: `*_atac_filtered_fragments.tsv.gz` per sample (in sample_mapping.csv)
+## Notebook 3: ATAC Tile Loading (`bm_pbmc_atac_loading.ipynb`) — CREATE
 
-#### 3. `load_neat_seq_cd4t()`
-- Source: `neat_seq_cd4_tcells.h5ad` (pre-built, 8,457 x 36,717)
-- Swap var_names: gene_names → var["SYMBOL"], gene_ids → var_names
-- Annotations: `Clusters` C1-C7 → map via: C1→CD4+ T recently activated, C2→Treg, C3→Th17, C4→CD4+ T central memory, C5→Th2, C6→Th1, C7→CD4+ T uncommitted memory
-- Fragment files: per-lane `*_atac_fragments.tsv.gz`
+**Purpose**: Load cached snapatac h5ad files, create tile matrices, save combined ATAC h5ad.
 
-#### 4. `load_crohns_pbmc_gse244831()`
-- Source: `sample_mapping.csv` → per-sample MTX (barcodes + features + matrix)
-- Load with adapted `read_10x_output()` — reads MTX instead of H5, filters to Gene Expression features
-- 13 samples (3 single-donor + 10 pools of 2-3 donors), ~76k cells
-- Annotations: `GSE244831_cell_annotations.csv` → `Celltypes` column, join on barcode (format: `Pool_8#GTTAACGGTGCTTTAC-1`)
-- **Covariate mapping**:
-  - `batch` = `Sample` column (= 10x well/reaction: Sample_0, Sample_1, Sample_2, Pool_2..Pool_11) — ambient key
-  - `donor` = `Donors_IDs` column from demuxlet (individual donor within pool, e.g. 01_423)
-  - `condition` = `Status` column (Crohns/Healthy)
-  - `seq_batch` = `Batch` column (Batch1/2/3, sequencing batch — keep as additional metadata)
-- Fragment files: `*_atac_fragments.tsv.gz` per sample (in sample_mapping.csv)
+**Prerequisites**: Notebook 1 done (RNA h5ad exists), SnapATAC2 jobs completed (h5ad files cached).
 
-#### 5. `load_covid_pbmc_gse239799()`
-- Source: `sample_mapping.csv` → per-sample MTX
-- 43 samples from 18 subjects (longitudinal)
-- **No cell annotations** — `harmonized_annotation = NaN`
-- Fragment files: `*_atac_fragments.tsv.gz` per sample
+### Cells
+1. Imports + load `adata_rna.h5ad` (for cell barcodes + fragment_file_path)
+2. Check that all cached h5ad files exist (fail fast if jobs incomplete)
+3. Load ATAC tiles using `concatenate_h5ad` from `cell2state.utils.aggregation_v2`:
+   ```python
+   from cell2state.utils.aggregation_v2 import concatenate_h5ad
+   adatas = concatenate_h5ad(
+       adata,
+       variable_type="atac_tiles",
+       batch_key="batch",
+       loading_kwargs=dict(
+           path_to_reference=genome_ref,
+           path_to_fragment_file_key="fragment_file_path",
+           max_frag_size_split=120,
+           bin_size=1000,
+           counting_strategy="insertion",
+           use_complete_path=True,
+       ),
+   )
+   adata_atac = anndata.concat(adatas, join="inner")
+   ```
+4. Cast to uint16, add counts layer
+5. ATAC QC metrics (`sc.pp.calculate_qc_metrics`)
+6. ATAC QC distribution plots per dataset
+7. Save `adata_atac_tiles.h5ad`
 
-#### 6. `load_lung_spleen_gse319044()`
-- Source: `sample_mapping.csv` → per-sample MTX
-- 16 samples (9 lung + 7 spleen)
-- Annotations: `GSE319044_snRNA_cluster_labels.csv.gz` → `CellType` column
-- Additional metadata: `tissue.ident` (lungs/spleens), `Age`, `Sex`, `Race`, `Asthmatic.status`
-- Fragment files: `*_atac_fragments.tsv.gz` per sample + tabix indices
+### Why separate
+- ATAC tile loading with cached h5ad takes ~30 min (vs hours without cache)
+- Decoupled from RNA loading — can iterate on ATAC independently
+- Fragment file preprocessing is embarrassingly parallel (bsub jobs)
 
-#### 7. `load_infant_adult_spleen_gse311423()`
-- Source: `sample_mapping.csv` → per-sample 10x H5 (`sc.read_10x_h5()`)
-- 5 samples (3 infant, 2 adult)
-- **No cell annotations** — `harmonized_annotation = NaN`
-- Additional metadata: `age_group` (infant/adult)
-- Fragment files: `*_atac_fragments.tsv.gz` per sample + tabix indices
+---
 
-### Notebook 1 structure
+## Annotation: load from markdown files (not hardcoded dicts) — DONE
 
-#### Section 1: Imports & setup
+**Status**: DONE (commit `9b9dcdd`). Markdown files are the single source of truth.
+
+---
+
+## Annotation: validation + hierarchy attachment + `level_1:` convention — TODO
+
+**Status**: TODO. User edited markdown files with new conventions. Code needs updating.
+
+### Context
+User edited `annotation_harmonization.md` and `annotation_hierarchy.md` to:
+- Rename cell types (e.g., `Plasma cell` → `Plasma B cell`, `B memory` → `Memory B`)
+- Add `level_1:{name}` convention for coarse annotations (e.g., `level_1:CD8+ T-cell lineage`)
+- Add `NaN` for cells with no meaningful annotation (e.g., lung/spleen `Other`)
+- Restructure hierarchy (Th subtypes → `CD4+ T Th1 memory` etc., erythroid/MK grouping)
+- Remove `Other` from hierarchy
+
+### What needs to change in `data_loading_utils.py`
+
+**File**: `docs/notebooks/immune_integration/data_loading_utils.py`
+
+#### 1. Add `import warnings` to stdlib imports (line 10 area)
+
+#### 2. Add `_LEVEL_PREFIX = "level_1:"` constant after `STANDARD_OBS_COLS`
+
+#### 3. Add `level_1..level_4` to `STANDARD_OBS_COLS` (after `harmonized_annotation`, before `fragment_file_path`)
+
+#### 4. Update `_parse_harmonization_md()` — handle `NaN` literal
+Convert the string `"NaN"` to `np.nan` in the returned dict values:
 ```python
-import scanpy as sc, anndata, numpy as np, pandas as pd, ...
-from data_loading_utils import (
-    load_bone_marrow, load_tea_seq_pbmc, load_neat_seq_cd4t,
-    load_crohns_pbmc_gse244831, load_covid_pbmc_gse239799,
-    load_lung_spleen_gse319044, load_infant_adult_spleen_gse311423,
-)
-results_folder = "results/immune_integration/"
+if harmonized == "NaN":
+    maps.setdefault(dataset, {})[original] = np.nan
+else:
+    maps.setdefault(dataset, {})[original] = harmonized
+```
+Leave `level_1:*` strings as-is — they flow through `.map()` and get processed later.
+
+#### 5. Add `_validate_annotations(harm_maps, hier_df)` — 6 checks
+
+| # | Check | Severity | Description |
+|---|-------|----------|-------------|
+| a | Harmonized names exist in hierarchy | ERROR | Every non-NaN, non-`level_1:` harmonized name from harmonization must be in hierarchy |
+| b | Hierarchy entries referenced | WARNING | Every harmonized_name in hierarchy should be used by at least one harmonization entry |
+| c | `level_1:` values exist | ERROR | Value after `level_1:` prefix must exist as a level_1 value in hierarchy |
+| d | No cross-level leaks | WARNING | Higher-level values (level_3/4) should not appear at lower levels (level_1/2) |
+| e | No duplicate harmonized_name | ERROR | No duplicate entries in hierarchy |
+| f | Consistent parents | ERROR | All rows sharing a level_1 value must have identical level_2/3/4 |
+
+Collect all errors before raising `ValueError` with the full list. Emit warnings separately.
+
+#### 6. Refactor caching — unified `_get_validated_data()`
+
+Replace separate `_HARMONIZATION_MAPS` / `_HIERARCHY_DF` caching with:
+```python
+_VALIDATED = False
+
+def _get_validated_data():
+    global _HARMONIZATION_MAPS, _HIERARCHY_DF, _VALIDATED
+    if not _VALIDATED:
+        md_dir = Path(__file__).parent
+        _HARMONIZATION_MAPS = _parse_harmonization_md(md_dir / "annotation_harmonization.md")
+        _HIERARCHY_DF = _parse_hierarchy_md(md_dir / "annotation_hierarchy.md")
+        _validate_annotations(_HARMONIZATION_MAPS, _HIERARCHY_DF)
+        _VALIDATED = True
+    return _HARMONIZATION_MAPS, _HIERARCHY_DF
+
+def _get_harmonization_maps():
+    return _get_validated_data()[0]
+
+def _get_hierarchy_df():
+    return _get_validated_data()[1]
 ```
 
-#### Section 2: Load all datasets (RNA)
-- Call each loader function
-- Print per-dataset summary (n_cells, n_genes, annotation coverage)
+#### 7. Add `_apply_hierarchy(adata, hier_df=None)`
 
-#### Section 3: Combine RNA
-- Gene intersection across all datasets (ENSEMBL IDs)
-- `adata = anndata.concat([adata_bm, adata_tea, adata_neat, ...], join="inner")`
-- Verify standardized obs columns
+Populate `level_1..level_4` from `harmonized_annotation`. Three cases:
 
-#### Section 4: QC — RNA metrics
-- `sc.pp.calculate_qc_metrics()` on combined object (recompute for consistency)
-- MT fraction, total counts, n_genes
-- Scrublet per batch: `sc.pp.scrublet(adata, batch_key="batch")`
-- QC distribution plots per dataset
+| Case | Input | harmonized_annotation | level_1..level_4 |
+|------|-------|-----------------------|------------------|
+| Normal | `"CD14+ Mono"` | kept as-is | looked up by harmonized_name |
+| `level_1:` prefix | `"level_1:CD8+ T-cell lineage"` | set to NaN | level_1 = value after prefix; level_2/3/4 from hierarchy (any row with matching level_1) |
+| NaN | NaN | stays NaN | all NaN |
 
-#### Section 5: QC — ATAC tile loading
-- Use `concatenate_h5ad()` from `cell2state.utils.load_atac_snapatac2` (pattern from `sc_atac_loading_all_tiles_1000bp_120_sections_suspension.ipynb`)
-- Input: RNA adata (for cell barcodes + fragment_file_path column)
-- Parameters: `bin_size=1000, counting_strategy='insertion', max_frag_size_split=120`
-- Reference genome: `/nfs/srpipe_references/downloaded_from_10X/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/`
-- Output: `adata_atac` with tiles as vars, cells as obs
+Uses vectorized pandas: `ha.str.startswith(_LEVEL_PREFIX, na=False)` for detection, `.map()` for lookups.
 
-#### Section 6: QC — ATAC metrics
-- Recompute with scanpy: `sc.pp.calculate_qc_metrics()` on tile matrix
-- Total ATAC counts, n_features per cell
-- Transfer ATAC QC to RNA obs for joint filtering
+#### 8. Update `_finalize()` — call `_apply_hierarchy()` before `_standardize_obs()`
 
-#### Section 7: Joint cell filtering
-- Apply thresholds using both RNA and ATAC QC metrics
-- Per-dataset adaptive thresholds where needed (different technologies)
-- Print per-dataset cell counts before/after
+```python
+def _finalize(adata):
+    # ... counts/sparse as before ...
+    adata = _apply_hierarchy(adata)  # NEW — before standardize_obs
+    adata = _standardize_obs(adata)
+    return adata
+```
 
-#### Section 8: Gene selection (RNA)
-- `filter_genes()` on filtered combined RNA (cell_count_cutoff=15, ...)
-- Subset RNA adata to selected genes
+Must come before `_standardize_obs()` because it writes level columns that `_standardize_obs()` then preserves.
 
-#### Section 9: Subset ATAC to filtered cells
-- Align ATAC adata to same cells as filtered RNA
+#### 9. Update `update_annotations()` — delegate hierarchy to `_apply_hierarchy()`
 
-#### Section 10: Save outputs
-- `adata_rna.write_h5ad("results/immune_integration/adata_rna.h5ad")`
-- `adata_atac.write_h5ad("results/immune_integration/adata_atac_tiles.h5ad")`
-- Save obs table as CSV for inspection
+```python
+if add_hierarchy:
+    if hierarchy_md_path is not None:
+        hier = _parse_hierarchy_md(hierarchy_md_path)
+        _apply_hierarchy(adata, hier_df=hier)
+    else:
+        _apply_hierarchy(adata)
+```
+
+### Markdown fixes (before code changes)
+
+1. **Add `CD8+ T activated` to `annotation_hierarchy.md`**: New row under CD8+ T cells section (level_1=CD8+ T-cell lineage, level_2=T-cell lineage, level_3=Lymphoid lineage, level_4=Hematopoietic lineage). Insert after line 33 (`CD8+ T`).
+2. **Remove `CD4+ T recently activated` from `annotation_hierarchy.md`**: Delete line 25. No longer referenced by any harmonization entry.
+3. **Cross-level collapses** — structural, not errors: e.g., HSC has `HSCs` at level_1/2/3; myeloid progenitors have `Myeloid lineage` at level_2/3. Validation emits WARNING only.
+
+### Verification
+1. Run validation: import `data_loading_utils` → should trigger lazy validation on first loader call
+2. Check that validation catches `CD8+ T activated` missing from hierarchy (ERROR)
+3. Fix the markdown issue, re-import, verify validation passes
+4. Load one dataset (e.g., bone_marrow), verify `level_1..level_4` columns are populated
+5. Verify `level_1:` entries: Crohn's `CD8+ Cytotoxic T Cells` → harmonized_annotation=NaN, level_1=`CD8+ T-cell lineage`, level_2=`T-cell lineage`
+6. Verify NaN entries: lung/spleen `Other` → all NaN
+
+### Workflow after implementation
+- **Edit markdown files** → re-import → validation runs automatically
+- **Hierarchy auto-populated** during `_finalize()` — no manual `update_annotations()` needed
+- **Post-hoc**: `update_annotations(adata, add_hierarchy=True)` still works for existing h5ad files
+
+---
+
+## Notebook 4: QC Summary & Covariate Review (`bm_pbmc_qc_summary.ipynb`) — CREATE
+
+**Purpose**: Comprehensive QC review and covariate analysis to inform model settings.
+
+### Cells
+1. Load `adata_rna.h5ad` and `adata_atac_tiles.h5ad`
+2. **Combined QC summary table**: per-dataset cell counts, median counts, median genes, median MT frac, median doublet score, median ATAC counts
+3. **QC distribution plots**: RNA counts, genes, MT frac, doublet score, ATAC counts — all per dataset
+4. **Review and fix annotations** (interactive):
+   - Cell type frequency table (harmonized_annotation)
+   - Compare against `annotation_harmonization.md` and `annotation_hierarchy.md`
+   - Apply rename_map via `update_annotations()` if needed
+   - Cells with/without harmonized_annotation per dataset
+   - Add hierarchy levels via `update_annotations(adata, hierarchy_df=...)`
+5. **Covariate inspection** (for choosing model settings):
+   - `batch`: value counts, cells per batch distribution
+   - `site`: cross-tabulation with dataset
+   - `donor`: n_donors per dataset, cells per donor distribution
+   - `dataset`: already summarized above
+   - `tissue`: cross-tabulation with dataset
+   - `condition`: cross-tabulation with dataset
+   - `age_group`: cross-tabulation with dataset
+6. **Covariate recommendations for regularizedVI**: based on the distributions, recommend which covariates go in each key:
+   - `ambient_covariate_keys` → batch (ambient profile varies per 10x reaction)
+   - `nn_conditioning_covariate_keys` → site, donor, dataset (or subset)
+   - `feature_scaling_covariate_keys` → site, donor, dataset (or subset)
+   - `dispersion_key` → batch
+   - `library_size_key` → batch
+7. **Fragment file path validation**: check that all fragment_file_path entries are valid files
+
+---
+
+## Notebook 5: RNA-only Training (`bm_pbmc_rna_training.ipynb`) — CREATE
+
+**Reference**: `docs/notebooks/model_comparisons/bone_marrow_gp_es_exp4_out.ipynb`
+
+### Cells
+1. Imports (regularizedvi, scanpy, etc.)
+2. Load `adata_rna.h5ad`
+3. **Cell filtering** (joint RNA+ATAC QC thresholds — TBD after Notebook 4 review):
+   - Remove doublets (`predicted_doublet == True`)
+   - RNA count thresholds (per-dataset or global)
+   - MT fraction threshold
+   - Gene count threshold
+4. **Gene filtering**: `filter_genes()` from `data_loading_utils.py`
+5. Setup model:
+   ```python
+   AmbientRegularizedSCVI.setup_anndata(
+       adata,
+       layer="counts",
+       ambient_covariate_keys=["batch"],
+       nn_conditioning_covariate_keys=["site", "donor"],  # TBD after review
+       feature_scaling_covariate_keys=["site", "donor"],  # TBD after review
+       dispersion_key="batch",
+       library_size_key="batch",
+       batch_representation="one-hot",
+   )
+   ```
+6. Create model: `n_hidden=512, n_layers=1, n_latent=128`
+7. Train with early stopping:
+   ```python
+   early_stopping_min_delta_per_feature = 0.0001
+   model.train(
+       batch_size=1024,
+       max_epochs=4000,
+       early_stopping=True,
+       early_stopping_patience=20,
+       early_stopping_min_delta=early_stopping_min_delta_per_feature * adata.n_vars,
+       check_val_every_n_epoch=1,
+       plan_kwargs=dict(
+           regularise_background=False,
+           library_log_means_centering_sensitivity=1.0,
+           use_additive_background=True,
+       ),
+   )
+   ```
+8. Training curves
+9. Get latent representation + UMAP
+10. Clustering (Leiden)
+11. Save model + results
+
+### Training params from reference
+- `regularise_background=False`
+- `library_log_means_centering_sensitivity=1.0`
+- `use_additive_background=True`
+- `encoder_covariate_keys=False` (default)
+- `use_feature_scaling=True` (default)
+- Checkpoint every 200 epochs
+
+---
+
+## Notebook 6: Multimodal Training (`bm_pbmc_multimodal_training.ipynb`) — CREATE
+
+**Reference**: `docs/notebooks/bone_marrow_mm_es_exp8_out.ipynb`
+
+### Cells
+1. Imports
+2. Load `adata_rna.h5ad` and `adata_atac_tiles.h5ad`
+3. Cell filtering (same as Notebook 5)
+4. Gene filtering (RNA)
+5. CRE selection (ATAC) — TBD, may need pseudobulk + correlation workflow
+6. Create MuData
+7. Setup model:
+   ```python
+   RegularizedMultimodalVI.setup_mudata(
+       mdata,
+       modalities={"rna": "rna", "atac": "atac"},
+       layer="counts",
+       ambient_covariate_keys=["batch"],
+       nn_conditioning_covariate_keys=["site", "donor"],
+       feature_scaling_covariate_keys=["site", "donor"],
+       dispersion_key="batch",
+       library_size_key="batch",
+       encoder_covariate_keys=False,
+   )
+   ```
+8. Create model:
+   ```python
+   n_hidden={"rna": 512, "atac": 256}
+   n_latent={"rna": 128, "atac": 64}
+   latent_mode="concatenation"
+   additive_background_modalities=["rna"]
+   feature_scaling_modalities=["rna", "atac"]
+   ```
+9. Train: same params as Notebook 5, checkpoint every 1000 epochs
+10. Training curves, UMAP, clustering
+11. Save model + results
 
 ---
 
@@ -381,123 +690,48 @@ results_folder = "results/immune_integration/"
 
 | Function | Source | Purpose |
 |---|---|---|
-| `read_10x_output()` | `multiome_rna_exploratory_embryo_sections_njc.ipynb` | Load multiple 10x H5/MTX files, concat, QC |
-| `concatenate_h5ad()` | `cell2state.utils.load_atac_snapatac2` | Load ATAC fragments into tile h5ad |
-| `download_bone_marrow_dataset()` | `regularizedvi/utils/_data.py` | Download BM h5ad |
-| `filter_genes()` | `regularizedvi/utils/_utils.py` | Gene selection |
-| `sc.pp.scrublet()` | scanpy | Doublet detection |
+| `_read_10x_mtx()` | `data_loading_utils.py` | Load MTX files into AnnData |
+| `load_atac_snapatac2` | `cell2state/utils/load_atac_snapatac2.py` | CLI: fragment→h5ad (for bsub jobs) |
+| `load_one_sample_tiles()` | `cell2state/utils/load_atac_snapatac2.py` | Load cached h5ad + tile matrix |
+| `concatenate_h5ad()` | `cell2state/utils/aggregation_v2.py` | Loop over samples, load ATAC tiles |
+| `get_per_batch_anndata()` | `cell2state/utils/aggregation_v2.py` | Per-sample ATAC tile loading |
+| `download_bone_marrow_dataset()` | `data_loading_utils.py` | Download BM h5ad |
+| `filter_genes()` | `data_loading_utils.py` | Gene selection |
 
 ---
 
-## Data paths summary
+## Execution order
 
-| Dataset | Sample mapping | Annotation file | Fragment files |
-|---|---|---|---|
-| Bone marrow | — (h5ad download) | in h5ad obs | `/nfs/team283/.../bone_marrow/{batch}/atac_fragments.tsv.gz` |
-| TEA-seq PBMC | `/nfs/team283/.../tea_seq_pbmc/sample_mapping.csv` | `.../supplementary_data/Figure4_SourceData2_TypeLabelsUMAP.csv` | in sample_mapping |
-| NEAT-seq CD4 T | — (h5ad) | in h5ad `Clusters` | `.../cd4_tcells/lane{1,2}/*_atac_fragments.tsv.gz` |
-| Crohn's PBMC | `/nfs/team283/.../GSE244831/sample_mapping.csv` | `.../GSE244831/annotations/GSE244831_cell_annotations.csv` | in sample_mapping |
-| COVID PBMC | `/nfs/team283/.../GSE239799/sample_mapping.csv` | None | in sample_mapping |
-| Lung/Spleen | `/nfs/team283/.../GSE319044/sample_mapping.csv` | `.../series_level/GSE319044_snRNA_cluster_labels.csv.gz` | in sample_mapping |
-| Spleen infant | `/nfs/team283/.../GSE311423/sample_mapping.csv` | None | in sample_mapping |
+```
+Notebook 1 (RNA loading)  →  submit_snapatac_jobs.sh  →  Notebook 3 (ATAC loading)
+         ↓                                                        ↓
+    Notebook 2 (scrublet)                              Notebook 4 (QC review)
+                                                              ↓
+                                                    Notebook 5 (RNA training)
+                                                              ↓
+                                                    Notebook 6 (multimodal training)
+```
 
----
+Notebooks 2 and the snapatac jobs can run in parallel after Notebook 1.
+Notebook 4 requires both Notebooks 2 and 3 to be done.
+Notebooks 5 and 6 require Notebook 4 (covariate review).
 
-## Notebook 2a: RNA-only training (`immune_integration/bm_pbmc_rna_training.ipynb`)
+### Conda environments
 
-**Reference notebook**: `model_comparisons/bone_marrow_gp_es_exp4_out.ipynb`
+| Task | Environment |
+|------|-------------|
+| **SnapATAC2 jobs** (`submit_snapatac_jobs.sh` / `run_snapatac_one_sample.sh`) | `conda activate cell2state_v2026_cuda124_torch25` |
+| **All notebooks** (1-6) | `conda activate regularizedvi` |
 
-### Pre-training steps (in this notebook, not Notebook 1)
-1. **Cell filtering** — using both RNA and ATAC QC metrics from Notebook 1
-   - MT fraction, total counts, n_genes, doublet score thresholds
-   - ATAC counts/features thresholds (from `adata_atac_tiles.h5ad` obs)
-2. **Gene filtering** — `filter_genes()` (copied into `data_loading_utils.py`)
-
-### Model configuration
-- **Architecture**: n_hidden=512, n_layers=1, n_latent=128
-- **Covariates** (REVIEW NEEDED — depends on actual batch/donor/site counts):
-  - `ambient_covariate_keys=["batch"]`
-  - `nn_conditioning_covariate_keys=["site", "donor"]` (or add `"dataset"`)
-  - `feature_scaling_covariate_keys=["site", "donor"]` (or add `"dataset"`)
-  - `dispersion_key="batch"`
-  - `library_size_key="batch"`
-  - `encoder_covariate_keys=False`
-- **Training**:
-  - `max_epochs=4000`, `batch_size=1024`, `train_size=0.9`
-  - `early_stopping=True`, `early_stopping_patience=20`, `early_stopping_monitor="elbo_validation"`
-  - `early_stopping_min_delta_per_feature=0.0001`
-  - Checkpoint every 200 epochs
-- **Other params** (from reference):
-  - `use_additive_background=True`, `regularise_background=False`
-  - `additive_bg_prior_alpha=1.0`, `additive_bg_prior_beta=100.0`
-  - `compute_pearson=True`, `use_feature_scaling=True`
-  - `library_log_means_centering_sensitivity=1.0`
-- **Important**: NEAT-seq is sorted CD4 T cells — very different ambient profile from whole-tissue samples. Per-batch ambient model handles this.
-- **Important**: ~100 batches total — may need larger batch_size or adjusted learning rate
-
-### Post-training
-- Latent space extraction, UMAP, Leiden clustering
-- UMAP colored by batch, site, dataset, cell type annotations
-- Marker gene dotplots
-- Save model + adata with latent/UMAP
-
-## Notebook 2b: RNA+ATAC multimodal training (`immune_integration/bm_pbmc_multimodal_training.ipynb`)
-
-**Reference notebook**: `bone_marrow_mm_es_exp8_out.ipynb`
-
-### Pre-training steps
-1. **Cell filtering** — same as Notebook 2a
-2. **Gene filtering** for RNA — `filter_genes()`
-3. **ATAC feature selection** — `filter_genes()` on tile matrix (or peak selection)
-4. **Create MuData** — `mu.MuData({"rna": adata_rna, "atac": adata_atac})`
-
-### Model configuration
-- **Architecture**: n_hidden={"rna": 512, "atac": 256}, n_latent={"rna": 128, "atac": 64}, n_layers=1
-- **Latent mode**: concatenation (total latent dim = 192)
-- **Covariates** (REVIEW NEEDED):
-  - `ambient_covariate_keys=["batch"]`
-  - `nn_conditioning_covariate_keys=["site", "donor"]`
-  - `feature_scaling_covariate_keys=["site", "donor"]`
-  - `dispersion_key="batch"`, `library_size_key="batch"`
-  - `encoder_covariate_keys=False`
-- **Training**:
-  - `max_epochs=4000`, `batch_size=1024`, `train_size=0.9`
-  - `early_stopping=True`, `early_stopping_patience=20`, `early_stopping_monitor="elbo_validation"`
-  - `early_stopping_min_delta_per_feature=0.0001`
-  - Checkpoint every 1000 epochs
-- **Per-modality flags**:
-  - `additive_background_modalities=["rna"]` (ambient correction for RNA only)
-  - `feature_scaling_modalities=["rna", "atac"]`
-  - `dispersion="gene-batch"`, `regularise_dispersion=True`
-- **Other params**: same as RNA-only
-
-### Post-training
-- Latent space extraction, UMAP (per-modality + joint)
-- `model.plot_umap_comparison()`
-- Decoder attribution analysis (`model.plot_modality_attribution()`)
-- Attribution-weighted UMAPs
-- Marker gene dotplots
-- Save model + adata
-
-## Future steps (after Notebooks 2a/2b)
-
-1. **Clustering & annotation transfer**
-   - Leiden clustering on latent space
-   - Majority vote annotation from labeled cells to unlabeled (GSE239799, GSE311423, TEA-seq non-GSM4949911)
-   - Attach hierarchy levels
-
-2. **CRE selection** (from ATAC tiles)
-   - Pseudobulk tiles by sample x cell_cluster
-   - Correlation workflow against annotation hierarchy
-   - TopN CRE selection
+**Important**: Only the SnapATAC2 bsub jobs use `cell2state_v2026_cuda124_torch25` (handled internally by `run_snapatac_one_sample.sh`). All notebook execution via papermill must use the `regularizedvi` environment.
 
 ---
 
 ## Verification
 
-1. Each loader function returns anndata with correct standardized obs columns
-2. Gene intersection covers >15k genes
-3. ATAC tile loading completes for all datasets (fragment file paths valid)
-4. QC metrics computed consistently across datasets
-5. Scrublet runs without errors on combined data
-6. Output h5ad files loadable and contain all expected metadata
+1. Notebook 1: saves `adata_rna.h5ad` (~776k cells x 25k genes) and `path_sample_df.csv`
+2. SnapATAC2 jobs: all h5ad files created next to fragment files (check with `ls`)
+3. Notebook 2: `adata_rna.h5ad` updated with `doublet_score` and `predicted_doublet` columns
+4. Notebook 3: saves `adata_atac_tiles.h5ad` (same cells as RNA)
+5. Notebook 4: produces QC summary and covariate recommendations
+6. Notebooks 5/6: model trains with early stopping, UMAP shows cell type separation

@@ -11,6 +11,7 @@ import gc
 import os
 import re
 import subprocess
+import warnings
 from pathlib import Path
 
 import anndata
@@ -37,8 +38,14 @@ STANDARD_OBS_COLS = [
     "sex",
     "original_annotation",
     "harmonized_annotation",
+    "level_1",
+    "level_2",
+    "level_3",
+    "level_4",
     "fragment_file_path",
 ]
+
+_LEVEL_PREFIX = "level_1:"
 
 # Harmonization mappings are loaded from annotation_harmonization.md (single
 # source of truth).  Edit the markdown file to change mappings — the Python
@@ -46,6 +53,7 @@ STANDARD_OBS_COLS = [
 
 _HARMONIZATION_MAPS = None
 _HIERARCHY_DF = None
+_VALIDATED = False
 
 
 def _parse_harmonization_md(md_path):
@@ -82,7 +90,11 @@ def _parse_harmonization_md(md_path):
                 continue
             if not harmonized or not dataset or dataset == "—":
                 continue
-            maps.setdefault(dataset, {})[original] = harmonized
+            # Convert literal "NaN" to np.nan so .map() produces NaN
+            if harmonized == "NaN":
+                maps.setdefault(dataset, {})[original] = np.nan
+            else:
+                maps.setdefault(dataset, {})[original] = harmonized
     return maps
 
 
@@ -120,22 +132,163 @@ def _parse_hierarchy_md(md_path):
     return pd.DataFrame(rows)
 
 
+def _validate_annotations(harm_maps, hier_df):
+    """Cross-validate harmonization maps against hierarchy DataFrame.
+
+    Raises ValueError on fatal issues, emits warnings for non-fatal ones.
+    """
+    errors = []
+
+    # Collect all harmonized names from harmonization (across all datasets)
+    all_harm_names = set()
+    level1_prefix_values = set()
+    for dataset_map in harm_maps.values():
+        for harmonized in dataset_map.values():
+            if isinstance(harmonized, float) and np.isnan(harmonized):
+                continue
+            if isinstance(harmonized, str) and harmonized.startswith(_LEVEL_PREFIX):
+                level1_prefix_values.add(harmonized[len(_LEVEL_PREFIX) :])
+            else:
+                all_harm_names.add(harmonized)
+
+    hier_names = set(hier_df["harmonized_name"])
+    hier_level1_values = set(hier_df["level_1"])
+
+    # (e) No duplicate harmonized_name in hierarchy
+    dupes = hier_df["harmonized_name"][hier_df["harmonized_name"].duplicated()].unique()
+    if len(dupes) > 0:
+        errors.append(f"Duplicate harmonized_name in hierarchy: {sorted(dupes)}")
+
+    # (a) All harmonized names from harmonization exist in hierarchy
+    missing_from_hier = all_harm_names - hier_names
+    if missing_from_hier:
+        errors.append(f"Harmonized names not found in hierarchy: {sorted(missing_from_hier)}")
+
+    # (c) All level_1: prefix values exist as level_1 in hierarchy
+    missing_l1 = level1_prefix_values - hier_level1_values
+    if missing_l1:
+        errors.append(f"level_1: prefix values not found in hierarchy level_1: {sorted(missing_l1)}")
+
+    # (f) Consistent parents for shared level_1 values
+    for l1_val, group in hier_df.groupby("level_1"):
+        for col in ["level_2", "level_3", "level_4"]:
+            unique_vals = group[col].unique()
+            if len(unique_vals) > 1:
+                errors.append(f"Inconsistent {col} for level_1='{l1_val}': {sorted(unique_vals)}")
+
+    if errors:
+        raise ValueError("Annotation validation failed:\n  - " + "\n  - ".join(errors))
+
+    # (b) Unreferenced hierarchy entries (WARNING)
+    unreferenced = hier_names - all_harm_names
+    if unreferenced:
+        warnings.warn(
+            f"Hierarchy entries not referenced by any harmonization mapping: "
+            f"{sorted(unreferenced)}. These may be kept for future datasets.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    # (d) Higher-level names not at lower levels (WARNING)
+    level_cols = ["level_1", "level_2", "level_3", "level_4"]
+    cross_level_warnings = []
+    for coarser_idx in range(3, 0, -1):
+        coarser_col = level_cols[coarser_idx]
+        coarser_values = set(hier_df[coarser_col])
+        for finer_idx in range(coarser_idx):
+            finer_col = level_cols[finer_idx]
+            finer_values = set(hier_df[finer_col])
+            overlap = coarser_values & finer_values
+            if overlap:
+                cross_level_warnings.append(f"{coarser_col} values also in {finer_col}: {sorted(overlap)}")
+    if cross_level_warnings:
+        warnings.warn(
+            "Cross-level name overlap (structural collapses, not necessarily errors):\n  - "
+            + "\n  - ".join(cross_level_warnings),
+            UserWarning,
+            stacklevel=3,
+        )
+
+
+def _get_validated_data():
+    """Load, validate, and cache both harmonization maps and hierarchy."""
+    global _HARMONIZATION_MAPS, _HIERARCHY_DF, _VALIDATED
+    if not _VALIDATED:
+        md_dir = Path(__file__).parent
+        _HARMONIZATION_MAPS = _parse_harmonization_md(md_dir / "annotation_harmonization.md")
+        _HIERARCHY_DF = _parse_hierarchy_md(md_dir / "annotation_hierarchy.md")
+        _validate_annotations(_HARMONIZATION_MAPS, _HIERARCHY_DF)
+        _VALIDATED = True
+    return _HARMONIZATION_MAPS, _HIERARCHY_DF
+
+
 def _get_harmonization_maps():
     """Load and cache harmonization maps from annotation_harmonization.md."""
-    global _HARMONIZATION_MAPS
-    if _HARMONIZATION_MAPS is None:
-        md_path = Path(__file__).parent / "annotation_harmonization.md"
-        _HARMONIZATION_MAPS = _parse_harmonization_md(md_path)
-    return _HARMONIZATION_MAPS
+    return _get_validated_data()[0]
 
 
 def _get_hierarchy_df():
     """Load and cache hierarchy from annotation_hierarchy.md."""
-    global _HIERARCHY_DF
-    if _HIERARCHY_DF is None:
-        md_path = Path(__file__).parent / "annotation_hierarchy.md"
-        _HIERARCHY_DF = _parse_hierarchy_md(md_path)
-    return _HIERARCHY_DF
+    return _get_validated_data()[1]
+
+
+def _apply_hierarchy(adata, hier_df=None):
+    """Populate level_1..level_4 from harmonized_annotation.
+
+    Handles three cases:
+    1. Normal harmonized names -> look up in hierarchy DF
+    2. ``level_1:`` prefixed strings -> set harmonized_annotation=NaN,
+       populate levels by looking up the level_1 value in hierarchy
+    3. NaN -> all levels stay NaN
+    """
+    if hier_df is None:
+        hier = _get_hierarchy_df()
+    else:
+        hier = hier_df
+    hier_indexed = hier.set_index("harmonized_name")
+    level_cols = ["level_1", "level_2", "level_3", "level_4"]
+
+    # Build level_1 -> {level_1, level_2, level_3, level_4} lookup
+    # (validation check f guarantees consistent parents per level_1)
+    l1_to_levels = {}
+    for l1_val, group in hier.groupby("level_1"):
+        row = group.iloc[0]
+        l1_to_levels[l1_val] = {
+            "level_1": l1_val,
+            "level_2": row["level_2"],
+            "level_3": row["level_3"],
+            "level_4": row["level_4"],
+        }
+
+    ha = adata.obs["harmonized_annotation"].astype(object)
+
+    # Detect level_1: prefixed entries
+    is_prefix = ha.str.startswith(_LEVEL_PREFIX, na=False)
+
+    # Initialize level columns as object dtype (avoids FutureWarning on mixed str/NaN)
+    for col in level_cols:
+        adata.obs[col] = pd.array([np.nan] * adata.n_obs, dtype=object)
+
+    # Case 1: Normal harmonized names (not NaN, not prefixed)
+    normal_mask = ha.notna() & ~is_prefix
+    if normal_mask.any():
+        normal_names = ha[normal_mask]
+        for col in level_cols:
+            col_map = hier_indexed[col].to_dict()
+            adata.obs.loc[normal_mask, col] = normal_names.map(col_map).values
+
+    # Case 2: level_1: prefixed entries
+    if is_prefix.any():
+        prefix_vals = ha[is_prefix].str[len(_LEVEL_PREFIX) :]
+        for col in level_cols:
+            col_map = {k: v[col] for k, v in l1_to_levels.items()}
+            adata.obs.loc[is_prefix, col] = prefix_vals.map(col_map).values
+        # Set harmonized_annotation to NaN for prefixed entries
+        adata.obs.loc[is_prefix, "harmonized_annotation"] = np.nan
+
+    # Case 3: NaN stays NaN (already initialized above)
+
+    return adata
 
 
 def update_annotations(adata, rename_map=None, add_hierarchy=False, hierarchy_md_path=None):
@@ -163,11 +316,9 @@ def update_annotations(adata, rename_map=None, add_hierarchy=False, hierarchy_md
     if add_hierarchy:
         if hierarchy_md_path is not None:
             hier = _parse_hierarchy_md(hierarchy_md_path)
+            _apply_hierarchy(adata, hier_df=hier)
         else:
-            hier = _get_hierarchy_df()
-        hier = hier.set_index("harmonized_name")
-        for col in ["level_1", "level_2", "level_3", "level_4"]:
-            adata.obs[col] = adata.obs["harmonized_annotation"].map(hier[col].to_dict()).values
+            _apply_hierarchy(adata)
     return adata
 
 
@@ -239,12 +390,13 @@ def _read_10x_mtx(barcodes_path, features_path, matrix_path, sample_id):
 
 
 def _finalize(adata: sc.AnnData) -> sc.AnnData:
-    """Final steps: ensure uint64 counts, sparse X, standardize obs."""
+    """Final steps: ensure uint16 counts, sparse X, apply hierarchy, standardize obs."""
     if scipy.sparse.issparse(adata.X):
         adata.X = adata.X.tocsr().astype(np.uint16)
     else:
         adata.X = scipy.sparse.csr_matrix(adata.X, dtype=np.uint16)
     adata.layers["counts"] = adata.X.copy()
+    adata = _apply_hierarchy(adata)
     adata = _standardize_obs(adata)
     return adata
 
@@ -272,7 +424,7 @@ _BM_BATCHES = [
 ]
 
 
-def download_bone_marrow_dataset(data_folder: str = "data/") -> str:
+def download_bone_marrow_dataset(data_folder: str = "/nfs/team283/vk7/sanger_projects/large_data/bone_marrow/") -> str:
     """Download the NeurIPS 2021 bone marrow multiome dataset.
 
     Downloads the curated h5ad file and per-batch ATAC fragment files
@@ -386,7 +538,7 @@ def filter_genes(adata, cell_count_cutoff=15, cell_percentage_cutoff2=0.05, nonz
 # ---------------------------------------------------------------------------
 
 
-def load_bone_marrow(data_folder: str = "data/") -> sc.AnnData:
+def load_bone_marrow(data_folder: str = "/nfs/team283/vk7/sanger_projects/large_data/bone_marrow/") -> sc.AnnData:
     """Load the NeurIPS 2021 bone marrow multiome dataset (GEX only).
 
     Downloads the h5ad and fragment files via ``download_bone_marrow_dataset``,
