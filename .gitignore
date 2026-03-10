@@ -55,3 +55,8 @@ _extract_traceback.py
 _extract_traceback.sh
 _monitor_process.sh
 _check_h5ad_format.py
+_check_tea_barcodes.py
+_create_nb3.py
+_create_nb5.py
+_create_nb6.py
+_submit_experiments.sh
