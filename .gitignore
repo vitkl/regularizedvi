@@ -59,4 +59,6 @@ _check_tea_barcodes.py
 _create_nb3.py
 _create_nb5.py
 _create_nb6.py
+_create_nb55a.py
+_create_nb55b.py
 _submit_experiments.sh

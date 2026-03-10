@@ -109,10 +109,12 @@
 ```
 Rerun NB1 (fix TEA-seq in adata_rna.h5ad)
   ↓
-NB3 ATAC loading (cell2state env) ──────────┐
-NB5 RNA training (GPU, regularizedvi) ──────┤ parallel
-  ↓                                         ↓
-NB5.5 Annotation transfer + CRE selection
+NB3 ATAC loading (cell2state env, produces atac_qc_metrics.csv)
+  ↓
+NB5 RNA training (GPU, needs scrublet + atac_qc_metrics CSVs)
+  ↓
+NB5.5A Annotation transfer (needs NB5 latent space)
+NB5.5B CRE selection (needs NB3 ATAC + NB5 UMAP + NB5.5A annotations)
   ↓
 NB6 Multimodal training (GPU)
 ```
