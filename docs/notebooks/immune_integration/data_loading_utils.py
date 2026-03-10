@@ -630,8 +630,9 @@ def load_tea_seq_pbmc() -> sc.AnnData:
     """Load TEA-seq PBMC data from 7 samples (5 TEA-seq + 2 multiome).
 
     Reads sample_mapping.csv to locate per-sample H5 files and fragment files.
-    Annotations (predicted.celltype.l2) are available only for GSM4949911 via
-    the Figure4 supplementary CSV; other samples get NaN annotations.
+    Annotations (predicted.celltype.l2) are available for 4 of 5 TEA-seq wells
+    (GSM5123951-54) via the Figure4 supplementary CSV. GSM4949911 and multiome
+    wells have no annotations.
 
     Returns
     -------
@@ -674,19 +675,36 @@ def load_tea_seq_pbmc() -> sc.AnnData:
     del adatas
     gc.collect()
 
-    # Load annotations for GSM4949911
+    # Load annotations from Figure4 CSV (covers GSM5123951-54 as suffixes 3-6)
+    # GSM4949911 is NOT in this CSV. Barcodes have Seurat merge suffixes (-3 to -6)
+    # while per-sample H5 files use -1. Match each well to its known suffix.
     annot_df = pd.read_csv(annotation_path)
     annot_df = annot_df[["barcode", "predicted.celltype.l2"]].copy()
-    annot_df = annot_df.set_index("barcode")
+    annot_df["bc_seq"] = annot_df["barcode"].str.rsplit("-", n=1).str[0]
+    annot_df["suffix"] = annot_df["barcode"].str.rsplit("-", n=1).str[1]
 
-    # Map annotations: extract raw barcode from obs_names for GSM4949911 cells
-    gsm4949911_mask = adata.obs["sample_id"] == "GSM4949911_tea_seq"
-    raw_barcodes = pd.Series(
-        [name.split("#", 1)[1] for name in adata.obs_names[gsm4949911_mask]],
-        index=adata.obs_names[gsm4949911_mask],
-    )
-    # Look up annotations by raw barcode
-    annotations = raw_barcodes.map(annot_df["predicted.celltype.l2"])
+    # Mapping: sample_id -> Seurat suffix in the Figure4 CSV
+    well_to_suffix = {
+        "GSM5123951_tea_seq": "3",
+        "GSM5123952_tea_seq": "4",
+        "GSM5123953_tea_seq": "5",
+        "GSM5123954_tea_seq": "6",
+    }
+
+    # Build per-well annotation lookup (barcode sequence -> cell type)
+    annotations = pd.Series(np.nan, index=adata.obs_names)
+    for sample_id, suffix in well_to_suffix.items():
+        well_mask = adata.obs["sample_id"] == sample_id
+        if not well_mask.any():
+            continue
+        well_annot = annot_df.loc[annot_df["suffix"] == suffix].set_index("bc_seq")["predicted.celltype.l2"]
+        raw_bcs = pd.Series(
+            [name.split("#", 1)[1].rsplit("-", 1)[0] for name in adata.obs_names[well_mask]],
+            index=adata.obs_names[well_mask],
+        )
+        annotations.loc[well_mask] = raw_bcs.map(well_annot).values
+    n_annotated = annotations.notna().sum()
+    print(f"TEA-seq: annotated {n_annotated}/{adata.n_obs} cells from Figure4 CSV")
 
     # Set obs columns
     adata.obs["batch"] = adata.obs["sample_id"].values
@@ -698,12 +716,12 @@ def load_tea_seq_pbmc() -> sc.AnnData:
     adata.obs["age_group"] = "adult"
     adata.obs["sex"] = "unknown"
 
-    # original_annotation: only available for GSM4949911
-    adata.obs["original_annotation"] = np.nan
-    adata.obs.loc[gsm4949911_mask, "original_annotation"] = annotations.values
+    # original_annotation: available for GSM5123951-54 (from Figure4 CSV)
+    adata.obs["original_annotation"] = annotations.values
 
     # harmonized_annotation via TEA_SEQ_MAP
-    adata.obs["harmonized_annotation"] = adata.obs["original_annotation"].map(_get_harmonization_maps()["pbmc_tea_seq"])
+    harm_map = _get_harmonization_maps().get("pbmc_tea_seq", {})
+    adata.obs["harmonized_annotation"] = adata.obs["original_annotation"].map(harm_map)
 
     # Clean up temporary column
     adata.obs.drop(columns=["sample_id"], inplace=True)
