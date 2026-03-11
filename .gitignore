@@ -61,4 +61,5 @@ _create_nb5.py
 _create_nb6.py
 _create_nb55a.py
 _create_nb55b.py
+_check_job_mem.sh
 _submit_experiments.sh

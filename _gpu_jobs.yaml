@@ -211,6 +211,22 @@
     Same as exp10bstratified_filtered (ATAC>2k) + lowES (0.0001).
     Direct comparison to ataclr2 variant — same settings without ATAC LR boost.
 
+- job_name: exp10bstratified_filtered_lowes_libvar05
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10bstratified_filtered_lowes_libvar05_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0001 -r results_folder results/exp10bstratified_filtered_lowes_libvar05/"
+  description: >-
+    Same as exp10bstratified_filtered_lowes but with libvar=0.5 (vs 0.2).
+    Tests whether even wider library prior variance reduces dispersion drift with lowES.
+
+- job_name: exp10bstratified_filtered_lowes2_libvar05
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10bstratified_filtered_lowes2_libvar05_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r results_folder results/exp10bstratified_filtered_lowes2_libvar05/"
+  description: >-
+    Same as exp10bstratified_filtered_lowes_libvar05 but with ES=0.0002 (vs 0.0001).
+    Tests intermediate ES sensitivity with wider library prior variance.
+
 # ── Per-modality learning rate (hypothesis F) ──
 
 - job_name: exp10bstratified_filtered_lowes_ataclr2

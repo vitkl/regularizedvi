@@ -1091,3 +1091,87 @@ def load_lung_spleen_gse319044() -> sc.AnnData:
     print(f"  Annotated cells: {adata.obs['original_annotation'].notna().sum()} / {adata.n_obs}")
 
     return adata
+
+
+# ---------------------------------------------------------------------------
+# ATAC barcode utilities
+# ---------------------------------------------------------------------------
+
+
+def rename_obs_for_cell2state(adata: sc.AnnData) -> sc.AnnData:
+    """Rename obs_names to match cell2state's ``load_atac()`` barcode format.
+
+    cell2state constructs ATAC obs_names as ``<sample>-<raw_barcode>`` (hyphen
+    separator). The combined RNA adata uses different prefixes per dataset
+    (``sample#barcode`` or ``sample:barcode``). This function converts to the
+    cell2state format so ``concatenate_h5ad`` can intersect cells correctly.
+
+    Special case: TEA-seq / multiome fragment files (``pbmc_tea_seq`` dataset)
+    use UUID barcodes instead of cellranger barcodes. The metadata CSVs next to
+    the fragment files provide the mapping (``original_barcodes`` → ``barcodes``).
+
+    Parameters
+    ----------
+    adata
+        Combined RNA AnnData with ``obs["batch"]`` and ``obs["dataset"]`` columns.
+
+    Returns
+    -------
+    The same AnnData with renamed ``obs_names``.
+    """
+    import glob
+
+    # --- Build TEA-seq cellranger-to-UUID mapping ---
+    tea_seq_base = "/nfs/team283/vk7/sanger_projects/large_data/tea_seq_pbmc"
+    bc_map = {}  # cellranger_barcode -> uuid_barcode
+
+    for meta_file in sorted(
+        glob.glob(f"{tea_seq_base}/tea_seq/GSM*/GSM*_metadata.csv.gz")
+        + glob.glob(f"{tea_seq_base}/multiome/GSM*/GSM*_metadata.csv.gz")
+    ):
+        meta_df = pd.read_csv(meta_file, usecols=["barcodes", "original_barcodes"])
+        for _, row in meta_df.iterrows():
+            bc_map[row["original_barcodes"]] = row["barcodes"]
+
+    print(f"TEA-seq/multiome barcode mapping: {len(bc_map)} entries")
+
+    # --- Identify batches with UUID fragment files ---
+    uuid_batches = set(adata.obs["batch"][adata.obs["dataset"] == "pbmc_tea_seq"].unique())
+    print(f"UUID barcode batches ({len(uuid_batches)}): {sorted(uuid_batches)}")
+
+    # --- Rename all obs_names ---
+    new_names = []
+    n_uuid_mapped = 0
+    n_uuid_missing = 0
+    for bc, batch in zip(adata.obs_names, adata.obs["batch"], strict=True):
+        # Extract raw barcode (part after # or :)
+        if "#" in bc:
+            raw = bc.split("#", 1)[1]
+        elif ":" in bc:
+            raw = bc.split(":", 1)[1]
+        else:
+            raw = bc
+        # Ensure -1 suffix (cellranger convention)
+        if not raw.endswith("-1"):
+            raw = raw + "-1"
+
+        # For UUID batches, convert cellranger barcode to UUID
+        if batch in uuid_batches:
+            uuid_bc = bc_map.get(raw)
+            if uuid_bc is not None:
+                raw = uuid_bc
+                n_uuid_mapped += 1
+            else:
+                n_uuid_missing += 1
+
+        new_names.append(f"{batch}-{raw}")
+
+    adata.obs_names = new_names
+    adata.obs_names_make_unique()
+
+    print(f"Renamed {len(new_names)} obs_names to cell2state format")
+    print(f"  Examples: {list(adata.obs_names[:3])}")
+    print(f"  UUID mapped: {n_uuid_mapped}, missing: {n_uuid_missing}")
+    print(f"  Unique: {len(set(adata.obs_names))} / {len(adata.obs_names)}")
+
+    return adata
