@@ -51,6 +51,7 @@ dev = [
 ]
 test = [
   "coverage>=7.10",
+  "igraph",
   "pytest",
   "pytest-cov",     # For VS Code’s coverage functionality
   "scanpy",
