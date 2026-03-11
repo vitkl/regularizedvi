@@ -167,6 +167,14 @@
     Same as exp12 (RNA, wider lib var 0.2) + stratified validation split.
     Tests if stratified split improves wider library variance for RNA model.
 
+- job_name: exp12strat_lowes2_libvar05
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp12strat_lowes2_libvar05_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r results_folder results/exp12strat_lowes2_libvar05/"
+  description: >-
+    RNA: libvar=0.5, stratified, ES=2e-4.
+    Tests sweet-spot config from multimodal (libvar=0.5 + ES=2e-4) on single-modal RNA.
+
 - job_name: exp11stratified
   notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
   output: docs/notebooks/bone_marrow_mm_es_exp11stratified_out.ipynb
