@@ -353,15 +353,26 @@ def build_gastrula_mudata(
     shared_cells = rna_cells.intersection(adata_spliced.obs_names).intersection(adata_unspliced.obs_names)
     _print(f"\nShared cells: {len(shared_cells):,}", verbose)
 
-    adata_rna = adata_rna[shared_cells].copy()
-    adata_spliced = adata_spliced[shared_cells].copy()
-    adata_unspliced = adata_unspliced[shared_cells].copy()
-
     obs_aligned = shared_obs.reindex(shared_cells).copy()
+    del shared_obs
+
+    # Align each modality individually with gc between to limit peak memory
+    adata_rna = adata_rna[shared_cells].copy()
     adata_rna.obs = obs_aligned.copy()
+    gc.collect()
+    _print(f"  Aligned rna: {adata_rna.shape}, RSS={_rss_gb():.1f}GB", verbose)
+
+    adata_spliced = adata_spliced[shared_cells].copy()
     adata_spliced.obs = obs_aligned.copy()
+    gc.collect()
+    _print(f"  Aligned spliced: {adata_spliced.shape}, RSS={_rss_gb():.1f}GB", verbose)
+
+    adata_unspliced = adata_unspliced[shared_cells].copy()
     adata_unspliced.obs = obs_aligned.copy()
-    del shared_obs, obs_aligned
+    gc.collect()
+    _print(f"  Aligned unspliced: {adata_unspliced.shape}, RSS={_rss_gb():.1f}GB", verbose)
+
+    del obs_aligned
 
     mdata = mu.MuData({"rna": adata_rna, "spliced": adata_spliced, "unspliced": adata_unspliced})
     del adata_rna, adata_spliced, adata_unspliced
