@@ -382,8 +382,8 @@ def _read_10x_mtx(barcodes_path, features_path, matrix_path, sample_id):
 
     adata.var_names_make_unique()
 
-    # Prefix barcodes with sample_id
-    adata.obs_names = [f"{sample_id}#{bc}" for bc in adata.obs_names]
+    # Prefix barcodes with sample_id: {sample_id}-{barcode} (cell2state format)
+    adata.obs_names = [f"{sample_id}-{bc}" for bc in adata.obs_names]
     adata.obs["sample"] = sample_id
 
     return adata
@@ -391,6 +391,16 @@ def _read_10x_mtx(barcodes_path, features_path, matrix_path, sample_id):
 
 def _finalize(adata: sc.AnnData) -> sc.AnnData:
     """Final steps: ensure uint16 counts, sparse X, apply hierarchy, standardize obs."""
+    # Validate that X contains integer counts (not normalized data)
+    if scipy.sparse.issparse(adata.X):
+        sample_vals = adata.X.data[: min(10000, len(adata.X.data))]
+    else:
+        sample_vals = np.asarray(adata.X).ravel()[:10000]
+    if len(sample_vals) > 0 and not np.allclose(sample_vals, np.round(sample_vals), atol=1e-3):
+        raise ValueError(
+            "adata.X contains non-integer values — likely normalized data. "
+            "Set adata.X = adata.layers['counts'] before calling _finalize()."
+        )
     if scipy.sparse.issparse(adata.X):
         adata.X = adata.X.tocsr().astype(np.uint16)
     else:
@@ -398,6 +408,46 @@ def _finalize(adata: sc.AnnData) -> sc.AnnData:
     adata.layers["counts"] = adata.X.copy()
     adata = _apply_hierarchy(adata)
     adata = _standardize_obs(adata)
+    return adata
+
+
+# ---------------------------------------------------------------------------
+# CSV loading utilities (safe reindex, never .obs.join)
+# ---------------------------------------------------------------------------
+
+
+def load_scrublet_scores(adata: sc.AnnData, csv_path: str) -> sc.AnnData:
+    """Load scrublet CSV, reindex to adata.obs_names, fill NaN with 0.0."""
+    df = pd.read_csv(csv_path, index_col=0)
+    df["predicted_doublet"] = df["predicted_doublet"].map({"True": True, "False": False, True: True, False: False})
+    df["doublet_score"] = df["doublet_score"].astype("float32")
+    reindexed = df.reindex(index=adata.obs_names)
+    n_matched = reindexed["doublet_score"].notna().sum()
+    print(f"Scrublet: {n_matched}/{adata.n_obs} matched ({100 * n_matched / adata.n_obs:.1f}%)")
+    if n_matched == 0:
+        raise ValueError(
+            f"No scrublet match. CSV index sample: {list(df.index[:3])}, obs_names sample: {list(adata.obs_names[:3])}"
+        )
+    # NaN → 0.0 (keeps cell — scrublet couldn't run for that batch)
+    reindexed["doublet_score"] = reindexed["doublet_score"].fillna(0.0)
+    reindexed["predicted_doublet"] = reindexed["predicted_doublet"].fillna(False)
+    for col in df.columns:
+        adata.obs[col] = reindexed[col].values
+    return adata
+
+
+def load_atac_qc_metrics(adata: sc.AnnData, csv_path: str) -> sc.AnnData:
+    """Load ATAC QC CSV, reindex to adata.obs_names."""
+    df = pd.read_csv(csv_path, index_col=0)
+    reindexed = df.reindex(index=adata.obs_names)
+    n_matched = reindexed.iloc[:, 0].notna().sum()
+    print(f"ATAC QC: {n_matched}/{adata.n_obs} matched ({100 * n_matched / adata.n_obs:.1f}%)")
+    if n_matched == 0:
+        raise ValueError(
+            f"No ATAC QC match. CSV index sample: {list(df.index[:3])}, obs_names sample: {list(adata.obs_names[:3])}"
+        )
+    for col in df.columns:
+        adata.obs[col] = reindexed[col].values
     return adata
 
 
@@ -578,6 +628,15 @@ def load_bone_marrow(data_folder: str = "/nfs/team283/vk7/sanger_projects/large_
         os.path.join(data_folder_abs, b, "atac_fragments.tsv.gz") for b in adata.obs["batch"]
     ]
 
+    # Raw counts are in layers["counts"]; X may contain normalized data
+    adata.X = adata.layers["counts"]
+
+    # Prefix obs_names with batch for {batch}-{barcode} format
+    adata.obs_names = [
+        f"{batch}-{bc}" if bc.endswith("-1") else f"{batch}-{bc}-1"
+        for bc, batch in zip(adata.obs_names, adata.obs["batch"], strict=True)
+    ]
+
     adata = _finalize(adata)
 
     # Print dataset summary
@@ -611,6 +670,13 @@ def load_neat_seq_cd4t() -> sc.AnnData:
 
     # Standardized obs columns
     adata.obs["batch"] = ("neat_seq_" + adata.obs["lane"].astype(str)).values
+
+    # Prefix obs_names: {batch}-{barcode} (cell2state format)
+    adata.obs_names = [
+        f"{batch}-{bc}" if bc.endswith("-1") else f"{batch}-{bc}-1"
+        for bc, batch in zip(adata.obs_names, adata.obs["batch"], strict=True)
+    ]
+
     adata.obs["site"] = "stanford"
     adata.obs["donor"] = "neat_seq_donor1"
     adata.obs["dataset"] = "neat_seq_cd4t"
@@ -661,8 +727,8 @@ def load_tea_seq_pbmc() -> sc.AnnData:
         # Set ENSEMBL as var_names
         adata_i = _set_ensembl_var_names(adata_i)
 
-        # Prefix obs_names with sample_id
-        adata_i.obs_names = [f"{sample_id}#{bc}" for bc in adata_i.obs_names]
+        # Prefix obs_names with sample_id: {sample_id}-{barcode} (cell2state format)
+        adata_i.obs_names = [f"{sample_id}-{bc}" for bc in adata_i.obs_names]
 
         # Store fragment file path and sample_id per cell
         adata_i.obs["fragment_file_path"] = fragment_file
@@ -675,6 +741,7 @@ def load_tea_seq_pbmc() -> sc.AnnData:
     del adatas
     gc.collect()
 
+    # --- Annotation matching (BEFORE UUID mapping, since annotations use cellranger barcodes) ---
     # Load annotations from Figure4 CSV (covers GSM5123951-54 as suffixes 3-6)
     # GSM4949911 is NOT in this CSV. Barcodes have Seurat merge suffixes (-3 to -6)
     # while per-sample H5 files use -1. Match each well to its known suffix.
@@ -692,19 +759,59 @@ def load_tea_seq_pbmc() -> sc.AnnData:
     }
 
     # Build per-well annotation lookup (barcode sequence -> cell type)
+    # obs_names are still {sample_id}-{cellranger_bc} at this point
     annotations = pd.Series(np.nan, index=adata.obs_names)
     for sample_id, suffix in well_to_suffix.items():
         well_mask = adata.obs["sample_id"] == sample_id
         if not well_mask.any():
             continue
         well_annot = annot_df.loc[annot_df["suffix"] == suffix].set_index("bc_seq")["predicted.celltype.l2"]
+        # Extract raw barcode: strip {sample_id}- prefix, then strip -1 suffix
         raw_bcs = pd.Series(
-            [name.split("#", 1)[1].rsplit("-", 1)[0] for name in adata.obs_names[well_mask]],
+            [
+                name[len(sid) + 1 :].rsplit("-", 1)[0]
+                for name, sid in zip(adata.obs_names[well_mask], adata.obs.loc[well_mask, "sample_id"], strict=True)
+            ],
             index=adata.obs_names[well_mask],
         )
         annotations.loc[well_mask] = raw_bcs.map(well_annot).values
     n_annotated = annotations.notna().sum()
     print(f"TEA-seq: annotated {n_annotated}/{adata.n_obs} cells from Figure4 CSV")
+
+    # --- UUID barcode mapping ---
+    # Fragment files use UUID barcodes, not cellranger barcodes.
+    # Convert obs_names from {sample_id}-{cellranger_bc} to {sample_id}-{uuid_bc}
+    # using metadata CSVs that provide the mapping.
+    import glob as _glob
+
+    tea_seq_base = "/nfs/team283/vk7/sanger_projects/large_data/tea_seq_pbmc"
+    bc_map = {}  # cellranger_barcode -> uuid_barcode
+    for meta_file in sorted(
+        _glob.glob(f"{tea_seq_base}/tea_seq/GSM*/GSM*_metadata.csv.gz")
+        + _glob.glob(f"{tea_seq_base}/multiome/GSM*/GSM*_metadata.csv.gz")
+    ):
+        meta_df = pd.read_csv(meta_file, usecols=["barcodes", "original_barcodes"])
+        for _, row in meta_df.iterrows():
+            bc_map[row["original_barcodes"]] = row["barcodes"]
+    print(f"TEA-seq UUID barcode mapping: {len(bc_map)} entries")
+
+    # Remap obs_names: replace cellranger barcode with UUID
+    new_names = []
+    n_uuid_mapped = 0
+    for name, sid in zip(adata.obs_names, adata.obs["sample_id"], strict=True):
+        raw_bc = name[len(sid) + 1 :]
+        if not raw_bc.endswith("-1"):
+            raw_bc = raw_bc + "-1"
+        uuid_bc = bc_map.get(raw_bc)
+        if uuid_bc is not None:
+            new_names.append(f"{sid}-{uuid_bc}")
+            n_uuid_mapped += 1
+        else:
+            new_names.append(name)
+    adata.obs_names = new_names
+    # Re-index annotations to match new UUID obs_names
+    annotations.index = adata.obs_names
+    print(f"  UUID mapped: {n_uuid_mapped}/{adata.n_obs}")
 
     # Set obs columns
     adata.obs["batch"] = adata.obs["sample_id"].values
@@ -810,9 +917,9 @@ def load_infant_adult_spleen_gse311423() -> sc.AnnData:
         # ENSEMBL IDs as var_names, gene symbols in var["SYMBOL"]
         adata_i = _set_ensembl_var_names(adata_i)
 
-        # Prefix obs_names with library_id
+        # Prefix obs_names with library_id: {library_id}-{barcode} (cell2state format)
         library_id = row["library_id"]
-        adata_i.obs_names = [f"{library_id}#{bc}" for bc in adata_i.obs_names]
+        adata_i.obs_names = [f"{library_id}-{bc}" for bc in adata_i.obs_names]
 
         # Store per-sample metadata for obs columns after concat
         adata_i.obs["batch"] = library_id
@@ -875,15 +982,19 @@ def load_crohns_pbmc_gse244831() -> sc.AnnData:
     gc.collect()
     print(f"  Concatenated: {adata.n_obs} cells x {adata.n_vars} genes")
 
-    # Load cell annotations
+    # Load cell annotations (safe reindex, never use .obs.join())
     annot = pd.read_csv(
         os.path.join(base, "annotations", "GSE244831_cell_annotations.csv"),
     )
-    annot.index = annot["barcode"].values
+    # Annotation barcodes may use # separator (e.g. Pool_8#GTTAACGGTGCTTTAC-1)
+    # but adata obs_names now use - separator — convert to match
+    annot.index = annot["barcode"].str.replace("#", "-", n=1).values
     annot = annot.loc[annot.index.isin(adata.obs_names)]
-
-    # Join annotations to adata.obs
-    adata.obs = adata.obs.join(annot, how="left")
+    annot_reindexed = annot.reindex(index=adata.obs_names)
+    for col in annot.columns:
+        adata.obs[col] = annot_reindexed[col].values
+    n_matched = annot_reindexed.iloc[:, 0].notna().sum()
+    print(f"  Annotations matched: {n_matched}/{adata.n_obs} cells")
 
     # Build fragment file path lookup (sample_id -> path)
     frag_map = dict(zip(sample_mapping["sample_id"], sample_mapping["fragment_file_path"], strict=True))
@@ -964,11 +1075,11 @@ def load_lung_spleen_gse319044() -> sc.AnnData:
     ann = pd.read_csv(annotation_path, index_col=0)
 
     # Annotation barcodes have Seurat-style suffixes (e.g. AAACAGCCAACAACAA-2_1).
-    # The 10x barcodes in adata are {sample_id}#{barcode} where barcode is the raw
+    # The 10x barcodes in adata are {sample_id}-{barcode} where barcode is the raw
     # 10x barcode (e.g. AAACAGCCAACAACAA-1). We match via:
     #   1. Extract the 16-mer nucleotide sequence from the annotation barcode
     #   2. Use annotation library_id + tissue.ident to find the sample_id
-    #   3. Reconstruct as {sample_id}#{nucleotide_seq}-1
+    #   3. Reconstruct as {sample_id}-{nucleotide_seq}-1
 
     # Reverse lookup: (library_id, tissue) -> sample_id
     # The annotation CSV library_id values (e.g. SMO-5, SMO-9) may differ from
@@ -1019,7 +1130,7 @@ def load_lung_spleen_gse319044() -> sc.AnnData:
                 sample_id = candidates[0]
         nuc = barcode_base.iloc[i]
         if sample_id is not None and pd.notna(nuc):
-            new_index.append(f"{sample_id}#{nuc}-1")
+            new_index.append(f"{sample_id}-{nuc}-1")
         else:
             new_index.append(None)
 
@@ -1099,79 +1210,22 @@ def load_lung_spleen_gse319044() -> sc.AnnData:
 
 
 def rename_obs_for_cell2state(adata: sc.AnnData) -> sc.AnnData:
-    """Rename obs_names to match cell2state's ``load_atac()`` barcode format.
+    """DEPRECATED: obs_names are now in cell2state format from each loader.
 
-    cell2state constructs ATAC obs_names as ``<sample>-<raw_barcode>`` (hyphen
-    separator). The combined RNA adata uses different prefixes per dataset
-    (``sample#barcode`` or ``sample:barcode``). This function converts to the
-    cell2state format so ``concatenate_h5ad`` can intersect cells correctly.
-
-    Special case: TEA-seq / multiome fragment files (``pbmc_tea_seq`` dataset)
-    use UUID barcodes instead of cellranger barcodes. The metadata CSVs next to
-    the fragment files provide the mapping (``original_barcodes`` → ``barcodes``).
-
-    Parameters
-    ----------
-    adata
-        Combined RNA AnnData with ``obs["batch"]`` and ``obs["dataset"]`` columns.
-
-    Returns
-    -------
-    The same AnnData with renamed ``obs_names``.
+    This function is kept as a no-op assertion that format is correct.
+    Each dataset loader now produces ``{batch}-{barcode}`` obs_names directly,
+    and TEA-seq UUID mapping is done inside ``load_tea_seq_pbmc()``.
     """
-    import glob
+    import warnings
 
-    # --- Build TEA-seq cellranger-to-UUID mapping ---
-    tea_seq_base = "/nfs/team283/vk7/sanger_projects/large_data/tea_seq_pbmc"
-    bc_map = {}  # cellranger_barcode -> uuid_barcode
-
-    for meta_file in sorted(
-        glob.glob(f"{tea_seq_base}/tea_seq/GSM*/GSM*_metadata.csv.gz")
-        + glob.glob(f"{tea_seq_base}/multiome/GSM*/GSM*_metadata.csv.gz")
-    ):
-        meta_df = pd.read_csv(meta_file, usecols=["barcodes", "original_barcodes"])
-        for _, row in meta_df.iterrows():
-            bc_map[row["original_barcodes"]] = row["barcodes"]
-
-    print(f"TEA-seq/multiome barcode mapping: {len(bc_map)} entries")
-
-    # --- Identify batches with UUID fragment files ---
-    uuid_batches = set(adata.obs["batch"][adata.obs["dataset"] == "pbmc_tea_seq"].unique())
-    print(f"UUID barcode batches ({len(uuid_batches)}): {sorted(uuid_batches)}")
-
-    # --- Rename all obs_names ---
-    new_names = []
-    n_uuid_mapped = 0
-    n_uuid_missing = 0
-    for bc, batch in zip(adata.obs_names, adata.obs["batch"], strict=True):
-        # Extract raw barcode (part after # or :)
-        if "#" in bc:
-            raw = bc.split("#", 1)[1]
-        elif ":" in bc:
-            raw = bc.split(":", 1)[1]
-        else:
-            raw = bc
-        # Ensure -1 suffix (cellranger convention)
-        if not raw.endswith("-1"):
-            raw = raw + "-1"
-
-        # For UUID batches, convert cellranger barcode to UUID
-        if batch in uuid_batches:
-            uuid_bc = bc_map.get(raw)
-            if uuid_bc is not None:
-                raw = uuid_bc
-                n_uuid_mapped += 1
-            else:
-                n_uuid_missing += 1
-
-        new_names.append(f"{batch}-{raw}")
-
-    adata.obs_names = new_names
-    adata.obs_names_make_unique()
-
-    print(f"Renamed {len(new_names)} obs_names to cell2state format")
-    print(f"  Examples: {list(adata.obs_names[:3])}")
-    print(f"  UUID mapped: {n_uuid_mapped}, missing: {n_uuid_missing}")
-    print(f"  Unique: {len(set(adata.obs_names))} / {len(adata.obs_names)}")
-
+    warnings.warn(
+        "rename_obs_for_cell2state() is deprecated — obs_names are now in "
+        "{batch}-{barcode} format from each loader. This is a no-op.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    # Verify format: all obs_names should contain at least one hyphen
+    bad = [n for n in adata.obs_names[:100] if "-" not in n]
+    if bad:
+        raise ValueError(f"obs_names not in {{batch}}-{{barcode}} format. Examples: {bad[:3]}")
     return adata
