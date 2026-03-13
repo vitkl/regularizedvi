@@ -1055,6 +1055,13 @@ def load_lung_spleen_gse319044(
     sample_mapping_path = os.path.join(data_folder, "sample_mapping.csv")
     sample_df = pd.read_csv(sample_mapping_path)
 
+    # Exclude COB samples — failed GEX libraries (median counts ~30-280)
+    cob_mask = sample_df["file_donor_id"].str.startswith("COB")
+    if cob_mask.any():
+        n_excluded = cob_mask.sum()
+        print(f"  Excluding {n_excluded} COB samples (failed GEX): {sample_df.loc[cob_mask, 'sample_id'].tolist()}")
+        sample_df = sample_df[~cob_mask].copy()
+
     # Build lookup dicts from sample_id
     sample_to_donor = dict(zip(sample_df["sample_id"], sample_df["file_donor_id"], strict=True))
     sample_to_tissue = dict(zip(sample_df["sample_id"], sample_df["tissue"], strict=True))
