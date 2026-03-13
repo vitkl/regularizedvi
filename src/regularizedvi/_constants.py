@@ -11,7 +11,7 @@ DEFAULT_DISPERSION = "gene-batch"
 
 # --- Library size ---
 DEFAULT_USE_OBSERVED_LIB_SIZE = False
-DEFAULT_LIBRARY_LOG_VARS_WEIGHT = 0.05
+DEFAULT_LIBRARY_LOG_VARS_WEIGHT = 0.5
 DEFAULT_LIBRARY_N_HIDDEN = 16
 
 # --- Decoder ---
@@ -70,7 +70,7 @@ DEFAULT_DROPOUT_ON_INPUT = True
 DEFAULT_COMPUTE_PEARSON = False
 
 # --- Early stopping ---
-DEFAULT_EARLY_STOPPING_MIN_DELTA_PER_FEATURE = 0.0003
+DEFAULT_EARLY_STOPPING_MIN_DELTA_PER_FEATURE = 0.0002
 
 # --- Recommended training defaults (documented, not enforced) ---
 # These are not enforced in code but recommended in docs/tutorial:
