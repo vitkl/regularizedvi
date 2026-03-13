@@ -390,7 +390,10 @@ def _read_10x_mtx(barcodes_path, features_path, matrix_path, sample_id):
 
 
 def _finalize(adata: sc.AnnData) -> sc.AnnData:
-    """Final steps: ensure uint16 counts, sparse X, apply hierarchy, standardize obs."""
+    """Final steps: validate integer counts, ensure sparse X, apply hierarchy, standardize obs.
+
+    Keeps source dtypes (no uint16 cast) — downstream notebooks cast before saving.
+    """
     # Validate that X contains integer counts (not normalized data)
     if scipy.sparse.issparse(adata.X):
         sample_vals = adata.X.data[: min(10000, len(adata.X.data))]
@@ -401,10 +404,11 @@ def _finalize(adata: sc.AnnData) -> sc.AnnData:
             "adata.X contains non-integer values — likely normalized data. "
             "Set adata.X = adata.layers['counts'] before calling _finalize()."
         )
+    # Ensure sparse CSR format but keep source dtype
     if scipy.sparse.issparse(adata.X):
-        adata.X = adata.X.tocsr().astype(np.uint16)
+        adata.X = adata.X.tocsr()
     else:
-        adata.X = scipy.sparse.csr_matrix(adata.X, dtype=np.uint16)
+        adata.X = scipy.sparse.csr_matrix(adata.X)
     adata.layers["counts"] = adata.X.copy()
     adata = _apply_hierarchy(adata)
     adata = _standardize_obs(adata)
@@ -649,15 +653,17 @@ def load_bone_marrow(data_folder: str = "/nfs/team283/vk7/sanger_projects/large_
     return adata
 
 
-def load_neat_seq_cd4t() -> sc.AnnData:
+def load_neat_seq_cd4t(
+    data_folder: str = "/nfs/team283/vk7/sanger_projects/large_data/neat_seq_pbmc/",
+) -> sc.AnnData:
     """Load NEAT-seq CD4+ memory T cell dataset (8,457 cells x 36,717 genes).
 
     Source: Chen et al. NEAT-seq PBMC, CD4+ T cells subset.
     Two lanes (lane1, lane2), 7 clusters (C1-C7).
     """
-    h5ad_path = "/nfs/team283/vk7/sanger_projects/large_data/neat_seq_pbmc/neat_seq_cd4_tcells.h5ad"
-    frag_lane1 = "/nfs/team283/vk7/sanger_projects/large_data/neat_seq_pbmc/cd4_tcells/lane1/GSM5396332_lane1_atac_fragments.tsv.gz"
-    frag_lane2 = "/nfs/team283/vk7/sanger_projects/large_data/neat_seq_pbmc/cd4_tcells/lane2/GSM5396336_lane2_atac_fragments.tsv.gz"
+    h5ad_path = os.path.join(data_folder, "neat_seq_cd4_tcells.h5ad")
+    frag_lane1 = os.path.join(data_folder, "cd4_tcells/lane1/GSM5396332_lane1_atac_fragments.tsv.gz")
+    frag_lane2 = os.path.join(data_folder, "cd4_tcells/lane2/GSM5396336_lane2_atac_fragments.tsv.gz")
 
     adata = sc.read_h5ad(h5ad_path)
 
@@ -692,7 +698,9 @@ def load_neat_seq_cd4t() -> sc.AnnData:
     return adata
 
 
-def load_tea_seq_pbmc() -> sc.AnnData:
+def load_tea_seq_pbmc(
+    data_folder: str = "/nfs/team283/vk7/sanger_projects/large_data/tea_seq_pbmc/",
+) -> sc.AnnData:
     """Load TEA-seq PBMC data from 7 samples (5 TEA-seq + 2 multiome).
 
     Reads sample_mapping.csv to locate per-sample H5 files and fragment files.
@@ -704,11 +712,8 @@ def load_tea_seq_pbmc() -> sc.AnnData:
     -------
     Standardized AnnData with raw GEX counts.
     """
-    sample_mapping_path = "/nfs/team283/vk7/sanger_projects/large_data/tea_seq_pbmc/sample_mapping.csv"
-    annotation_path = (
-        "/nfs/team283/vk7/sanger_projects/large_data/tea_seq_pbmc/"
-        "supplementary_data/Figure4_SourceData2_TypeLabelsUMAP.csv"
-    )
+    sample_mapping_path = os.path.join(data_folder, "sample_mapping.csv")
+    annotation_path = os.path.join(data_folder, "supplementary_data/Figure4_SourceData2_TypeLabelsUMAP.csv")
 
     # Read sample mapping
     sample_df = pd.read_csv(sample_mapping_path)
@@ -784,7 +789,7 @@ def load_tea_seq_pbmc() -> sc.AnnData:
     # using metadata CSVs that provide the mapping.
     import glob as _glob
 
-    tea_seq_base = "/nfs/team283/vk7/sanger_projects/large_data/tea_seq_pbmc"
+    tea_seq_base = data_folder.rstrip("/")
     bc_map = {}  # cellranger_barcode -> uuid_barcode
     for meta_file in sorted(
         _glob.glob(f"{tea_seq_base}/tea_seq/GSM*/GSM*_metadata.csv.gz")
@@ -836,7 +841,9 @@ def load_tea_seq_pbmc() -> sc.AnnData:
     return _finalize(adata)
 
 
-def load_covid_pbmc_gse239799() -> sc.AnnData:
+def load_covid_pbmc_gse239799(
+    data_folder: str = "/nfs/team283/vk7/sanger_projects/large_data/multiome_pbmc/GSE239799/",
+) -> sc.AnnData:
     """Load COVID infant PBMC multiome dataset GSE239799 (GEX only).
 
     43 samples from 18 subjects (longitudinal). No cell annotations available.
@@ -845,7 +852,7 @@ def load_covid_pbmc_gse239799() -> sc.AnnData:
     -------
     Standardized AnnData with raw GEX counts.
     """
-    csv_path = "/nfs/team283/vk7/sanger_projects/large_data/multiome_pbmc/GSE239799/sample_mapping.csv"
+    csv_path = os.path.join(data_folder, "sample_mapping.csv")
     mapping = pd.read_csv(csv_path)
 
     adatas = []
@@ -891,7 +898,9 @@ def load_covid_pbmc_gse239799() -> sc.AnnData:
     return adata
 
 
-def load_infant_adult_spleen_gse311423() -> sc.AnnData:
+def load_infant_adult_spleen_gse311423(
+    data_folder: str = "/nfs/team283/vk7/sanger_projects/large_data/multiome_spleen_lung/GSE311423/",
+) -> sc.AnnData:
     """Load infant/adult spleen multiome data from GSE311423 (GEX only).
 
     Loads 5 samples (3 infant, 2 adult) from the sample mapping CSV,
@@ -904,7 +913,7 @@ def load_infant_adult_spleen_gse311423() -> sc.AnnData:
     -------
     Standardized AnnData with raw GEX counts.
     """
-    sample_csv = "/nfs/team283/vk7/sanger_projects/large_data/multiome_spleen_lung/GSE311423/sample_mapping.csv"
+    sample_csv = os.path.join(data_folder, "sample_mapping.csv")
     sample_df = pd.read_csv(sample_csv)
 
     adatas = []
@@ -951,7 +960,9 @@ def load_infant_adult_spleen_gse311423() -> sc.AnnData:
     return adata
 
 
-def load_crohns_pbmc_gse244831() -> sc.AnnData:
+def load_crohns_pbmc_gse244831(
+    data_folder: str = "/nfs/team283/vk7/sanger_projects/large_data/multiome_pbmc/GSE244831/",
+) -> sc.AnnData:
     """Load Crohn's disease PBMC multiome dataset (GEX only) from GSE244831.
 
     Loads 13 samples from 10x MTX files, joins cell-level annotations, and
@@ -961,7 +972,7 @@ def load_crohns_pbmc_gse244831() -> sc.AnnData:
     -------
     Standardized AnnData with raw GEX counts.
     """
-    base = "/nfs/team283/vk7/sanger_projects/large_data/multiome_pbmc/GSE244831"
+    base = data_folder.rstrip("/")
     sample_mapping = pd.read_csv(os.path.join(base, "sample_mapping.csv"))
 
     # Load each sample using the shared MTX reader
@@ -1028,7 +1039,9 @@ def load_crohns_pbmc_gse244831() -> sc.AnnData:
     return adata
 
 
-def load_lung_spleen_gse319044() -> sc.AnnData:
+def load_lung_spleen_gse319044(
+    data_folder: str = "/nfs/team283/vk7/sanger_projects/large_data/multiome_spleen_lung/GSE319044/",
+) -> sc.AnnData:
     """Load lung and spleen immune multiome data (GEX only) from GSE319044.
 
     Loads 16 samples (9 lung + 7 spleen) from 10x multiome experiments,
@@ -1039,9 +1052,7 @@ def load_lung_spleen_gse319044() -> sc.AnnData:
     Standardized AnnData with raw GEX counts.
     """
     # --- 1. Read sample mapping ---
-    sample_mapping_path = (
-        "/nfs/team283/vk7/sanger_projects/large_data/multiome_spleen_lung/GSE319044/sample_mapping.csv"
-    )
+    sample_mapping_path = os.path.join(data_folder, "sample_mapping.csv")
     sample_df = pd.read_csv(sample_mapping_path)
 
     # Build lookup dicts from sample_id
@@ -1068,10 +1079,7 @@ def load_lung_spleen_gse319044() -> sc.AnnData:
     print(f"Concatenated: {adata.n_obs} cells x {adata.n_vars} genes")
 
     # --- 4. Load annotation CSV and match barcodes ---
-    annotation_path = (
-        "/nfs/team283/vk7/sanger_projects/large_data/multiome_spleen_lung"
-        "/GSE319044/series_level/GSE319044_snRNA_cluster_labels.csv.gz"
-    )
+    annotation_path = os.path.join(data_folder, "series_level/GSE319044_snRNA_cluster_labels.csv.gz")
     ann = pd.read_csv(annotation_path, index_col=0)
 
     # Annotation barcodes have Seurat-style suffixes (e.g. AAACAGCCAACAACAA-2_1).
