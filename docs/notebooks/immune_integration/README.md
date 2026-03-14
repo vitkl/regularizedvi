@@ -4,17 +4,35 @@ Multi-dataset integration of human immune cells using `AmbientRegularizedSCVI` (
 
 ## Datasets
 
-| Dataset | Tissue | Batches | Approx. cells | Annotations | GEO |
-|---------|--------|---------|---------------|-------------|-----|
-| Bone marrow (NeurIPS 2021) | bone_marrow | 13 | 69k | l2_cell_type | — |
-| TEA-seq PBMC | pbmc | 7 | 59k | predicted.celltype.l2 (partial) | GSE158013 |
-| NEAT-seq CD4 T | sorted_cd4t | 2 | 8.5k | Clusters C1-C7 | GSE178707 |
-| Crohn's PBMC | pbmc | 13 | 76k | Celltypes | GSE244831 |
-| COVID infant PBMC | pbmc | 43 | ~460k | None | GSE239799 |
-| Lung/Spleen | lung, spleen | 16 | 54k | CellType | GSE319044 |
-| Infant/Adult Spleen | spleen | 5 | ~50k | None | GSE311423 |
+| Dataset | Tissue | Batches | Cells | Genes (raw) | Med counts | Med genes | Med MT | Annotated | GEO |
+|---------|--------|---------|------:|-------------|----------:|----------:|-------:|----------:|-----|
+| Bone marrow (NeurIPS 2021) | bone_marrow | 13 | 69,247 | 25,629 | 1,152 | 810 | 0.006 | 100% | — |
+| TEA-seq PBMC | pbmc | 7 | 59,151 | 36,601 | 2,026 | 1,095 | 0.138 | 44.2% | GSE158013 |
+| NEAT-seq CD4 T | sorted_cd4t | 2 | 8,457 | 36,717 | 1,998 | 1,143 | 0.011 | 100% | GSE178707 |
+| Crohn's PBMC | pbmc | 13 | 106,296 | 36,601 | 2,379 | 1,322 | 0.097 | 65.1% | GSE244831 |
+| COVID infant PBMC | pbmc | 43 | 360,624 | 36,601 | 4,112 | 1,915 | 0.064 | 0% | GSE239799 |
+| Lung/Spleen (SMO only) | lung, spleen | 9 | 61,821 | 36,601 | 2,525 | 1,209 | 0.074 | 32.8% | GSE319044 |
+| Infant/Adult Spleen | spleen | 5 | 40,726 | 36,601 | 2,799 | 1,405 | 0.074 | 0% | GSE311423 |
 
-**Total**: ~777k cells, 99 batches, 7 datasets, 5 tissues.
+**After gene intersection**: 25,629 common genes (limited by bone marrow source h5ad).
+**After library QC filter** (drop batches with <10% cells above 1500 counts): 7 COB samples from GSE319044 removed (failed GEX libraries, median counts 11-285).
+**Total saved**: 706,322 cells x 25,629 genes, 92 batches, 92 donors, 49 cell types.
+
+### NB1 loading times
+
+| Step | Time |
+|------|------|
+| bone_marrow | 38s |
+| tea_seq | 21s |
+| neat_seq | 1s |
+| crohns | 54s |
+| covid | 218s |
+| lung_spleen | 46s |
+| spleen311 | 17s |
+| Gene intersection + concat | 68s |
+| QC metrics | 17s |
+| Library filter + save | 202s |
+| **Total** | **~11.5 min** |
 
 ## Notebooks
 
@@ -57,4 +75,4 @@ NB6 (multimodal training, GPU)
 - **Covariates**: ambient=["batch"], nn_conditioning=["dataset","donor"], feature_scaling=["dataset","donor"]
 - **Architecture**: n_hidden=512, n_layers=1, n_latent=128
 - **Training**: max_epochs=2000, ES delta=0.0002, patience=20, batch_size=1024
-- **Cell filtering**: 1k-80k counts, 500-10k genes, MT<0.20, doublet<0.18, ATAC 2k-100k
+- **Cell filtering**: 1.5k-80k counts, 800-10k genes, MT<0.20, doublet<0.20, ATAC 2.5k-80k
