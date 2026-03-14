@@ -635,9 +635,12 @@ def load_bone_marrow(data_folder: str = "/nfs/team283/vk7/sanger_projects/large_
     # Raw counts are in layers["counts"]; X may contain normalized data
     adata.X = adata.layers["counts"]
 
-    # Prefix obs_names with batch for {batch}-{barcode} format
+    # Convert obs_names from {sample}_multiome:{barcode_seq} to {batch}-{barcode_seq}-1
+    # Fragment files use plain cellranger barcodes (e.g. TAGTTGTCACCCTCAC-1)
     adata.obs_names = [
-        f"{batch}-{bc}" if bc.endswith("-1") else f"{batch}-{bc}-1"
+        f"{batch}-{bc.split(':', 1)[1]}-1"
+        if ":" in bc
+        else (f"{batch}-{bc}" if bc.endswith("-1") else f"{batch}-{bc}-1")
         for bc, batch in zip(adata.obs_names, adata.obs["batch"], strict=True)
     ]
 
@@ -677,9 +680,10 @@ def load_neat_seq_cd4t(
     # Standardized obs columns
     adata.obs["batch"] = ("neat_seq_" + adata.obs["lane"].astype(str)).values
 
-    # Prefix obs_names: {batch}-{barcode} (cell2state format)
+    # Convert obs_names from {lane}#{barcode} to {batch}-{barcode}
+    # Fragment files use plain cellranger barcodes (e.g. AAACAGCCAACTGGCT-1)
     adata.obs_names = [
-        f"{batch}-{bc}" if bc.endswith("-1") else f"{batch}-{bc}-1"
+        f"{batch}-{bc.split('#', 1)[1]}" if "#" in bc else (f"{batch}-{bc}" if bc.endswith("-1") else f"{batch}-{bc}-1")
         for bc, batch in zip(adata.obs_names, adata.obs["batch"], strict=True)
     ]
 
