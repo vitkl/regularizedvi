@@ -6,7 +6,7 @@ from regularizedvi.utils._distributions import (
     plot_nb_vs_gammapoisson,
     plot_prior_comparison,
 )
-from regularizedvi.utils._filtering import compound_qc_filter, filter_genes, print_qc_summary
+from regularizedvi.utils._filtering import compound_qc_filter, filter_genes, plot_qc_histograms, print_qc_summary
 from regularizedvi.utils._papermill import coerce_papermill_params
 from regularizedvi.utils._wandb import finish_wandb, log_figure_to_wandb, setup_wandb_logger
 
@@ -22,6 +22,7 @@ __all__ = [
     "nb_variance",
     "plot_nb_vs_gammapoisson",
     "plot_prior_comparison",
+    "plot_qc_histograms",
     "print_qc_summary",
     "setup_wandb_logger",
 ]

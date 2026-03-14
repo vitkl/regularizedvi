@@ -126,6 +126,69 @@ def filter_genes(adata, cell_count_cutoff=15, cell_percentage_cutoff2=0.05, nonz
     return gene_selection
 
 
+def plot_qc_histograms(
+    adata,
+    count_lo: float = 1000,
+    count_hi: float = 80000,
+    gene_lo: float = 500,
+    gene_hi: float = 10000,
+    mt_threshold: float = 0.20,
+    doublet_threshold: float = 0.18,
+):
+    """Plot histograms of total counts, genes, MT fraction, and doublet score.
+
+    Parameters
+    ----------
+    adata
+        AnnData with QC metrics. ``total_counts`` and ``n_genes`` are computed
+        from ``X`` if not in ``.obs``. ``mt_frac`` and ``doublet_score`` are
+        read from ``.obs``.
+    count_lo, count_hi
+        Vertical lines for total counts thresholds.
+    gene_lo, gene_hi
+        Vertical lines for gene count thresholds.
+    mt_threshold
+        Vertical line for MT fraction threshold.
+    doublet_threshold
+        Vertical line for doublet score threshold.
+    """
+    from matplotlib import rcParams
+
+    rcParams["figure.figsize"] = 12, 3
+    fig, axes = plt.subplots(1, 4, figsize=(16, 3))
+
+    total_counts = np.array(adata.X.sum(1)).squeeze()
+    n_genes = np.array((adata.X > 0).sum(1)).squeeze()
+
+    axes[0].hist(np.log10(total_counts[total_counts > 0]), bins=100)
+    axes[0].axvline(np.log10(count_lo), color="red", linestyle="--")
+    axes[0].axvline(np.log10(count_hi), color="red", linestyle="--")
+    axes[0].set_xlabel("log10(UMI counts)")
+    axes[0].set_title(f"Total counts (n={len(total_counts)}, zero={np.sum(total_counts == 0)})")
+
+    axes[1].hist(np.log10(n_genes[n_genes > 0]), bins=100)
+    axes[1].axvline(np.log10(gene_lo), color="red", linestyle="--")
+    axes[1].axvline(np.log10(gene_hi), color="red", linestyle="--")
+    axes[1].set_xlabel("log10(genes)")
+    axes[1].set_title("Genes detected")
+
+    if "mt_frac" in adata.obs.columns:
+        axes[2].hist(adata.obs["mt_frac"].dropna(), bins=100)
+        axes[2].axvline(mt_threshold, color="red", linestyle="--")
+        axes[2].set_xlabel("MT fraction")
+        axes[2].set_title("Mitochondrial fraction")
+
+    if "doublet_score" in adata.obs.columns:
+        axes[3].hist(adata.obs["doublet_score"].dropna(), bins=100)
+        axes[3].axvline(doublet_threshold, color="red", linestyle="--")
+        axes[3].set_xlabel("Doublet score")
+        axes[3].set_title("Scrublet doublet score")
+
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
 def print_qc_summary(
     adata,
     dataset_key: str = "dataset",
