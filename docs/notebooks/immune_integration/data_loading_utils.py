@@ -455,6 +455,122 @@ def load_atac_qc_metrics(adata: sc.AnnData, csv_path: str) -> sc.AnnData:
     return adata
 
 
+def adaptive_qc_filter(
+    adata: sc.AnnData,
+    dataset_key: str = "dataset",
+    *,
+    min_counts: int = 1000,
+    max_counts: int = 80000,
+    min_genes: int = 600,
+    max_genes: int = 10000,
+    min_fragments: int = 1800,
+    max_fragments: int = 80000,
+    max_mt: float = 0.20,
+    max_doublet: float = 0.20,
+    per_dataset_quantile: float = 0.20,
+    per_dataset_cols: tuple[str, ...] = ("n_genes", "total_counts", "total_fragments"),
+    min_cells_per_batch: int = 100,
+    batch_key: str = "batch",
+) -> sc.AnnData:
+    """Two-stage adaptive QC filter.
+
+    Stage 1: Apply lenient global thresholds.
+    Stage 2: Within each dataset, remove the bottom `per_dataset_quantile`
+             fraction by each metric in `per_dataset_cols`.
+
+    Parameters
+    ----------
+    adata
+        AnnData with QC columns in obs.
+    dataset_key
+        Column in obs identifying datasets.
+    per_dataset_quantile
+        Bottom fraction to remove per dataset per metric (default 0.20).
+    per_dataset_cols
+        Columns to apply per-dataset quantile filtering on.
+    min_cells_per_batch
+        Drop batches with fewer cells after filtering.
+    """
+    required_cols = ["n_genes", "total_counts", "mt_frac", "doublet_score", "total_fragments"]
+    missing = [c for c in required_cols if c not in adata.obs.columns]
+    if missing:
+        raise ValueError(f"Missing required QC columns: {missing}")
+
+    n_start = adata.n_obs
+
+    # Compute per-dataset quantile cutoffs on the ORIGINAL data (before global filter)
+    # so that the adaptive thresholds reflect the true distribution of each dataset.
+    quantile_cutoffs = {}  # (dataset, col) -> cutoff
+    thresholds = []
+    for ds in adata.obs[dataset_key].unique():
+        ds_obs = adata.obs.loc[adata.obs[dataset_key] == ds]
+        for col in per_dataset_cols:
+            if col not in ds_obs.columns:
+                continue
+            vals = ds_obs[col].dropna()
+            if len(vals) == 0:
+                continue
+            cutoff = vals.quantile(per_dataset_quantile)
+            quantile_cutoffs[(ds, col)] = cutoff
+            thresholds.append({"dataset": ds, "metric": col, "q20_cutoff": cutoff})
+
+    # Stage 1: lenient global mask
+    global_mask = (
+        (adata.obs["n_genes"] > min_genes)
+        & (adata.obs["total_counts"] > min_counts)
+        & (adata.obs["total_counts"] < max_counts)
+        & (adata.obs["total_fragments"] > min_fragments)
+        & (adata.obs["total_fragments"] < max_fragments)
+        & (adata.obs["n_genes"] < max_genes)
+        & (adata.obs["mt_frac"] < max_mt)
+        & (adata.obs["doublet_score"] < max_doublet)
+    )
+    # Handle NaN in total_fragments (cells with no ATAC data)
+    global_mask = global_mask & adata.obs["total_fragments"].notna()
+
+    # Stage 2: per-dataset bottom quantile mask (computed on original data)
+    quantile_mask = pd.Series(True, index=adata.obs_names)
+    for ds in adata.obs[dataset_key].unique():
+        ds_idx = adata.obs[dataset_key] == ds
+        for col in per_dataset_cols:
+            key = (ds, col)
+            if key not in quantile_cutoffs:
+                continue
+            quantile_mask[ds_idx & (adata.obs[col] <= quantile_cutoffs[key])] = False
+
+    # Combine both masks
+    combined = global_mask & quantile_mask
+    n_global_only = global_mask.sum()
+    n_quantile_only = quantile_mask.sum()
+    adata = adata[combined, :].copy()
+
+    print(f"Stage 1 (global): {n_start:,} -> {n_global_only:,} ({n_start - n_global_only:,} removed)")
+    print(
+        f"Stage 2 (per-dataset q{per_dataset_quantile:.0%}): {n_start:,} -> {n_quantile_only:,} ({n_start - n_quantile_only:,} removed)"
+    )
+    print(f"Combined: {n_start:,} -> {adata.n_obs:,} ({n_start - adata.n_obs:,} removed)")
+
+    # Show per-dataset thresholds
+    if thresholds:
+        thr_df = pd.DataFrame(thresholds).pivot(index="dataset", columns="metric", values="q20_cutoff")
+        print(f"\nPer-dataset {per_dataset_quantile:.0%} cutoffs:")
+        print(thr_df.to_string())
+
+    # Drop small batches
+    batch_counts = adata.obs[batch_key].value_counts()
+    small_batches = batch_counts[batch_counts < min_cells_per_batch].index.tolist()
+    if small_batches:
+        n_before = adata.n_obs
+        adata = adata[~adata.obs[batch_key].isin(small_batches)].copy()
+        print(f"\nRemoved {len(small_batches)} batches with <{min_cells_per_batch} cells: {small_batches}")
+        print(f"  {n_before:,} -> {adata.n_obs:,} cells")
+    else:
+        print(f"\nAll {len(batch_counts)} batches have >= {min_cells_per_batch} cells")
+
+    print(f"\nTotal: {n_start:,} -> {adata.n_obs:,} ({100 * adata.n_obs / n_start:.1f}% kept)")
+    return adata
+
+
 # ---------------------------------------------------------------------------
 # Standalone utilities (avoid regularizedvi dependency)
 # ---------------------------------------------------------------------------
