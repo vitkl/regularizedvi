@@ -1,8 +1,8 @@
 ---
 name: inspect-notebook
-description: Use when examining Jupyter notebooks - structure, progress, errors, search, execution status, stdout tail, papermill params.
+description: Use when examining Jupyter notebooks - structure, progress, errors, search, execution status, stdout tail, progress bars, papermill params.
 user-invocable: false
-allowed-tools: Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/_inspect_notebook.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/_extract_params.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/_inspect_notebook.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/_extract_params.py:*)
+allowed-tools: Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/_inspect_notebook.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/_extract_params.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/check_notebook_progress_bar.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/_inspect_notebook.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/_extract_params.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/check_notebook_progress_bar.py:*)
 ---
 
 # Inspect Notebook
@@ -54,6 +54,22 @@ bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/_ext
 
 # Params only (skip training/error info)
 bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/_extract_params.py notebook_out.ipynb --params-only
+```
+
+### `check_notebook_progress_bar.py` - Progress bar detection
+
+Finds cells with tqdm-style progress bars and shows their latest state.
+Use to monitor running papermill notebooks.
+
+```bash
+# Scan all cells for progress bars (default keyword: evaluation_ko_metrics)
+bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/check_notebook_progress_bar.py notebook.ipynb
+
+# Search by keyword in cell source
+bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/check_notebook_progress_bar.py notebook.ipynb --cell-keyword "train"
+
+# Last N log lines (non-progress-bar lines)
+bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/check_notebook_progress_bar.py notebook.ipynb -n 10
 ```
 
 ### Root-level scripts (tracked in git)
