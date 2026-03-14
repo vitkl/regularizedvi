@@ -242,8 +242,8 @@ def compound_qc_filter(
     outlier_metrics: tuple[str, ...] = ("total_counts", "n_genes", "total_fragments"),
     outlier_threshold: float = 2.5,
     log_scale_metrics: tuple[str, ...] = ("total_counts", "n_genes", "total_fragments"),
-    per_study_cutoffs: dict[str, dict] | None = None,
-    global_cutoffs: dict | None = None,
+    per_study_cutoffs: dict[str, dict[str, tuple[float | None, float | None]]] | None = None,
+    global_cutoffs: dict[str, tuple[float | None, float | None]] | None = None,
     min_cells_per_batch: int = 100,
 ):
     """3-stage compound cell QC filter for multi-dataset integration.
@@ -261,27 +261,31 @@ def compound_qc_filter(
     batch_key
         Column in ``.obs`` identifying batches/samples.
     lower_quantile_metrics
-        Metrics for per-study lower-quantile removal (count-like metrics).
+        Obs column names for per-study lower-quantile removal (count-like metrics).
     lower_quantile
         Per-study quantile below which cells are removed for ``lower_quantile_metrics``.
     upper_quantile_metrics
-        Metrics for per-study upper-quantile removal (e.g. doublet_score).
+        Obs column names for per-study upper-quantile removal (e.g. doublet_score).
         mt_frac is intentionally excluded — use absolute cutoffs in stage 3
         to avoid penalizing experiments with genuinely low MT%.
     upper_quantile
         Per-study quantile above which cells are removed for ``upper_quantile_metrics``.
     outlier_metrics
-        Metrics for per-batch outlier removal (stage 2).
+        Obs column names for per-batch outlier removal (stage 2).
     outlier_threshold
         Number of standard deviations for outlier detection (mean +/- threshold*std).
     log_scale_metrics
-        Metrics where mean/std are computed on log10 scale. Others use linear.
+        Obs column names where mean/std are computed on log10 scale. Others use linear.
     per_study_cutoffs
-        Per-study manual cutoffs. Keys: study names. Values: dicts with any of
-        ``min_counts``, ``max_counts``, ``min_genes``, ``max_genes``,
-        ``min_fragments``, ``max_fragments``, ``max_mt``, ``max_doublet``.
+        Per-study manual cutoffs. Keys: study names. Values: dicts mapping
+        obs column names to ``(min, max)`` tuples. Use ``None`` for no bound.
+        Example::
+
+            {"bone_marrow": {"total_counts": (800, 80000), "n_genes": (600, 10000), "mt_frac": (None, 0.10)}}
+
     global_cutoffs
-        Fallback cutoffs for studies not in ``per_study_cutoffs``. Same keys as above.
+        Fallback cutoffs for studies not in ``per_study_cutoffs``.
+        Same format: ``{obs_col: (min, max)}``.
     min_cells_per_batch
         Drop batches with fewer cells after all filtering stages.
 
@@ -296,18 +300,6 @@ def compound_qc_filter(
     if global_cutoffs is None:
         global_cutoffs = {}
 
-    # Map cutoff keys to obs columns
-    _cutoff_col = {
-        "min_counts": "total_counts",
-        "max_counts": "total_counts",
-        "min_genes": "n_genes",
-        "max_genes": "n_genes",
-        "min_fragments": "total_fragments",
-        "max_fragments": "total_fragments",
-        "max_mt": "mt_frac",
-        "max_doublet": "doublet_score",
-    }
-
     # --- Stage 1: per-study quantile removal (computed on unfiltered data) ---
     mask_q = np.ones(adata.n_obs, dtype=bool)
     print("=== Stage 1: Per-study quantile removal ===")
@@ -316,20 +308,20 @@ def compound_qc_filter(
         n_ds = ds_idx.sum()
         ds_mask = np.ones(n_ds, dtype=bool)
         thresholds = []
-        for metric in lower_quantile_metrics:
-            if metric not in adata.obs.columns:
+        for col in lower_quantile_metrics:
+            if col not in adata.obs.columns:
                 continue
-            vals = adata.obs.loc[ds_idx, metric]
+            vals = adata.obs.loc[ds_idx, col]
             q_val = np.nanquantile(vals, lower_quantile)
             ds_mask &= vals.values >= q_val
-            thresholds.append(f"{metric}>={q_val:.1f}")
-        for metric in upper_quantile_metrics:
-            if metric not in adata.obs.columns:
+            thresholds.append(f"{col}>={q_val:.1f}")
+        for col in upper_quantile_metrics:
+            if col not in adata.obs.columns:
                 continue
-            vals = adata.obs.loc[ds_idx, metric]
+            vals = adata.obs.loc[ds_idx, col]
             q_val = np.nanquantile(vals, upper_quantile)
             ds_mask &= vals.values <= q_val
-            thresholds.append(f"{metric}<={q_val:.4f}")
+            thresholds.append(f"{col}<={q_val:.4f}")
         mask_q[ds_idx.values] = ds_mask
         n_removed = n_ds - ds_mask.sum()
         print(f"  {ds}: {n_removed:,} removed ({n_removed / n_ds * 100:.1f}%) — {', '.join(thresholds)}")
@@ -344,11 +336,11 @@ def compound_qc_filter(
         b_idx = adata.obs[batch_key] == batch
         n_b = b_idx.sum()
         b_mask = np.ones(n_b, dtype=bool)
-        for metric in outlier_metrics:
-            if metric not in adata.obs.columns:
+        for col in outlier_metrics:
+            if col not in adata.obs.columns:
                 continue
-            vals = adata.obs.loc[b_idx, metric].values.astype(np.float64)
-            if metric in log_scale_metrics:
+            vals = adata.obs.loc[b_idx, col].values.astype(np.float64)
+            if col in log_scale_metrics:
                 vals_t = np.log10(np.maximum(vals, 1))
             else:
                 vals_t = vals
@@ -384,16 +376,16 @@ def compound_qc_filter(
             continue
         ds_mask = np.ones(n_ds, dtype=bool)
         applied = []
-        for key, col in _cutoff_col.items():
-            if key not in cutoffs or col not in adata.obs.columns:
+        for col, (lo, hi) in cutoffs.items():
+            if col not in adata.obs.columns:
                 continue
             vals = adata.obs.loc[ds_idx, col].values
-            if key.startswith("min_"):
-                ds_mask &= vals >= cutoffs[key]
-                applied.append(f"{col}>={cutoffs[key]}")
-            elif key.startswith("max_"):
-                ds_mask &= vals <= cutoffs[key]
-                applied.append(f"{col}<={cutoffs[key]}")
+            if lo is not None:
+                ds_mask &= vals >= lo
+                applied.append(f"{col}>={lo}")
+            if hi is not None:
+                ds_mask &= vals <= hi
+                applied.append(f"{col}<={hi}")
         mask_m[ds_idx.values] = ds_mask
         n_removed = n_ds - ds_mask.sum()
         print(f"  {ds}: {n_removed:,} removed ({n_removed / n_ds * 100:.1f}%) — {', '.join(applied)}")
