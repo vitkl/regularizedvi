@@ -125,7 +125,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
     library_log_vars
         Prior variances for log library sizes, dict per modality.
     library_log_vars_weight
-        Scale factor for library prior variance.
+        Scale factor for library prior variance. If a dict, per-modality weights
+        (e.g. ``{"rna": 0.2, "atac": 1.5}``). If a float, applied to all modalities.
     library_n_hidden
         Hidden units for library encoder.
     scale_activation
@@ -182,7 +183,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         use_observed_lib_size: bool = False,
         library_log_means: dict[str, np.ndarray] | None = None,
         library_log_vars: dict[str, np.ndarray] | None = None,
-        library_log_vars_weight: float | None = None,
+        library_log_vars_weight: float | dict[str, float] | None = None,
         library_log_means_centering_sensitivity: dict[str, float] | None = None,
         library_n_hidden: int = 16,
         scale_activation: str = "softplus",
@@ -416,6 +417,13 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         library_log_means = library_log_means or {}
         library_log_vars = library_log_vars or {}
         _sensitivity = library_log_means_centering_sensitivity or {}
+        # Normalize library_log_vars_weight to dict
+        if isinstance(library_log_vars_weight, dict):
+            _vars_weight = library_log_vars_weight
+        elif library_log_vars_weight is not None:
+            _vars_weight = dict.fromkeys(self.modality_names, library_log_vars_weight)
+        else:
+            _vars_weight = {}
         for name in self.modality_names:
             if name in library_log_means and name in library_log_vars:
                 means = torch.from_numpy(library_log_means[name]).float()
@@ -425,8 +433,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     global_log_mean = means.mean()
                     means = means - global_log_mean + math.log(_sens)
                 vars_ = torch.from_numpy(library_log_vars[name]).float()
-                if library_log_vars_weight is not None:
-                    vars_ = vars_ * library_log_vars_weight
+                if name in _vars_weight:
+                    vars_ = vars_ * _vars_weight[name]
                 self.register_buffer(f"library_log_means_{name}", means)
                 self.register_buffer(f"library_log_vars_{name}", vars_)
 

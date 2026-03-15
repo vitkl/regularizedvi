@@ -96,7 +96,8 @@ class RegularizedMultimodalVI(
     dispersion
         Dispersion parameterization. Str (shared) or dict per modality.
     library_log_vars_weight
-        Scale for library prior variance. Default 0.05.
+        Scale for library prior variance. Float (all modalities) or dict per
+        modality (e.g. ``{"rna": 0.2, "atac": 1.5}``). Default 0.05.
     library_n_hidden
         Hidden units for library encoder. Default 16.
     scale_activation
@@ -147,7 +148,7 @@ class RegularizedMultimodalVI(
         latent_mode: Literal["concatenation", "single_encoder", "weighted_mean"] = "concatenation",
         modality_weights: Literal["equal", "universal", "cell"] = "equal",
         dispersion: dict[str, str] | str = "gene-batch",
-        library_log_vars_weight: float = DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
+        library_log_vars_weight: float | dict[str, float] = DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
         library_log_means_centering_sensitivity: dict[str, float] | None = None,
         library_n_hidden: int = DEFAULT_LIBRARY_N_HIDDEN,
         scale_activation: str = DEFAULT_SCALE_ACTIVATION,
