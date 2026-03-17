@@ -399,7 +399,12 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 if name in decoder_bias_init:
                     init_vals = torch.from_numpy(decoder_bias_init[name]).float()
                     init_vals = torch.clamp(init_vals, min=0.01)
-                    bias_init = torch.log(torch.expm1(init_vals))
+                    # softplus_inv(x) = log(exp(x) - 1), numerically stable for large x
+                    bias_init = torch.where(
+                        init_vals > 20.0,
+                        init_vals,
+                        torch.log(torch.expm1(init_vals)),
+                    )
                     with torch.no_grad():
                         self.decoders[name].px_scale_decoder[0].bias.copy_(bias_init)
 

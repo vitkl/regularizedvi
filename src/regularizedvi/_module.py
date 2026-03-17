@@ -519,8 +519,12 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         if decoder_bias_init is not None:
             init_vals = torch.from_numpy(decoder_bias_init).float()
             init_vals = torch.clamp(init_vals, min=0.01)
-            # softplus_inv(x) = log(exp(x) - 1)
-            bias_init = torch.log(torch.expm1(init_vals))
+            # softplus_inv(x) = log(exp(x) - 1), numerically stable for large x
+            bias_init = torch.where(
+                init_vals > 20.0,
+                init_vals,  # softplus_inv(x) ≈ x for large x
+                torch.log(torch.expm1(init_vals)),
+            )
             with torch.no_grad():
                 self.decoder.px_scale_decoder[0].bias.copy_(bias_init)
 
