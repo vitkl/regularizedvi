@@ -518,7 +518,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         # Data-dependent decoder bias initialization (Stream B)
         if decoder_bias_init is not None:
             init_vals = torch.from_numpy(decoder_bias_init).float()
-            init_vals = torch.clamp(init_vals, min=1e-6)
+            init_vals = torch.clamp(init_vals, min=0.01)
             # softplus_inv(x) = log(exp(x) - 1)
             bias_init = torch.log(torch.expm1(init_vals))
             with torch.no_grad():

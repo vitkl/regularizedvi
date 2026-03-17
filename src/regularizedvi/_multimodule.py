@@ -398,7 +398,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             for name in self.modality_names:
                 if name in decoder_bias_init:
                     init_vals = torch.from_numpy(decoder_bias_init[name]).float()
-                    init_vals = torch.clamp(init_vals, min=1e-6)
+                    init_vals = torch.clamp(init_vals, min=0.01)
                     bias_init = torch.log(torch.expm1(init_vals))
                     with torch.no_grad():
                         self.decoders[name].px_scale_decoder[0].bias.copy_(bias_init)

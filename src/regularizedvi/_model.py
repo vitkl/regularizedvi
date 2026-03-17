@@ -395,6 +395,7 @@ class AmbientRegularizedSCVI(
                         )
                         top_vals = np.partition(col, -n_top)[-n_top:]
                         decoder_bias_init[g] = top_vals.mean()
+                decoder_bias_init = np.nan_to_num(decoder_bias_init, nan=0.01)
 
             if bg_init_gene_fraction is not None and norm_data is not None:
                 mean_expr_all = np.array(norm_data.mean(axis=0)).flatten()

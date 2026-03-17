@@ -411,6 +411,7 @@ class RegularizedMultimodalVI(
                             top_vals = np.partition(col, -n_top)[-n_top:]
                             vals[g] = top_vals.mean()
                         decoder_bias_init_dict[name] = vals
+                    decoder_bias_init_dict[name] = np.nan_to_num(decoder_bias_init_dict[name], nan=0.01)
 
                 if self._bg_init_gene_fraction is not None:
                     mean_expr_all = np.array(norm_data.mean(axis=0)).flatten()
