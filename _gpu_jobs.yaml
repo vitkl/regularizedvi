@@ -525,3 +525,33 @@
   overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r decoder_weight_l2 0.1 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/rna_es_libvar05_dwl2_01_bias_mean_bg02/"
   description: >-
     RNA: libvar=0.5 + dwl2=1e-1 + mean bias init + gene-specific bg.
+
+# ── Combined repeats (gpu-normal, different random init) ──
+
+- job_name: mm_es_libvar05_dwl2_001_bias_mean_bg02_repeat2
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_dwl2_001_bias_mean_bg02_repeat2_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r decoder_weight_l2 0.01 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/mm_es_libvar05_dwl2_001_bias_mean_bg02_repeat2/"
+  description: >-
+    MM: dwl2=1e-2 + mean bias + bg=0.2, repeat2 (different random init).
+
+- job_name: mm_es_libvar05_dwl2_01_bias_mean_bg02_repeat2
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_dwl2_01_bias_mean_bg02_repeat2_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r decoder_weight_l2 0.1 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/mm_es_libvar05_dwl2_01_bias_mean_bg02_repeat2/"
+  description: >-
+    MM: dwl2=1e-1 + mean bias + bg=0.2, repeat2 (different random init).
+
+- job_name: rna_es_libvar05_dwl2_001_bias_mean_bg02_repeat2
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_dwl2_001_bias_mean_bg02_repeat2_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r decoder_weight_l2 0.01 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/rna_es_libvar05_dwl2_001_bias_mean_bg02_repeat2/"
+  description: >-
+    RNA: dwl2=1e-2 + mean bias + bg=0.2, repeat2 (different random init).
+
+- job_name: rna_es_libvar05_dwl2_01_bias_mean_bg02_repeat2
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_dwl2_01_bias_mean_bg02_repeat2_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r decoder_weight_l2 0.1 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/rna_es_libvar05_dwl2_01_bias_mean_bg02_repeat2/"
+  description: >-
+    RNA: dwl2=1e-1 + mean bias + bg=0.2, repeat2 (different random init).
