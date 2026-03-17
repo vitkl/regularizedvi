@@ -220,6 +220,11 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # Learnable per-modality scaling on size factors
         learnable_modality_scaling: bool = False,
         modality_scale_prior_concentration: float = 5.0,
+        # Decoder weight regularization
+        decoder_weight_l2: float = 0.0,
+        # Data-dependent initialization
+        decoder_bias_init: dict[str, np.ndarray] | None = None,
+        additive_bg_init_per_gene: dict[str, np.ndarray] | None = None,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -259,6 +264,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.additive_bg_prior_alpha = additive_bg_prior_alpha
         self.additive_bg_prior_beta = additive_bg_prior_beta
         self.regularise_background = regularise_background
+        self.decoder_weight_l2 = decoder_weight_l2
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
         self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
@@ -387,6 +393,16 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 **_extra_decoder_kwargs,
             )
 
+        # Data-dependent decoder bias initialization (Stream B)
+        if decoder_bias_init is not None:
+            for name in self.modality_names:
+                if name in decoder_bias_init:
+                    init_vals = torch.from_numpy(decoder_bias_init[name]).float()
+                    init_vals = torch.clamp(init_vals, min=1e-6)
+                    bias_init = torch.log(torch.expm1(init_vals))
+                    with torch.no_grad():
+                        self.decoders[name].px_scale_decoder[0].bias.copy_(bias_init)
+
         # ---- Per-modality library encoders (variational, low-capacity) ----
         if library_n_hidden > 32:
             warnings.warn(
@@ -490,16 +506,23 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # Ambient covariates are concatenated into one one-hot vector per cell.
         # Initialized at log(prior_mean) = log(alpha/beta) so exp(init) matches Gamma prior mean.
         # Default Gamma(1, 100) → mean = 0.01, small relative to px_scale.
-        _bg_init = math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
+        _bg_init_scalar = math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
         self.n_total_ambient_cats = n_total_ambient_cats
         self.additive_background = nn.ParameterDict()
         for name in additive_background_modalities:
             n_feat = n_input_per_modality[name]
             if self.n_total_ambient_cats > 0:
-                self.additive_background[name] = nn.Parameter(
-                    torch.full((n_feat, self.n_total_ambient_cats), _bg_init)
-                    + 0.01 * torch.randn(n_feat, self.n_total_ambient_cats)
-                )
+                if additive_bg_init_per_gene is not None and name in additive_bg_init_per_gene:
+                    init_vals = torch.from_numpy(additive_bg_init_per_gene[name]).float()
+                    init_vals = init_vals.unsqueeze(1).expand(-1, self.n_total_ambient_cats)
+                    self.additive_background[name] = nn.Parameter(
+                        init_vals + 0.01 * torch.randn(n_feat, self.n_total_ambient_cats)
+                    )
+                else:
+                    self.additive_background[name] = nn.Parameter(
+                        torch.full((n_feat, self.n_total_ambient_cats), _bg_init_scalar)
+                        + 0.01 * torch.randn(n_feat, self.n_total_ambient_cats)
+                    )
 
         # ---- Feature scaling (cell2location-style per-covariate scaling) ----
         # Shape: (n_feature_scaling_rows, n_features) where n_feature_scaling_rows is either:
@@ -526,6 +549,17 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 target = init_val * 0.7
                 raw_init = math.log(math.exp(target) - 1) if target < 20 else target
                 self.modality_scale_raw[name] = nn.Parameter(torch.tensor(raw_init))
+
+    def _decoder_weight_l2_penalty(self) -> torch.Tensor:
+        """Sum of squared weights in all decoder FC layers (excludes biases)."""
+        penalty = torch.tensor(0.0, device=next(self.parameters()).device)
+        for decoder in self.decoders.values():
+            for layer_seq in decoder.px_decoder.fc_layers:
+                for sublayer in layer_seq:
+                    if isinstance(sublayer, nn.Linear):
+                        penalty = penalty + sublayer.weight.pow(2).sum()
+            penalty = penalty + decoder.px_scale_decoder[0].weight.pow(2).sum()
+        return penalty
 
     def _get_inference_input(
         self,
@@ -1076,6 +1110,13 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 )
                 bg_penalty = bg_penalty + neg_log_prior
             loss = loss + bg_penalty / n_obs
+
+        # ---- Decoder weight L2 penalty (Normal prior on decoder weights, excludes biases) ----
+        if self.decoder_weight_l2 > 0.0:
+            n_obs = recon_loss.shape[0]
+            decoder_w_penalty = self.decoder_weight_l2 * self._decoder_weight_l2_penalty()
+            loss = loss + decoder_w_penalty / n_obs
+            extra_metrics["decoder_weight_penalty"] = (decoder_w_penalty / n_obs).detach()
 
         # ---- Modality scaling Gamma prior ----
         if self.learnable_modality_scaling and self.modality_scale_init:

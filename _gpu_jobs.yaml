@@ -245,3 +245,283 @@
     exp10bstratified_filtered + lowES (0.0001) + ATAC LR 2x.
     Tests whether 2x ATAC learning rate speeds up ATAC training without hurting RNA.
     Uses ATAC>2k filtering, stratified split, wider lib var 0.2.
+
+# ── libvar sweep: 1.0 + repeat + per-modality (2026-03-15) ──
+
+- job_name: exp10bstratified_filtered_lowes2_libvar10
+  job_id: 916246
+  queue: gpu-huge
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10bstratified_filtered_lowes2_libvar10_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 1.0 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r results_folder results/exp10bstratified_filtered_lowes2_libvar10/"
+  description: >-
+    MM: libvar=1.0, stratified, ATAC>2k, ES=2e-4.
+    Same as libvar05 ES=2e-4 but with library_log_vars_weight=1.0.
+
+- job_name: exp12stratified_filtered_lowes2_libvar10
+  job_id: 966102
+  queue: gpu-huge
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp12stratified_filtered_lowes2_libvar10_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 1.0 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r results_folder results/exp12stratified_filtered_lowes2_libvar10/"
+  description: >-
+    RNA: libvar=1.0, stratified, ATAC>2k, ES=2e-4.
+    Matches MM libvar10 config for single-modal comparison.
+    Resubmitted without wandb (original 916247 failed with ServicePollForTokenError).
+
+- job_name: exp10bstratified_filtered_lowes2_libvar05_repeat2
+  job_id: 916261
+  queue: gpu-huge
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10bstratified_filtered_lowes2_libvar05_repeat2_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r results_folder results/exp10bstratified_filtered_lowes2_libvar05_repeat2/"
+  description: >-
+    MM: libvar=0.5, stratified, ATAC>2k, ES=2e-4, repeat2.
+    Reproducibility check of libvar05 ES=2e-4 experiment.
+
+- job_name: exp10bstratified_filtered_lowes2_libvar02_ataclibvar15
+  job_id: 916264
+  queue: gpu-huge
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10bstratified_filtered_lowes2_libvar02_ataclibvar15_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.2 -r library_log_vars_weight_atac 1.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r results_folder results/exp10bstratified_filtered_lowes2_libvar02_ataclibvar15/"
+  description: >-
+    MM: per-modality libvar — RNA=0.2, ATAC=1.5, stratified, ATAC>2k, ES=2e-4.
+    Tests if ATAC needs much wider library prior variance than RNA.
+
+# ── Background prior init + RNA libvar=0.5 baseline (2026-03-15) ──
+
+- job_name: exp10bstratified_filtered_lowes2_libvar05_bgprior1
+  job_id: 916292
+  queue: gpu-huge
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_exp10bstratified_filtered_lowes2_libvar05_bgprior1_out.ipynb
+  overrides: "-r regularise_background 0 -r additive_bg_prior_alpha 1.0 -r additive_bg_prior_beta 1.0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r results_folder results/exp10bstratified_filtered_lowes2_libvar05_bgprior1/"
+  description: >-
+    MM: libvar=0.5, bg prior Gamma(1,1) init at exp(0)=1, stratified, ATAC>2k, ES=2e-4.
+    Tests whether higher bg init (1.0 vs 0.01) helps when regularise_background=False.
+
+- job_name: exp12stratified_filtered_lowes2_libvar05
+  job_id: 966104
+  queue: gpu-huge
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp12stratified_filtered_lowes2_libvar05_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r results_folder results/exp12stratified_filtered_lowes2_libvar05/"
+  description: >-
+    RNA: libvar=0.5, stratified, ATAC>2k, ES=2e-4.
+    RNA baseline matching MM libvar05 ES=2e-4 config.
+    Resubmitted without wandb (original 916293 failed with ServicePollForTokenError).
+
+- job_name: exp12stratified_filtered_lowes2_libvar05_bgprior1
+  job_id: 916294
+  queue: gpu-huge
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp12stratified_filtered_lowes2_libvar05_bgprior1_out.ipynb
+  overrides: "-r regularise_background 0 -r additive_bg_prior_alpha 1.0 -r additive_bg_prior_beta 1.0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r results_folder results/exp12stratified_filtered_lowes2_libvar05_bgprior1/"
+  description: >-
+    RNA: libvar=0.5, bg prior Gamma(1,1) init at exp(0)=1, stratified, ATAC>2k, ES=2e-4.
+    Tests whether higher bg init helps RNA model when regularise_background=False.
+    Original 916294 failed with wandb ServicePollForTokenError — NOT resubmitted (replaced by libvar02 variants).
+
+# ── RNA: bg prior init sweep + libvar (2026-03-15, resubmitted without wandb) ──
+
+- job_name: exp12stratified_filtered_lowes2_libvar02_bgprior1
+  job_id: 966105
+  queue: gpu-huge
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp12stratified_filtered_lowes2_libvar02_bgprior1_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.2 -r additive_bg_prior_alpha 1.0 -r additive_bg_prior_beta 1.0 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r results_folder results/exp12stratified_filtered_lowes2_libvar02_bgprior1/"
+  description: >-
+    RNA: libvar=0.2, bg prior Gamma(1,1) init at exp(0)=1, stratified, ATAC>2k, ES=2e-4.
+    Tests higher bg init with default libvar.
+
+- job_name: exp12stratified_filtered_lowes2_libvar02_bgprior033
+  job_id: 966108
+  queue: gpu-huge
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp12stratified_filtered_lowes2_libvar02_bgprior033_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.2 -r additive_bg_prior_alpha 1.0 -r additive_bg_prior_beta 3.0 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r results_folder results/exp12stratified_filtered_lowes2_libvar02_bgprior033/"
+  description: >-
+    RNA: libvar=0.2, bg prior Gamma(1,3) init at exp(log(1/3))≈0.33, stratified, ATAC>2k, ES=2e-4.
+    Tests intermediate bg init between default (0.01) and G(1,1) (1.0).
+
+- job_name: exp12stratified_filtered_lowes2_libvar05_bgprior033
+  job_id: 966109
+  queue: gpu-huge
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_exp12stratified_filtered_lowes2_libvar05_bgprior033_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r additive_bg_prior_alpha 1.0 -r additive_bg_prior_beta 3.0 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r results_folder results/exp12stratified_filtered_lowes2_libvar05_bgprior033/"
+  description: >-
+    RNA: libvar=0.5, bg prior Gamma(1,3) init at exp(log(1/3))≈0.33, stratified, ATAC>2k, ES=2e-4.
+    Tests intermediate bg init with wider libvar.
+
+# ── Decoder weight regularization + data-dependent init (2026-03-17) ──
+# All use exp10bstratified_filtered_lowes2_libvar05 as baseline.
+# MM common: bg=0, ctr_rna=1.0, ctr_atac=0.2, libvar=0.5, strat, ES=2e-4, ATAC>2k.
+# RNA common: bg=0, ctr=1.0, libvar=0.5, strat, ES=2e-4, ATAC>2k.
+
+# ── MM decoder weight L2 sweep ──
+
+- job_name: mm_es_libvar05_dwl2_00001
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_dwl2_00001_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r decoder_weight_l2 0.0001 -r results_folder results/mm_es_libvar05_dwl2_00001/"
+  description: >-
+    MM: libvar=0.5 + decoder_weight_l2=1e-4.
+
+- job_name: mm_es_libvar05_dwl2_0001
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_dwl2_0001_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r decoder_weight_l2 0.001 -r results_folder results/mm_es_libvar05_dwl2_0001/"
+  description: >-
+    MM: libvar=0.5 + decoder_weight_l2=1e-3.
+
+- job_name: mm_es_libvar05_dwl2_001
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_dwl2_001_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r decoder_weight_l2 0.01 -r results_folder results/mm_es_libvar05_dwl2_001/"
+  description: >-
+    MM: libvar=0.5 + decoder_weight_l2=1e-2.
+
+- job_name: mm_es_libvar05_dwl2_01
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_dwl2_01_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r decoder_weight_l2 0.1 -r results_folder results/mm_es_libvar05_dwl2_01/"
+  description: >-
+    MM: libvar=0.5 + decoder_weight_l2=1e-1.
+
+- job_name: mm_es_libvar05_dwl2_1
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_dwl2_1_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r decoder_weight_l2 1.0 -r results_folder results/mm_es_libvar05_dwl2_1/"
+  description: >-
+    MM: libvar=0.5 + decoder_weight_l2=1.0.
+
+# ── MM data-dependent init experiments ──
+
+- job_name: mm_es_libvar05_bias_topN_bg02
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_bias_topN_bg02_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r init_decoder_bias topN -r bg_init_gene_fraction 0.2 -r results_folder results/mm_es_libvar05_bias_topN_bg02/"
+  description: >-
+    MM: libvar=0.5 + topN bias init + gene-specific bg (0.2×mean).
+
+- job_name: mm_es_libvar05_bias_mean
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_bias_mean_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r init_decoder_bias mean -r results_folder results/mm_es_libvar05_bias_mean/"
+  description: >-
+    MM: libvar=0.5 + mean bias init (no gene-specific bg).
+
+- job_name: mm_es_libvar05_bg_gene02
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_bg_gene02_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r bg_init_gene_fraction 0.2 -r results_folder results/mm_es_libvar05_bg_gene02/"
+  description: >-
+    MM: libvar=0.5 + gene-specific bg (0.2×mean), no bias init.
+
+- job_name: mm_es_libvar05_bias_mean_bg02
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_bias_mean_bg02_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/mm_es_libvar05_bias_mean_bg02/"
+  description: >-
+    MM: libvar=0.5 + mean bias init + gene-specific bg (0.2×mean).
+
+# ── MM combined (dwl2 + bias + bg) ──
+
+- job_name: mm_es_libvar05_dwl2_001_bias_mean_bg02
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_dwl2_001_bias_mean_bg02_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r decoder_weight_l2 0.01 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/mm_es_libvar05_dwl2_001_bias_mean_bg02/"
+  description: >-
+    MM: libvar=0.5 + dwl2=1e-2 + mean bias init + gene-specific bg.
+
+- job_name: mm_es_libvar05_dwl2_01_bias_mean_bg02
+  notebook: docs/notebooks/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/bone_marrow_mm_es_libvar05_dwl2_01_bias_mean_bg02_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity_rna 1.0 -r library_log_means_centering_sensitivity_atac 0.2 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r decoder_weight_l2 0.1 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/mm_es_libvar05_dwl2_01_bias_mean_bg02/"
+  description: >-
+    MM: libvar=0.5 + dwl2=1e-1 + mean bias init + gene-specific bg.
+
+# ── RNA decoder weight L2 sweep ──
+
+- job_name: rna_es_libvar05_dwl2_00001
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_dwl2_00001_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r decoder_weight_l2 0.0001 -r results_folder results/rna_es_libvar05_dwl2_00001/"
+  description: >-
+    RNA: libvar=0.5 + decoder_weight_l2=1e-4.
+
+- job_name: rna_es_libvar05_dwl2_0001
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_dwl2_0001_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r decoder_weight_l2 0.001 -r results_folder results/rna_es_libvar05_dwl2_0001/"
+  description: >-
+    RNA: libvar=0.5 + decoder_weight_l2=1e-3.
+
+- job_name: rna_es_libvar05_dwl2_001
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_dwl2_001_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r decoder_weight_l2 0.01 -r results_folder results/rna_es_libvar05_dwl2_001/"
+  description: >-
+    RNA: libvar=0.5 + decoder_weight_l2=1e-2.
+
+- job_name: rna_es_libvar05_dwl2_01
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_dwl2_01_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r decoder_weight_l2 0.1 -r results_folder results/rna_es_libvar05_dwl2_01/"
+  description: >-
+    RNA: libvar=0.5 + decoder_weight_l2=1e-1.
+
+- job_name: rna_es_libvar05_dwl2_1
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_dwl2_1_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r decoder_weight_l2 1.0 -r results_folder results/rna_es_libvar05_dwl2_1/"
+  description: >-
+    RNA: libvar=0.5 + decoder_weight_l2=1.0.
+
+# ── RNA data-dependent init experiments ──
+
+- job_name: rna_es_libvar05_bias_topN_bg02
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_bias_topN_bg02_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r init_decoder_bias topN -r bg_init_gene_fraction 0.2 -r results_folder results/rna_es_libvar05_bias_topN_bg02/"
+  description: >-
+    RNA: libvar=0.5 + topN bias init + gene-specific bg (0.2×mean).
+
+- job_name: rna_es_libvar05_bias_mean
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_bias_mean_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r init_decoder_bias mean -r results_folder results/rna_es_libvar05_bias_mean/"
+  description: >-
+    RNA: libvar=0.5 + mean bias init (no gene-specific bg).
+
+- job_name: rna_es_libvar05_bg_gene02
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_bg_gene02_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r bg_init_gene_fraction 0.2 -r results_folder results/rna_es_libvar05_bg_gene02/"
+  description: >-
+    RNA: libvar=0.5 + gene-specific bg (0.2×mean), no bias init.
+
+- job_name: rna_es_libvar05_bias_mean_bg02
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_bias_mean_bg02_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/rna_es_libvar05_bias_mean_bg02/"
+  description: >-
+    RNA: libvar=0.5 + mean bias init + gene-specific bg (0.2×mean).
+
+# ── RNA combined (dwl2 + bias + bg) ──
+
+- job_name: rna_es_libvar05_dwl2_001_bias_mean_bg02
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_dwl2_001_bias_mean_bg02_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r decoder_weight_l2 0.01 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/rna_es_libvar05_dwl2_001_bias_mean_bg02/"
+  description: >-
+    RNA: libvar=0.5 + dwl2=1e-2 + mean bias init + gene-specific bg.
+
+- job_name: rna_es_libvar05_dwl2_01_bias_mean_bg02
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_gp_es_libvar05_dwl2_01_bias_mean_bg02_out.ipynb
+  overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r decoder_weight_l2 0.1 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/rna_es_libvar05_dwl2_01_bias_mean_bg02/"
+  description: >-
+    RNA: libvar=0.5 + dwl2=1e-1 + mean bias init + gene-specific bg.

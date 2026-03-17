@@ -169,6 +169,11 @@ class RegularizedMultimodalVI(
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
         learnable_modality_scaling: bool = False,
         modality_scale_prior_concentration: float = DEFAULT_MODALITY_SCALE_PRIOR_CONCENTRATION,
+        # Decoder weight regularization
+        decoder_weight_l2: float = 0.0,
+        # Data-dependent initialization
+        init_decoder_bias: str | None = None,
+        bg_init_gene_fraction: float | None = None,
         **kwargs,
     ):
         AmbientRegularizedSCVI._validate_bool_params(
@@ -190,6 +195,10 @@ class RegularizedMultimodalVI(
             additive_background_modalities = [m for m in modality_names if m == "rna"]
         if feature_scaling_modalities is None:
             feature_scaling_modalities = [m for m in modality_names if m == "atac"]
+
+        # Store data-dependent init params for _init_module
+        self._init_decoder_bias = init_decoder_bias
+        self._bg_init_gene_fraction = bg_init_gene_fraction
 
         self._module_kwargs = {
             "n_hidden": n_hidden,
@@ -220,6 +229,7 @@ class RegularizedMultimodalVI(
             "compute_pearson": compute_pearson,
             "learnable_modality_scaling": learnable_modality_scaling,
             "modality_scale_prior_concentration": modality_scale_prior_concentration,
+            "decoder_weight_l2": decoder_weight_l2,
             **kwargs,
         }
 
@@ -364,6 +374,52 @@ class RegularizedMultimodalVI(
             library_log_means[name] = log_means.reshape(1, -1)
             library_log_vars[name] = log_vars.reshape(1, -1)
 
+        # Data-dependent initialization (Streams B+C): per-modality bias init + bg init
+        import scipy.sparse as sp
+
+        decoder_bias_init_dict = {}
+        bg_init_per_gene_dict = {}
+        if self._init_decoder_bias is not None or self._bg_init_gene_fraction is not None:
+            for name in modality_names:
+                reg_key = f"X_{name}"
+                data_mod = self.adata_manager.get_from_registry(reg_key)
+                lib_sizes = np.array(data_mod.sum(axis=1)).flatten()
+                lib_sizes = np.maximum(lib_sizes, 1.0)
+                _centering = self._module_kwargs.get("library_log_means_centering_sensitivity")
+                sensitivity = _centering.get(name, 1.0) if _centering is not None else 1.0
+                norm_target = lib_sizes.mean() / sensitivity
+                norm_data = (
+                    data_mod.multiply(norm_target / lib_sizes[:, None])
+                    if sp.issparse(data_mod)
+                    else data_mod * (norm_target / lib_sizes[:, None])
+                )
+                if sp.issparse(norm_data):
+                    norm_data = norm_data.tocsc()
+
+                if self._init_decoder_bias is not None:
+                    if self._init_decoder_bias == "mean":
+                        decoder_bias_init_dict[name] = np.array(norm_data.mean(axis=0)).flatten().astype(np.float32)
+                    elif self._init_decoder_bias == "topN":
+                        n_top = min(int(0.01 * data_mod.shape[0]), 500)
+                        vals = np.zeros(data_mod.shape[1], dtype=np.float32)
+                        for g in range(data_mod.shape[1]):
+                            col = (
+                                np.array(norm_data[:, g].todense()).flatten()
+                                if sp.issparse(norm_data)
+                                else norm_data[:, g]
+                            )
+                            top_vals = np.partition(col, -n_top)[-n_top:]
+                            vals[g] = top_vals.mean()
+                        decoder_bias_init_dict[name] = vals
+
+                if self._bg_init_gene_fraction is not None:
+                    mean_expr_all = np.array(norm_data.mean(axis=0)).flatten()
+                    bg_init_per_gene_dict[name] = np.log(
+                        np.maximum(self._bg_init_gene_fraction * mean_expr_all, 1e-8)
+                    ).astype(np.float32)
+
+                del norm_data
+
         n_cats_per_cov = None
         if REGISTRY_KEYS.CAT_COVS_KEY in self.adata_manager.data_registry:
             n_cats_per_cov = self.adata_manager.get_state_registry(REGISTRY_KEYS.CAT_COVS_KEY).n_cats_per_key
@@ -408,6 +464,8 @@ class RegularizedMultimodalVI(
             n_cats_per_encoder_cov=n_cats_per_encoder_cov,
             n_dispersion_cats=n_dispersion_cats,
             n_library_cats=n_library_cats,
+            decoder_bias_init=decoder_bias_init_dict or None,
+            additive_bg_init_per_gene=bg_init_per_gene_dict or None,
             **kwargs,
         )
 

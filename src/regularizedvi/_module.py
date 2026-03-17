@@ -261,6 +261,11 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         px_r_init_std: float | None = None,
         additive_bg_init_mean: float | None = None,
         additive_bg_init_std: float | None = None,
+        # Decoder weight regularization
+        decoder_weight_l2: float = 0.0,
+        # Data-dependent initialization
+        decoder_bias_init: np.ndarray | None = None,
+        additive_bg_init_per_gene: np.ndarray | None = None,
         # Training metrics
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
     ):
@@ -288,6 +293,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.additive_bg_prior_alpha = additive_bg_prior_alpha
         self.additive_bg_prior_beta = additive_bg_prior_beta
         self.regularise_background = regularise_background
+        self.decoder_weight_l2 = decoder_weight_l2
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
         self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
@@ -377,16 +383,23 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             sum(int(c) for c in self.n_cats_per_ambient_cov) if self.n_cats_per_ambient_cov else 0
         )
         if self.use_additive_background and self.n_total_ambient_cats > 0:
-            _bg_mean = (
-                additive_bg_init_mean
-                if additive_bg_init_mean is not None
-                else math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
-            )
             _bg_std = additive_bg_init_std if additive_bg_init_std is not None else 0.01
-            self.additive_background = torch.nn.Parameter(
-                torch.full((n_input, self.n_total_ambient_cats), _bg_mean)
-                + _bg_std * torch.randn(n_input, self.n_total_ambient_cats)
-            )
+            if additive_bg_init_per_gene is not None:
+                init_vals = torch.from_numpy(additive_bg_init_per_gene).float()
+                init_vals = init_vals.unsqueeze(1).expand(-1, self.n_total_ambient_cats)
+                self.additive_background = torch.nn.Parameter(
+                    init_vals + _bg_std * torch.randn(n_input, self.n_total_ambient_cats)
+                )
+            else:
+                _bg_mean = (
+                    additive_bg_init_mean
+                    if additive_bg_init_mean is not None
+                    else math.log(additive_bg_prior_alpha / additive_bg_prior_beta)
+                )
+                self.additive_background = torch.nn.Parameter(
+                    torch.full((n_input, self.n_total_ambient_cats), _bg_mean)
+                    + _bg_std * torch.randn(n_input, self.n_total_ambient_cats)
+                )
 
         # Feature scaling (cell2location-style per-covariate multiplicative scaling)
         self.use_feature_scaling = use_feature_scaling
@@ -501,6 +514,25 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             scale_activation=_scale_activation,
             **_extra_decoder_kwargs,
         )
+
+        # Data-dependent decoder bias initialization (Stream B)
+        if decoder_bias_init is not None:
+            init_vals = torch.from_numpy(decoder_bias_init).float()
+            init_vals = torch.clamp(init_vals, min=1e-6)
+            # softplus_inv(x) = log(exp(x) - 1)
+            bias_init = torch.log(torch.expm1(init_vals))
+            with torch.no_grad():
+                self.decoder.px_scale_decoder[0].bias.copy_(bias_init)
+
+    def _decoder_weight_l2_penalty(self) -> torch.Tensor:
+        """Sum of squared weights in decoder FC layers (excludes biases)."""
+        penalty = torch.tensor(0.0, device=next(self.decoder.parameters()).device)
+        for layer_seq in self.decoder.px_decoder.fc_layers:
+            for sublayer in layer_seq:
+                if isinstance(sublayer, torch.nn.Linear):
+                    penalty = penalty + sublayer.weight.pow(2).sum()
+        penalty = penalty + self.decoder.px_scale_decoder[0].weight.pow(2).sum()
+        return penalty
 
     def _get_inference_input(
         self,
@@ -895,6 +927,12 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             )
             loss = loss + fs_penalty / n_obs
 
+        # Decoder weight L2 penalty (Normal prior on decoder weights, excludes biases)
+        if self.decoder_weight_l2 > 0.0:
+            n_obs = x.shape[0]
+            decoder_w_penalty = self.decoder_weight_l2 * self._decoder_weight_l2_penalty()
+            loss = loss + decoder_w_penalty / n_obs
+
         # a payload to be used during autotune
         if self.extra_payload_autotune:
             extra_metrics_payload = {
@@ -903,6 +941,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             }
         else:
             extra_metrics_payload = {}
+
+        if self.decoder_weight_l2 > 0.0:
+            extra_metrics_payload["decoder_weight_penalty"] = (decoder_w_penalty / n_obs).detach()
 
         # Pearson correlation metrics (gene-wise and cell-wise)
         # Normalize to per-cell proportions to remove library size confound:

@@ -228,6 +228,11 @@ class AmbientRegularizedSCVI(
         px_r_init_std: float | None = None,
         additive_bg_init_mean: float | None = None,
         additive_bg_init_std: float | None = None,
+        # Decoder weight regularization
+        decoder_weight_l2: float = 0.0,
+        # Data-dependent initialization
+        init_decoder_bias: str | None = None,
+        bg_init_gene_fraction: float | None = None,
         **kwargs,
     ):
         self._validate_bool_params(
@@ -271,6 +276,7 @@ class AmbientRegularizedSCVI(
             "px_r_init_std": px_r_init_std,
             "additive_bg_init_mean": additive_bg_init_mean,
             "additive_bg_init_std": additive_bg_init_std,
+            "decoder_weight_l2": decoder_weight_l2,
             **kwargs,
         }
         self._model_summary_string = (
@@ -351,6 +357,52 @@ class AmbientRegularizedSCVI(
                     library_log_vars_arr[i_group] = np.var(log_counts).astype(np.float32)
                 library_log_means = library_log_means_arr.reshape(1, -1)
                 library_log_vars = library_log_vars_arr.reshape(1, -1)
+
+            # Data-dependent initialization (Streams B+C)
+            import scipy.sparse as sp
+
+            decoder_bias_init = None
+            bg_init_per_gene = None
+            norm_data = None
+            if (init_decoder_bias is not None or bg_init_gene_fraction is not None) and self.minified_data_type is None:
+                if "data" not in dir():
+                    data = self.adata_manager.get_from_registry(REGISTRY_KEYS.X_KEY)
+                lib_sizes = np.array(data.sum(axis=1)).flatten()
+                lib_sizes = np.maximum(lib_sizes, 1.0)
+                sensitivity = (
+                    library_log_means_centering_sensitivity
+                    if library_log_means_centering_sensitivity is not None
+                    else 1.0
+                )
+                norm_target = lib_sizes.mean() / sensitivity
+                norm_data = (
+                    data.multiply(norm_target / lib_sizes[:, None])
+                    if sp.issparse(data)
+                    else data * (norm_target / lib_sizes[:, None])
+                )
+                if sp.issparse(norm_data):
+                    norm_data = norm_data.tocsc()
+
+            if init_decoder_bias is not None and norm_data is not None:
+                if init_decoder_bias == "mean":
+                    decoder_bias_init = np.array(norm_data.mean(axis=0)).flatten().astype(np.float32)
+                elif init_decoder_bias == "topN":
+                    n_top = min(int(0.01 * norm_data.shape[0]), 500)
+                    decoder_bias_init = np.zeros(norm_data.shape[1], dtype=np.float32)
+                    for g in range(norm_data.shape[1]):
+                        col = (
+                            np.array(norm_data[:, g].todense()).flatten() if sp.issparse(norm_data) else norm_data[:, g]
+                        )
+                        top_vals = np.partition(col, -n_top)[-n_top:]
+                        decoder_bias_init[g] = top_vals.mean()
+
+            if bg_init_gene_fraction is not None and norm_data is not None:
+                mean_expr_all = np.array(norm_data.mean(axis=0)).flatten()
+                bg_init_per_gene = np.log(np.maximum(bg_init_gene_fraction * mean_expr_all, 1e-8)).astype(np.float32)
+
+            if norm_data is not None:
+                del norm_data
+
             # Determine use_observed_lib_size:
             # If library_log_means/vars are provided (computed above), learn library size.
             # This is a key regularizedvi default — observed totals include ambient RNA.
@@ -399,6 +451,9 @@ class AmbientRegularizedSCVI(
                 px_r_init_std=px_r_init_std,
                 additive_bg_init_mean=additive_bg_init_mean,
                 additive_bg_init_std=additive_bg_init_std,
+                decoder_weight_l2=decoder_weight_l2,
+                decoder_bias_init=decoder_bias_init,
+                additive_bg_init_per_gene=bg_init_per_gene,
                 **kwargs,
             )
             self.module.minified_data_type = self.minified_data_type

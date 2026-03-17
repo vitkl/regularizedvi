@@ -684,6 +684,122 @@ class TestParameterInitialization:
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
 
 
+class TestDecoderRegularization:
+    """Tests for decoder weight L2 penalty, bias init, and gene-specific bg init."""
+
+    def test_decoder_weight_l2_default_zero(self, adata):
+        """Default decoder_weight_l2=0 should not add penalty to loss."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        assert model.module.decoder_weight_l2 == 0.0
+
+    def test_decoder_weight_l2_penalty_positive(self, adata):
+        """With decoder_weight_l2 > 0, penalty should be logged in history."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, decoder_weight_l2=0.01)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "decoder_weight_penalty_train" in model.history_
+        vals = model.history_["decoder_weight_penalty_train"].values
+        assert all(v > 0 for v in vals.flatten() if not np.isnan(v))
+
+    def test_decoder_weight_l2_weights_only(self, adata):
+        """Penalty should only count weight matrices, not biases."""
+        import torch
+
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, decoder_weight_l2=1.0)
+        # Zero all Linear weights -> penalty should be zero
+        with torch.no_grad():
+            for layer_seq in model.module.decoder.px_decoder.fc_layers:
+                for sublayer in layer_seq:
+                    if isinstance(sublayer, torch.nn.Linear):
+                        sublayer.weight.zero_()
+                        if sublayer.bias is not None:
+                            sublayer.bias.fill_(999.0)  # nonzero bias
+            model.module.decoder.px_scale_decoder[0].weight.zero_()
+            model.module.decoder.px_scale_decoder[0].bias.fill_(999.0)
+        penalty = model.module._decoder_weight_l2_penalty()
+        assert penalty.item() == 0.0
+
+    def test_decoder_weight_l2_multimodal(self, mdata):
+        """Multimodal decoder weight penalty should work."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, decoder_weight_l2=0.01)
+        assert model.module.decoder_weight_l2 == 0.01
+        penalty = model.module._decoder_weight_l2_penalty()
+        assert penalty.item() > 0
+
+    def test_init_decoder_bias_mean(self, adata):
+        """init_decoder_bias='mean' should set decoder bias to non-default values."""
+        import torch
+
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model_default = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        model_init = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, init_decoder_bias="mean")
+        bias_default = model_default.module.decoder.px_scale_decoder[0].bias.detach()
+        bias_init = model_init.module.decoder.px_scale_decoder[0].bias.detach()
+        # Biases should differ (data-dependent vs Kaiming)
+        assert not torch.allclose(bias_default, bias_init)
+
+    def test_init_decoder_bias_topN(self, adata):
+        """init_decoder_bias='topN' should set decoder bias to non-default values."""
+        import torch
+
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model_init = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, init_decoder_bias="topN")
+        bias = model_init.module.decoder.px_scale_decoder[0].bias.detach()
+        # TopN init should produce positive softplus values
+        assert torch.all(torch.isfinite(bias))
+
+    def test_bg_init_gene_fraction(self, adata):
+        """bg_init_gene_fraction should make background params vary per gene."""
+
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, bg_init_gene_fraction=0.2)
+        bg = model.module.additive_background.detach()
+        # Per-gene init should create variation across genes
+        col_means = bg[:, 0]
+        assert col_means.std() > 0.01  # not constant
+
+    def test_init_decoder_bias_multimodal(self, mdata):
+        """Multimodal bias init should work per modality."""
+        import torch
+
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, init_decoder_bias="mean")
+        for name in model.module.modality_names:
+            bias = model.module.decoders[name].px_scale_decoder[0].bias.detach()
+            assert torch.all(torch.isfinite(bias))
+
+    def test_bg_init_gene_fraction_multimodal(self, mdata):
+        """Multimodal gene-specific bg init should work."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            additive_background_modalities=["rna"],
+            bg_init_gene_fraction=0.2,
+        )
+        bg = model.module.additive_background["rna"].detach()
+        col_means = bg[:, 0]
+        assert col_means.std() > 0.01
+
+    def test_combined_all_streams(self, adata):
+        """All three streams should work together."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            decoder_weight_l2=0.01,
+            init_decoder_bias="mean",
+            bg_init_gene_fraction=0.2,
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "decoder_weight_penalty_train" in model.history_
+
+
 class TestGammaPoissonMode:
     """Tests for GammaPoisson likelihood (the only supported mode)."""
 
