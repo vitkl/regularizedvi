@@ -383,6 +383,10 @@ class RegularizedMultimodalVI(
             for name in modality_names:
                 reg_key = f"X_{name}"
                 data_mod = self.adata_manager.get_from_registry(reg_key)
+                if sp.issparse(data_mod):
+                    data_mod = data_mod.astype(np.float32)
+                else:
+                    data_mod = np.asarray(data_mod, dtype=np.float32)
                 lib_sizes = np.array(data_mod.sum(axis=1)).flatten()
                 lib_sizes = np.maximum(lib_sizes, 1.0)
                 _centering = self._module_kwargs.get("library_log_means_centering_sensitivity")

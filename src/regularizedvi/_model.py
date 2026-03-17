@@ -367,6 +367,10 @@ class AmbientRegularizedSCVI(
             if (init_decoder_bias is not None or bg_init_gene_fraction is not None) and self.minified_data_type is None:
                 if "data" not in dir():
                     data = self.adata_manager.get_from_registry(REGISTRY_KEYS.X_KEY)
+                if sp.issparse(data):
+                    data = data.astype(np.float32)
+                else:
+                    data = np.asarray(data, dtype=np.float32)
                 lib_sizes = np.array(data.sum(axis=1)).flatten()
                 lib_sizes = np.maximum(lib_sizes, 1.0)
                 sensitivity = (
