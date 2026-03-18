@@ -400,14 +400,15 @@ class RegularizedMultimodalVI(
                 )
                 if sp.issparse(norm_data):
                     norm_data = norm_data.tocsc()
+                del data_mod
 
                 if self._init_decoder_bias is not None:
                     if self._init_decoder_bias == "mean":
                         decoder_bias_init_dict[name] = np.array(norm_data.mean(axis=0)).flatten().astype(np.float32)
                     elif self._init_decoder_bias == "topN":
-                        n_top = min(int(0.01 * data_mod.shape[0]), 500)
-                        vals = np.zeros(data_mod.shape[1], dtype=np.float32)
-                        for g in range(data_mod.shape[1]):
+                        n_top = min(int(0.01 * norm_data.shape[0]), 500)
+                        vals = np.zeros(norm_data.shape[1], dtype=np.float32)
+                        for g in range(norm_data.shape[1]):
                             col = (
                                 np.array(norm_data[:, g].todense()).flatten()
                                 if sp.issparse(norm_data)
@@ -437,7 +438,7 @@ class RegularizedMultimodalVI(
                     )
                     cats_per_key = list(_amb_cov) if _amb_cov is not None else [n_batch]
                     _n_amb = sum(int(c) for c in cats_per_key)
-                    n_feat = data_mod.shape[1]
+                    n_feat = norm_data.shape[1]
                     bg_arr = np.full((n_feat, _n_amb), math.log(1e-8), dtype=np.float32)
                     col_offset = 0
                     for key_idx, n_cats_i in enumerate(cats_per_key):
@@ -449,6 +450,7 @@ class RegularizedMultimodalVI(
                                 continue
                             cat_data = norm_data[cat_idx]
                             mean_expr_cat = np.asarray(cat_data.mean(axis=0)).flatten()
+                            del cat_data
                             bg_arr[:, col_offset] = np.log(
                                 np.maximum(self._bg_init_gene_fraction * mean_expr_cat, 1e-8)
                             ).astype(np.float32)

@@ -331,6 +331,7 @@ class AmbientRegularizedSCVI(
                 n_library_cats = n_batch
             use_size_factor_key = REGISTRY_KEYS.SIZE_FACTOR_KEY in self.adata_manager.data_registry
             library_log_means, library_log_vars = None, None
+            data = None
             if not use_size_factor_key and self.minified_data_type is None:
                 # Compute library priors per library_size_key group
                 lib_indices = (
@@ -365,7 +366,7 @@ class AmbientRegularizedSCVI(
             bg_init_per_gene = None
             norm_data = None
             if (init_decoder_bias is not None or bg_init_gene_fraction is not None) and self.minified_data_type is None:
-                if "data" not in dir():
+                if data is None:
                     data = self.adata_manager.get_from_registry(REGISTRY_KEYS.X_KEY)
                 if sp.issparse(data):
                     data = data.astype(np.float32)
@@ -427,6 +428,7 @@ class AmbientRegularizedSCVI(
                             continue
                         cat_data = norm_data[cat_idx]
                         mean_expr_cat = np.asarray(cat_data.mean(axis=0)).flatten()
+                        del cat_data
                         bg_init_per_gene[:, col_offset] = np.log(
                             np.maximum(bg_init_gene_fraction * mean_expr_cat, 1e-8)
                         ).astype(np.float32)
@@ -434,6 +436,8 @@ class AmbientRegularizedSCVI(
 
             if norm_data is not None:
                 del norm_data
+            if data is not None:
+                del data
 
             # Determine use_observed_lib_size:
             # If library_log_means/vars are provided (computed above), learn library size.
