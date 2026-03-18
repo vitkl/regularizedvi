@@ -6,6 +6,7 @@ buck-out/
 *.gpu.out
 *.err
 *.out
+docs/notebooks/job_out_err/
 .nfs*
 
 # Compiled files
