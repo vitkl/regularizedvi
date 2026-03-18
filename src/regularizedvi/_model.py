@@ -402,8 +402,35 @@ class AmbientRegularizedSCVI(
                 decoder_bias_init = np.nan_to_num(decoder_bias_init, nan=0.01, posinf=0.01, neginf=0.01)
 
             if bg_init_gene_fraction is not None and norm_data is not None:
-                mean_expr_all = np.array(norm_data.mean(axis=0)).flatten()
-                bg_init_per_gene = np.log(np.maximum(bg_init_gene_fraction * mean_expr_all, 1e-8)).astype(np.float32)
+                # Compute per-gene, per-ambient-category background init.
+                # Mirrors the forward pass: ambient_covs (n_cells, n_keys) → one_hot each
+                # column → concatenate → (n_cells, n_total_ambient_cats). Column j of
+                # additive_background maps to the j-th concatenated one-hot position.
+                ambient_raw = np.asarray(
+                    self.adata_manager.get_from_registry(AMBIENT_COVS_KEY)
+                    if AMBIENT_COVS_KEY in self.adata_manager.data_registry
+                    else self.adata_manager.get_from_registry(REGISTRY_KEYS.BATCH_KEY)
+                )
+                if ambient_raw.ndim == 1:
+                    ambient_raw = ambient_raw.reshape(-1, 1)
+                cats_per_key = list(n_cats_per_ambient_cov) if n_cats_per_ambient_cov else [self.summary_stats.n_batch]
+                n_total_ambient = sum(int(c) for c in cats_per_key)
+                n_genes = norm_data.shape[1]
+                bg_init_per_gene = np.full((n_genes, n_total_ambient), np.log(1e-8), dtype=np.float32)
+                col_offset = 0
+                for key_idx, n_cats_i in enumerate(cats_per_key):
+                    key_col = ambient_raw[:, key_idx]
+                    for i_cat in range(int(n_cats_i)):
+                        cat_idx = np.where(key_col == i_cat)[0]
+                        if len(cat_idx) == 0:
+                            col_offset += 1
+                            continue
+                        cat_data = norm_data[cat_idx]
+                        mean_expr_cat = np.asarray(cat_data.mean(axis=0)).flatten()
+                        bg_init_per_gene[:, col_offset] = np.log(
+                            np.maximum(bg_init_gene_fraction * mean_expr_cat, 1e-8)
+                        ).astype(np.float32)
+                        col_offset += 1
 
             if norm_data is not None:
                 del norm_data

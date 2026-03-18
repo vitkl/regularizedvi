@@ -519,7 +519,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             if self.n_total_ambient_cats > 0:
                 if additive_bg_init_per_gene is not None and name in additive_bg_init_per_gene:
                     init_vals = torch.from_numpy(additive_bg_init_per_gene[name]).float()
-                    init_vals = init_vals.unsqueeze(1).expand(-1, self.n_total_ambient_cats)
+                    if init_vals.dim() == 1:
+                        init_vals = init_vals.unsqueeze(1).expand(-1, self.n_total_ambient_cats)
                     self.additive_background[name] = nn.Parameter(
                         init_vals + 0.01 * torch.randn(n_feat, self.n_total_ambient_cats)
                     )

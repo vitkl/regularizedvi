@@ -11,6 +11,7 @@ Supports RNA + ATAC (and extensible to more modalities) with:
 from __future__ import annotations
 
 import logging
+import math
 import warnings
 from typing import TYPE_CHECKING
 
@@ -420,10 +421,38 @@ class RegularizedMultimodalVI(
                     )
 
                 if self._bg_init_gene_fraction is not None:
-                    mean_expr_all = np.array(norm_data.mean(axis=0)).flatten()
-                    bg_init_per_gene_dict[name] = np.log(
-                        np.maximum(self._bg_init_gene_fraction * mean_expr_all, 1e-8)
-                    ).astype(np.float32)
+                    # Batch-specific: mirrors forward pass one-hot encoding of ambient covs
+                    ambient_raw = np.asarray(
+                        self.adata_manager.get_from_registry(AMBIENT_COVS_KEY)
+                        if AMBIENT_COVS_KEY in self.adata_manager.data_registry
+                        else self.adata_manager.get_from_registry(REGISTRY_KEYS.BATCH_KEY)
+                    )
+                    if ambient_raw.ndim == 1:
+                        ambient_raw = ambient_raw.reshape(-1, 1)
+                    _amb_cov = (
+                        self.adata_manager.get_state_registry(AMBIENT_COVS_KEY).n_cats_per_key
+                        if AMBIENT_COVS_KEY in self.adata_manager.data_registry
+                        else None
+                    )
+                    cats_per_key = list(_amb_cov) if _amb_cov is not None else [n_batch]
+                    _n_amb = sum(int(c) for c in cats_per_key)
+                    n_feat = data_mod.shape[1]
+                    bg_arr = np.full((n_feat, _n_amb), math.log(1e-8), dtype=np.float32)
+                    col_offset = 0
+                    for key_idx, n_cats_i in enumerate(cats_per_key):
+                        key_col = ambient_raw[:, key_idx]
+                        for i_cat in range(int(n_cats_i)):
+                            cat_idx = np.where(key_col == i_cat)[0]
+                            if len(cat_idx) == 0:
+                                col_offset += 1
+                                continue
+                            cat_data = norm_data[cat_idx]
+                            mean_expr_cat = np.asarray(cat_data.mean(axis=0)).flatten()
+                            bg_arr[:, col_offset] = np.log(
+                                np.maximum(self._bg_init_gene_fraction * mean_expr_cat, 1e-8)
+                            ).astype(np.float32)
+                            col_offset += 1
+                    bg_init_per_gene_dict[name] = bg_arr
 
                 del norm_data
 

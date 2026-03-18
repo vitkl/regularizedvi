@@ -386,7 +386,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             _bg_std = additive_bg_init_std if additive_bg_init_std is not None else 0.01
             if additive_bg_init_per_gene is not None:
                 init_vals = torch.from_numpy(additive_bg_init_per_gene).float()
-                init_vals = init_vals.unsqueeze(1).expand(-1, self.n_total_ambient_cats)
+                if init_vals.dim() == 1:
+                    init_vals = init_vals.unsqueeze(1).expand(-1, self.n_total_ambient_cats)
                 self.additive_background = torch.nn.Parameter(
                     init_vals + _bg_std * torch.randn(n_input, self.n_total_ambient_cats)
                 )
