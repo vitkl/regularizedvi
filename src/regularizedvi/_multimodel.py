@@ -420,7 +420,8 @@ class RegularizedMultimodalVI(
                         decoder_bias_init_dict[name], nan=0.01, posinf=0.01, neginf=0.01
                     )
 
-                if self._bg_init_gene_fraction is not None:
+                _bg_modalities = self._module_kwargs.get("additive_background_modalities", [])
+                if self._bg_init_gene_fraction is not None and name in _bg_modalities:
                     # Batch-specific: mirrors forward pass one-hot encoding of ambient covs
                     ambient_raw = np.asarray(
                         self.adata_manager.get_from_registry(AMBIENT_COVS_KEY)
