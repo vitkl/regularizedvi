@@ -27,7 +27,7 @@ import torch
 from scvi import REGISTRY_KEYS
 from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
 from torch import nn
-from torch.distributions import Exponential, Gamma, Normal
+from torch.distributions import Exponential, Gamma, LogNormal, Normal
 from torch.distributions import kl_divergence as kld
 
 from regularizedvi._constants import (
@@ -225,6 +225,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # Data-dependent initialization
         decoder_bias_init: dict[str, np.ndarray] | None = None,
         additive_bg_init_per_gene: dict[str, np.ndarray] | None = None,
+        # Residual library encoder: library = log(sens) + w*(obs-log(sens)) + encoder
+        residual_library_encoder: bool = False,
+        library_obs_w_prior_rate: float = 1.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -249,6 +252,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             )
         self.use_observed_lib_size = False
         self.use_batch_in_decoder = use_batch_in_decoder
+        self.residual_library_encoder = residual_library_encoder
         self.regularise_dispersion = regularise_dispersion
         self.dispersion_hyper_prior_alpha = dispersion_hyper_prior_alpha
         self.dispersion_hyper_prior_beta = dispersion_hyper_prior_beta
@@ -453,11 +457,39 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 if _sens is not None:
                     global_log_mean = means.mean()
                     means = means - global_log_mean + math.log(_sens)
+                    # Change 1: initialize library encoder bias to log(sensitivity)
+                    # so exp(library) starts at the correct scale per modality
+                    with torch.no_grad():
+                        self.l_encoders[name].mean_encoder.bias.fill_(np.log(_sens))
+                    # Change 3: store centering constants for residual library encoder
+                    if self.residual_library_encoder:
+                        self.register_buffer(
+                            f"library_global_log_mean_{name}",
+                            torch.tensor(global_log_mean.item()),
+                        )
+                        self.register_buffer(
+                            f"library_log_sensitivity_{name}",
+                            torch.tensor(np.log(_sens)),
+                        )
+                else:
+                    if self.residual_library_encoder:
+                        # No centering — store zeros so residual baseline = raw log_obs
+                        self.register_buffer(f"library_global_log_mean_{name}", torch.tensor(0.0))
+                        self.register_buffer(f"library_log_sensitivity_{name}", torch.tensor(0.0))
                 vars_ = torch.from_numpy(library_log_vars[name]).float()
                 if name in _vars_weight:
                     vars_ = vars_ * _vars_weight[name]
                 self.register_buffer(f"library_log_means_{name}", means)
                 self.register_buffer(f"library_log_vars_{name}", vars_)
+
+        # ---- Residual library encoder: variational weight w ~ LogNormal ----
+        if self.residual_library_encoder:
+            self.library_obs_w_prior_rate = library_obs_w_prior_rate
+            self.library_obs_w_mu = nn.ParameterDict()
+            self.library_obs_w_log_sigma = nn.ParameterDict()
+            for name in self.modality_names:
+                self.library_obs_w_mu[name] = nn.Parameter(torch.tensor(0.0))  # E[w] ≈ 1
+                self.library_obs_w_log_sigma[name] = nn.Parameter(torch.tensor(-2.0))  # tight init
 
         # ---- Per-modality dispersion parameters ----
         # Initialize px_r at prior equilibrium when regularisation is active.
@@ -717,9 +749,33 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             x_ = torch.log1p(x) if self.log_variational else x
             if cont_covs is not None:
                 x_ = torch.cat([x_, cont_covs], dim=-1)
-            ql, lib = self.l_encoders[name](x_, *encoder_categorical_input)
-            library[name] = lib
-            ql_per_modality[name] = ql
+            ql_enc, lib_enc = self.l_encoders[name](x_, *encoder_categorical_input)
+
+            if self.residual_library_encoder:
+                # Centered observed log-library (same scale as prior)
+                log_obs = torch.log(x.sum(dim=-1, keepdim=True).clamp(min=1.0))
+                glm = getattr(self, f"library_global_log_mean_{name}", None)
+                ls = getattr(self, f"library_log_sensitivity_{name}", None)
+                if glm is not None and ls is not None:
+                    log_obs_centered = log_obs - glm + ls
+                else:
+                    log_obs_centered = log_obs
+                log_sens = ls if ls is not None else torch.tensor(0.0, device=x.device)
+
+                # Sample w from LogNormal variational posterior
+                w_mu = self.library_obs_w_mu[name]
+                w_sigma = torch.exp(self.library_obs_w_log_sigma[name])
+                w = LogNormal(w_mu, w_sigma).rsample()
+
+                # Shrink deviation from global mean: log(sens) + w*(obs-log(sens)) + enc
+                obs_contribution = log_sens + w * (log_obs_centered - log_sens)
+                lib = obs_contribution + lib_enc
+                ql = Normal(obs_contribution + ql_enc.loc, ql_enc.scale)
+                library[name] = lib
+                ql_per_modality[name] = ql
+            else:
+                library[name] = lib_enc
+                ql_per_modality[name] = ql_enc
 
         return {
             "z": z,
@@ -1037,8 +1093,24 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 kl_lib = kl_lib * masks[name].float()
             kl_l = kl_l + kl_lib
 
+        # ---- KL on residual library weight w (Change 3) ----
+        kl_w_total = torch.tensor(0.0, device=recon_loss.device)
+        if self.residual_library_encoder:
+            for name in self.modality_names:
+                if name not in ql_per_modality:
+                    continue
+                w_mu = self.library_obs_w_mu[name]
+                w_sigma = torch.exp(self.library_obs_w_log_sigma[name])
+                # KL(LogNormal(mu, sigma) || Exponential(rate))
+                # = -H(q) + rate * E_q[w] - log(rate)
+                q_w = LogNormal(w_mu, w_sigma)
+                exp_rate = self.library_obs_w_prior_rate
+                kl_w = -q_w.entropy() + exp_rate * q_w.mean - np.log(exp_rate)
+                kl_w_total = kl_w_total + kl_w
+                extra_metrics[f"library_obs_w_{name}"] = q_w.mean.detach()
+
         # ---- Weighted loss ----
-        loss = torch.mean(recon_loss + kl_weight * kl_z + kl_l)
+        loss = torch.mean(recon_loss + kl_weight * kl_z + kl_l) + kl_w_total
 
         # ---- Variational dispersion regularisation (replaces MAP with proper posterior) ----
         if self.regularise_dispersion:

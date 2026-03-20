@@ -175,6 +175,10 @@ class RegularizedMultimodalVI(
         # Data-dependent initialization
         init_decoder_bias: str | None = None,
         bg_init_gene_fraction: float | None = None,
+        decoder_bias_multiplier: dict[str, float] | None = None,
+        # Residual library encoder
+        residual_library_encoder: bool = False,
+        library_obs_w_prior_rate: float = 1.0,
         **kwargs,
     ):
         AmbientRegularizedSCVI._validate_bool_params(
@@ -200,6 +204,7 @@ class RegularizedMultimodalVI(
         # Store data-dependent init params for _init_module
         self._init_decoder_bias = init_decoder_bias
         self._bg_init_gene_fraction = bg_init_gene_fraction
+        self._decoder_bias_multiplier = decoder_bias_multiplier
 
         self._module_kwargs = {
             "n_hidden": n_hidden,
@@ -231,6 +236,8 @@ class RegularizedMultimodalVI(
             "learnable_modality_scaling": learnable_modality_scaling,
             "modality_scale_prior_concentration": modality_scale_prior_concentration,
             "decoder_weight_l2": decoder_weight_l2,
+            "residual_library_encoder": residual_library_encoder,
+            "library_obs_w_prior_rate": library_obs_w_prior_rate,
             **kwargs,
         }
 
@@ -420,6 +427,11 @@ class RegularizedMultimodalVI(
                     decoder_bias_init_dict[name] = np.nan_to_num(
                         decoder_bias_init_dict[name], nan=0.01, posinf=0.01, neginf=0.01
                     )
+                    # Change 2: optional per-modality decoder bias multiplier
+                    if self._decoder_bias_multiplier is not None:
+                        multiplier = self._decoder_bias_multiplier.get(name, 1.0)
+                        if multiplier != 1.0:
+                            decoder_bias_init_dict[name] = decoder_bias_init_dict[name] * multiplier
 
                 _bg_modalities = self._module_kwargs.get("additive_background_modalities", [])
                 if self._bg_init_gene_fraction is not None and name in _bg_modalities:
