@@ -452,30 +452,25 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         for name in self.modality_names:
             if name in library_log_means and name in library_log_vars:
                 means = torch.from_numpy(library_log_means[name]).float()
-                # Center library_log_means: subtract global mean, shift by log(sensitivity)
+                # ALWAYS center: subtract global mean, optionally shift by log(sensitivity)
                 _sens = _sensitivity.get(name, None)
-                if _sens is not None:
-                    global_log_mean = means.mean()
-                    means = means - global_log_mean + math.log(_sens)
-                    # Change 1: initialize library encoder bias to log(sensitivity)
-                    # so exp(library) starts at the correct scale per modality
-                    with torch.no_grad():
-                        self.l_encoders[name].mean_encoder.bias.fill_(np.log(_sens))
-                    # Change 3: store centering constants for residual library encoder
-                    if self.residual_library_encoder:
-                        self.register_buffer(
-                            f"library_global_log_mean_{name}",
-                            torch.tensor(global_log_mean.item()),
-                        )
-                        self.register_buffer(
-                            f"library_log_sensitivity_{name}",
-                            torch.tensor(np.log(_sens)),
-                        )
-                else:
-                    if self.residual_library_encoder:
-                        # No centering — store zeros so residual baseline = raw log_obs
-                        self.register_buffer(f"library_global_log_mean_{name}", torch.tensor(0.0))
-                        self.register_buffer(f"library_log_sensitivity_{name}", torch.tensor(0.0))
+                global_log_mean = means.mean()
+                log_sens = np.log(_sens) if _sens is not None else 0.0
+                means = means - global_log_mean + log_sens
+
+                # Change 1: initialize library encoder bias to centered scale
+                with torch.no_grad():
+                    self.l_encoders[name].mean_encoder.bias.fill_(log_sens)
+
+                # Always store centering constants
+                self.register_buffer(
+                    f"library_global_log_mean_{name}",
+                    torch.tensor(global_log_mean.item()),
+                )
+                self.register_buffer(
+                    f"library_log_sensitivity_{name}",
+                    torch.tensor(log_sens),
+                )
                 vars_ = torch.from_numpy(library_log_vars[name]).float()
                 if name in _vars_weight:
                     vars_ = vars_ * _vars_weight[name]

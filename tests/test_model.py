@@ -513,6 +513,81 @@ class TestAmbientRegularizedSCVI:
         assert "X_umap" in adata.obsm
         assert adata.obsm["X_umap"].shape == (adata.n_obs, 2)
 
+    def test_residual_library_encoder_single_modal(self, adata):
+        """Test residual_library_encoder creates params, trains, and logs metrics."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            residual_library_encoder=True,
+            library_log_means_centering_sensitivity=1.0,
+        )
+        module = model.module
+        assert module.residual_library_encoder is True
+        assert hasattr(module, "library_obs_w_mu")
+        assert hasattr(module, "library_obs_w_log_sigma")
+        assert hasattr(module, "library_global_log_mean")
+        assert hasattr(module, "library_log_sensitivity")
+        # global_log_mean should be actual data mean, not 0
+        assert module.library_global_log_mean.item() != 0.0
+        # Bias should be initialized to log(sensitivity) = 0 for sens=1.0
+        assert abs(module.l_encoder.mean_encoder.bias.item()) < 0.01
+        # Should train without errors
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+
+    def test_always_center_library_no_sensitivity(self, adata):
+        """Without sensitivity, library should still be centered (global_log_mean != 0)."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            # No sensitivity — library_log_means_centering_sensitivity=None (default)
+        )
+        module = model.module
+        # library_global_log_mean should be actual global mean, not 0
+        assert module.library_global_log_mean.item() != 0.0
+        # library_log_sensitivity should be 0 (no sensitivity shift)
+        assert module.library_log_sensitivity.item() == 0.0
+        # library_log_means should be centered around 0
+        assert abs(module.library_log_means.mean().item()) < 0.1
+
+    def test_decoder_bias_multiplier_single_modal(self, adata):
+        """Test decoder_bias_multiplier scales decoder bias init."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        # Without multiplier
+        model_base = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            init_decoder_bias="mean",
+        )
+        bias_base = model_base.module.decoder.px_scale_decoder[0].bias.data.clone()
+        # With 2x multiplier
+        model_2x = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            init_decoder_bias="mean",
+            decoder_bias_multiplier=2.0,
+        )
+        bias_2x = model_2x.module.decoder.px_scale_decoder[0].bias.data.clone()
+        # softplus_inv(2x) != 2 * softplus_inv(x) exactly, but 2x should be larger
+        assert bias_2x.mean().item() > bias_base.mean().item()
+
 
 class TestRegularizedVAEModule:
     """Tests for the RegularizedVAE module directly."""
@@ -981,6 +1056,9 @@ class TestGammaPoissonMode:
             # Buffers (library prior, shape (1, n_lib) from reshape(1, -1))
             "library_log_means": (1, n_lib),
             "library_log_vars": (1, n_lib),
+            # Centering constants (always registered)
+            "library_global_log_mean": (),
+            "library_log_sensitivity": (),
         }
 
         sd = model.module.state_dict()
@@ -1804,6 +1882,9 @@ class TestRegularizedMultimodalVI:
             # Buffers (register_buffer uses underscore naming)
             expected[f"library_log_means_{name}"] = (1, n_lib)
             expected[f"library_log_vars_{name}"] = (1, n_lib)
+            # Centering constants (always registered)
+            expected[f"library_global_log_mean_{name}"] = ()
+            expected[f"library_log_sensitivity_{name}"] = ()
 
         sd = model.module.state_dict()
 
@@ -2006,6 +2087,73 @@ class TestRegularizedMultimodalVI:
                 base_lr=1e-3,
                 modality_lr_multiplier={"protein": 2.0},
             )
+
+    def test_residual_library_encoder_multimodal(self, mdata):
+        """Test residual_library_encoder creates params, trains, and logs metrics."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            residual_library_encoder=True,
+            library_log_means_centering_sensitivity={"rna": 1.0, "atac": 0.2},
+        )
+        module = model.module
+        assert module.residual_library_encoder is True
+        assert set(module.library_obs_w_mu.keys()) == {"rna", "atac"}
+        assert set(module.library_obs_w_log_sigma.keys()) == {"rna", "atac"}
+        # global_log_mean should be actual data mean, not 0
+        for name in ["rna", "atac"]:
+            glm = getattr(module, f"library_global_log_mean_{name}")
+            assert glm.item() != 0.0, f"{name}: library_global_log_mean should not be 0"
+        # ATAC bias should be log(0.2)
+        import math
+
+        atac_bias = module.l_encoders["atac"].mean_encoder.bias.item()
+        assert abs(atac_bias - math.log(0.2)) < 0.01
+        # Should train without errors
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        # Check w metrics in history
+        assert "library_obs_w_rna_train" in model.history_
+        assert "library_obs_w_atac_train" in model.history_
+
+    def test_always_center_library_no_sensitivity_multimodal(self, mdata):
+        """Without sensitivity, library should still be centered."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            # No sensitivity
+        )
+        module = model.module
+        for name in ["rna", "atac"]:
+            glm = getattr(module, f"library_global_log_mean_{name}")
+            assert glm.item() != 0.0, f"{name}: global_log_mean should be actual mean, not 0"
+            ls = getattr(module, f"library_log_sensitivity_{name}")
+            assert ls.item() == 0.0, f"{name}: log_sensitivity should be 0 without centering"
+            means = getattr(module, f"library_log_means_{name}")
+            assert abs(means.mean().item()) < 0.1, f"{name}: means should be centered near 0"
+
+    def test_decoder_bias_multiplier_multimodal(self, mdata):
+        """Test decoder_bias_multiplier scales decoder bias init per modality."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model_base = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            init_decoder_bias="mean",
+        )
+        bias_base = model_base.module.decoders["atac"].px_scale_decoder[0].bias.data.clone()
+        model_2x = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            init_decoder_bias="mean",
+            decoder_bias_multiplier={"atac": 2.0},
+        )
+        bias_2x = model_2x.module.decoders["atac"].px_scale_decoder[0].bias.data.clone()
+        assert bias_2x.mean().item() > bias_base.mean().item()
 
 
 class TestWandBUtilities:

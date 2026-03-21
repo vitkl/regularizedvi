@@ -28,7 +28,7 @@ from scvi.module.base import (
     LossOutput,
     auto_move_data,
 )
-from torch.distributions import Exponential, Normal
+from torch.distributions import Exponential, LogNormal, Normal
 from torch.nn.functional import one_hot
 
 from regularizedvi._constants import (
@@ -268,6 +268,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         additive_bg_init_per_gene: np.ndarray | None = None,
         # Training metrics
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
+        # Residual library encoder: library = log(sens) + w*(obs-log(sens)) + encoder
+        residual_library_encoder: bool = False,
+        library_obs_w_prior_rate: float = 1.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -294,6 +297,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.additive_bg_prior_beta = additive_bg_prior_beta
         self.regularise_background = regularise_background
         self.decoder_weight_l2 = decoder_weight_l2
+        self.residual_library_encoder = residual_library_encoder
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
         self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
@@ -304,12 +308,21 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             if library_log_means is None or library_log_vars is None:
                 raise ValueError("If not using observed_lib_size, must provide library_log_means and library_log_vars.")
 
-            # Optionally center library_log_means: subtract global mean, shift by log(sensitivity)
-            # This makes exp(library) ≈ sensitivity at initialization instead of raw total counts.
+            # ALWAYS center: subtract global mean, optionally shift by log(sensitivity)
             log_means = torch.from_numpy(library_log_means).float()
-            if library_log_means_centering_sensitivity is not None:
-                global_log_mean = log_means.mean()
-                log_means = log_means - global_log_mean + math.log(library_log_means_centering_sensitivity)
+            global_log_mean = log_means.mean()
+            log_sens = (
+                np.log(library_log_means_centering_sensitivity)
+                if library_log_means_centering_sensitivity is not None
+                else 0.0
+            )
+            log_means = log_means - global_log_mean + log_sens
+
+            # Store centering constants (always, for bias init and residual encoder)
+            self._library_bias_init = log_sens  # applied after l_encoder creation
+            self.register_buffer("library_global_log_mean", torch.tensor(global_log_mean.item()))
+            self.register_buffer("library_log_sensitivity", torch.tensor(log_sens))
+
             self.register_buffer("library_log_means", log_means)
             # Scale library_log_vars by weight to constrain the prior
             log_vars = torch.from_numpy(library_log_vars).float()
@@ -482,6 +495,17 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             **_extra_encoder_kwargs,
         )
 
+        # Change 1: initialize library encoder bias to centered scale
+        if hasattr(self, "_library_bias_init"):
+            with torch.no_grad():
+                self.l_encoder.mean_encoder.bias.fill_(self._library_bias_init)
+
+        # Change 3: residual library encoder weight params
+        if self.residual_library_encoder:
+            self.library_obs_w_prior_rate = library_obs_w_prior_rate
+            self.library_obs_w_mu = torch.nn.Parameter(torch.tensor(0.0))  # E[w] ≈ 1
+            self.library_obs_w_log_sigma = torch.nn.Parameter(torch.tensor(-2.0))  # tight init
+
         # Decoder setup
         n_input_decoder = n_latent + n_continuous_cov
         if self.use_batch_in_decoder:
@@ -647,8 +671,27 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         ql = None
         if not self.use_observed_lib_size:
-            ql, library_encoded = self.l_encoder(encoder_input, *encoder_categorical_input)
-            library = library_encoded
+            ql_enc, lib_enc = self.l_encoder(encoder_input, *encoder_categorical_input)
+
+            if self.residual_library_encoder:
+                # Centered observed log-library (same scale as prior)
+                log_obs = torch.log(x.sum(dim=-1, keepdim=True).clamp(min=1.0))
+                glm = self.library_global_log_mean
+                ls = self.library_log_sensitivity
+                log_obs_centered = log_obs - glm + ls
+
+                # Sample w from LogNormal variational posterior
+                w_mu = self.library_obs_w_mu
+                w_sigma = torch.exp(self.library_obs_w_log_sigma)
+                w = LogNormal(w_mu, w_sigma).rsample()
+
+                # Shrink deviation from global mean: ls + w*(obs_c - ls) + enc
+                obs_contribution = ls + w * (log_obs_centered - ls)
+                library = obs_contribution + lib_enc
+                ql = Normal(obs_contribution + ql_enc.loc, ql_enc.scale)
+            else:
+                ql = ql_enc
+                library = lib_enc
 
         if n_samples > 1:
             untran_z = qz.sample((n_samples,))
@@ -859,7 +902,16 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         weighted_kl_local = kl_weight * kl_local_for_warmup + kl_local_no_warmup
 
-        loss = torch.mean(reconst_loss + weighted_kl_local)
+        # KL on residual library weight w
+        kl_w_total = torch.tensor(0.0, device=x.device)
+        if self.residual_library_encoder and not self.use_observed_lib_size:
+            w_mu = self.library_obs_w_mu
+            w_sigma = torch.exp(self.library_obs_w_log_sigma)
+            q_w = LogNormal(w_mu, w_sigma)
+            exp_rate = self.library_obs_w_prior_rate
+            kl_w_total = -q_w.entropy() + exp_rate * q_w.mean - np.log(exp_rate)
+
+        loss = torch.mean(reconst_loss + weighted_kl_local) + kl_w_total
 
         # Variational dispersion regularisation (replaces MAP with proper posterior).
         # Two-level prior:

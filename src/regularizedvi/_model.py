@@ -233,6 +233,10 @@ class AmbientRegularizedSCVI(
         # Data-dependent initialization
         init_decoder_bias: str | None = None,
         bg_init_gene_fraction: float | None = None,
+        decoder_bias_multiplier: float | None = None,
+        # Residual library encoder
+        residual_library_encoder: bool = False,
+        library_obs_w_prior_rate: float = 1.0,
         **kwargs,
     ):
         self._validate_bool_params(
@@ -277,8 +281,11 @@ class AmbientRegularizedSCVI(
             "additive_bg_init_mean": additive_bg_init_mean,
             "additive_bg_init_std": additive_bg_init_std,
             "decoder_weight_l2": decoder_weight_l2,
+            "residual_library_encoder": residual_library_encoder,
+            "library_obs_w_prior_rate": library_obs_w_prior_rate,
             **kwargs,
         }
+        self._decoder_bias_multiplier = decoder_bias_multiplier
         self._model_summary_string = (
             "AmbientRegularizedSCVI model with the following parameters: \n"
             f"n_hidden: {n_hidden}, n_latent: {n_latent}, n_layers: {n_layers}, "
@@ -401,6 +408,9 @@ class AmbientRegularizedSCVI(
                         top_vals = np.partition(col, -n_top)[-n_top:]
                         decoder_bias_init[g] = top_vals.mean()
                 decoder_bias_init = np.nan_to_num(decoder_bias_init, nan=0.01, posinf=0.01, neginf=0.01)
+                # Change 2: optional decoder bias multiplier
+                if self._decoder_bias_multiplier is not None and self._decoder_bias_multiplier != 1.0:
+                    decoder_bias_init = decoder_bias_init * self._decoder_bias_multiplier
 
             if bg_init_gene_fraction is not None and norm_data is not None:
                 # Compute per-gene, per-ambient-category background init.
@@ -490,6 +500,8 @@ class AmbientRegularizedSCVI(
                 decoder_weight_l2=decoder_weight_l2,
                 decoder_bias_init=decoder_bias_init,
                 additive_bg_init_per_gene=bg_init_per_gene,
+                residual_library_encoder=residual_library_encoder,
+                library_obs_w_prior_rate=library_obs_w_prior_rate,
                 **kwargs,
             )
             self.module.minified_data_type = self.minified_data_type
