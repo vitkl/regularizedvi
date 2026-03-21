@@ -262,14 +262,14 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         additive_bg_init_mean: float | None = None,
         additive_bg_init_std: float | None = None,
         # Decoder weight regularization
-        decoder_weight_l2: float = 0.0,
+        decoder_weight_l2: float = 0.1,
         # Data-dependent initialization
         decoder_bias_init: np.ndarray | None = None,
         additive_bg_init_per_gene: np.ndarray | None = None,
         # Training metrics
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
         # Residual library encoder: library = log(sens) + w*(obs-log(sens)) + encoder
-        residual_library_encoder: bool = False,
+        residual_library_encoder: bool = True,
         library_obs_w_prior_rate: float = 1.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder

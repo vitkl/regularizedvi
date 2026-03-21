@@ -221,12 +221,12 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         learnable_modality_scaling: bool = False,
         modality_scale_prior_concentration: float = 5.0,
         # Decoder weight regularization
-        decoder_weight_l2: float = 0.0,
+        decoder_weight_l2: float = 0.1,
         # Data-dependent initialization
         decoder_bias_init: dict[str, np.ndarray] | None = None,
         additive_bg_init_per_gene: dict[str, np.ndarray] | None = None,
         # Residual library encoder: library = log(sens) + w*(obs-log(sens)) + encoder
-        residual_library_encoder: bool = False,
+        residual_library_encoder: bool = True,
         library_obs_w_prior_rate: float = 1.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder

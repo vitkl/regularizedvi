@@ -650,9 +650,9 @@ class TestParameterInitialization:
         assert theta.median().item() < 3.0
 
     def test_additive_background_init_at_prior_mean(self, adata):
-        """Additive background should be initialized near Gamma(1,100) mean=0.01."""
+        """Without bg_init_gene_fraction, background should be at Gamma(1,100) mean=0.01."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
-        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, bg_init_gene_fraction=None)
         bg = torch.exp(model.module.additive_background).detach()
         assert bg.mean().item() == pytest.approx(0.01, rel=0.2)
         # Noise is very small
@@ -676,10 +676,14 @@ class TestParameterInitialization:
             assert theta.mean().item() == pytest.approx(9.0, rel=0.2), f"Failed for {name}"
 
     def test_additive_background_init_multimodal(self, mdata):
-        """Multimodal additive background should be initialized near Gamma(1,100) mean=0.01."""
+        """Without bg_init, multimodal background should be at Gamma(1,100) mean=0.01."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(
-            mdata, n_hidden=16, n_latent=4, additive_background_modalities=["rna"]
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            additive_background_modalities=["rna"],
+            bg_init_gene_fraction=None,
         )
         # additive_background["rna"] is a single Parameter with concatenated ambient categories.
         # With batch_key backward compat, there is one ambient covariate = batch_key.
@@ -722,10 +726,15 @@ class TestParameterInitialization:
         assert model.module.additive_bg_prior_beta == 100.0
 
     def test_additive_bg_custom_prior(self, adata):
-        """Additive background init adapts to custom prior."""
+        """Additive background init adapts to custom prior (without bg_init_gene_fraction)."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
         model = regularizedvi.AmbientRegularizedSCVI(
-            adata, n_hidden=16, n_latent=4, additive_bg_prior_alpha=2.0, additive_bg_prior_beta=50.0
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            additive_bg_prior_alpha=2.0,
+            additive_bg_prior_beta=50.0,
+            bg_init_gene_fraction=None,
         )
         # Gamma(2, 50) → mean = 0.04
         bg = torch.exp(model.module.additive_background).detach()
@@ -763,11 +772,11 @@ class TestParameterInitialization:
 class TestDecoderRegularization:
     """Tests for decoder weight L2 penalty, bias init, and gene-specific bg init."""
 
-    def test_decoder_weight_l2_default_zero(self, adata):
-        """Default decoder_weight_l2=0 should not add penalty to loss."""
+    def test_decoder_weight_l2_default(self, adata):
+        """Default decoder_weight_l2=0.1."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
         model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
-        assert model.module.decoder_weight_l2 == 0.0
+        assert model.module.decoder_weight_l2 == 0.1
 
     def test_decoder_weight_l2_penalty_positive(self, adata):
         """With decoder_weight_l2 > 0, penalty should be logged in history."""
@@ -805,37 +814,52 @@ class TestDecoderRegularization:
         penalty = model.module._decoder_weight_l2_penalty()
         assert penalty.item() > 0
 
-    def test_init_decoder_bias_mean(self, adata):
-        """init_decoder_bias='mean' should set decoder bias to non-default values."""
+    def test_init_decoder_bias_all_options(self, adata):
+        """Test all 3 init_decoder_bias options: None, 'mean' (default), 'topN'."""
         import torch
 
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model_none = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, init_decoder_bias=None)
+        model_mean = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, init_decoder_bias="mean")
+        model_topn = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, init_decoder_bias="topN")
+        bias_none = model_none.module.decoder.px_scale_decoder[0].bias.detach()
+        bias_mean = model_mean.module.decoder.px_scale_decoder[0].bias.detach()
+        bias_topn = model_topn.module.decoder.px_scale_decoder[0].bias.detach()
+        # None vs mean: should differ (Kaiming vs data-dependent)
+        assert not torch.allclose(bias_none, bias_mean)
+        # None vs topN: should differ
+        assert not torch.allclose(bias_none, bias_topn)
+        # mean vs topN: should differ (different data statistics)
+        assert not torch.allclose(bias_mean, bias_topn)
+        # All should be finite
+        assert torch.all(torch.isfinite(bias_none))
+        assert torch.all(torch.isfinite(bias_mean))
+        assert torch.all(torch.isfinite(bias_topn))
+        # Default model should use "mean"
         model_default = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
-        model_init = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, init_decoder_bias="mean")
         bias_default = model_default.module.decoder.px_scale_decoder[0].bias.detach()
-        bias_init = model_init.module.decoder.px_scale_decoder[0].bias.detach()
-        # Biases should differ (data-dependent vs Kaiming)
-        assert not torch.allclose(bias_default, bias_init)
-
-    def test_init_decoder_bias_topN(self, adata):
-        """init_decoder_bias='topN' should set decoder bias to non-default values."""
-        import torch
-
-        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
-        model_init = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, init_decoder_bias="topN")
-        bias = model_init.module.decoder.px_scale_decoder[0].bias.detach()
-        # TopN init should produce positive softplus values
-        assert torch.all(torch.isfinite(bias))
+        assert torch.allclose(bias_default, bias_mean)
 
     def test_bg_init_gene_fraction(self, adata):
-        """bg_init_gene_fraction should make background params vary per gene."""
+        """bg_init_gene_fraction: default (0.2), explicit 0.2, and None should all work."""
 
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
-        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, bg_init_gene_fraction=0.2)
-        bg = model.module.additive_background.detach()
+        # Explicit 0.2
+        model_02 = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, bg_init_gene_fraction=0.2)
+        bg_02 = model_02.module.additive_background.detach()
         # Per-gene init should create variation across genes
-        col_means = bg[:, 0]
-        assert col_means.std() > 0.01  # not constant
+        assert bg_02[:, 0].std() > 0.01  # not constant
+
+        # None (off) — should init at prior mean log(0.01)
+        model_none = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, bg_init_gene_fraction=None)
+        bg_none = model_none.module.additive_background.detach()
+        # Without data-dependent init, bg should be near constant (prior mean)
+        assert bg_none[:, 0].std() < 0.05
+
+        # Default (bg_init_gene_fraction=0.2) should also produce per-gene variation
+        model_default = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        bg_default = model_default.module.additive_background.detach()
+        assert bg_default[:, 0].std() > 0.01  # data-dependent, not constant
 
     def test_init_decoder_bias_multimodal(self, mdata):
         """Multimodal bias init should work per modality."""
@@ -1060,6 +1084,9 @@ class TestGammaPoissonMode:
             # Centering constants (always registered)
             "library_global_log_mean": (),
             "library_log_sensitivity": (),
+            # Residual library encoder weight (default on)
+            "library_obs_w_mu": (),
+            "library_obs_w_log_sigma": (),
         }
 
         sd = model.module.state_dict()
@@ -1886,6 +1913,9 @@ class TestRegularizedMultimodalVI:
             # Centering constants (always registered)
             expected[f"library_global_log_mean_{name}"] = ()
             expected[f"library_log_sensitivity_{name}"] = ()
+            # Residual library encoder weight (default on, ParameterDict)
+            expected[f"library_obs_w_mu.{name}"] = ()
+            expected[f"library_obs_w_log_sigma.{name}"] = ()
 
         sd = model.module.state_dict()
 

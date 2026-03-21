@@ -229,13 +229,13 @@ class AmbientRegularizedSCVI(
         additive_bg_init_mean: float | None = None,
         additive_bg_init_std: float | None = None,
         # Decoder weight regularization
-        decoder_weight_l2: float = 0.0,
+        decoder_weight_l2: float = 0.1,
         # Data-dependent initialization
-        init_decoder_bias: str | None = None,
-        bg_init_gene_fraction: float | None = None,
+        init_decoder_bias: str | None = "mean",
+        bg_init_gene_fraction: float | None = 0.2,
         decoder_bias_multiplier: float | None = None,
         # Residual library encoder
-        residual_library_encoder: bool = False,
+        residual_library_encoder: bool = True,
         library_obs_w_prior_rate: float = 1.0,
         **kwargs,
     ):

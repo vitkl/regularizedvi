@@ -171,13 +171,13 @@ class RegularizedMultimodalVI(
         learnable_modality_scaling: bool = False,
         modality_scale_prior_concentration: float = DEFAULT_MODALITY_SCALE_PRIOR_CONCENTRATION,
         # Decoder weight regularization
-        decoder_weight_l2: float = 0.0,
+        decoder_weight_l2: float = 0.1,
         # Data-dependent initialization
-        init_decoder_bias: str | None = None,
-        bg_init_gene_fraction: float | None = None,
+        init_decoder_bias: str | None = "mean",
+        bg_init_gene_fraction: float | None = 0.2,
         decoder_bias_multiplier: dict[str, float] | None = None,
         # Residual library encoder
-        residual_library_encoder: bool = False,
+        residual_library_encoder: bool = True,
         library_obs_w_prior_rate: float = 1.0,
         **kwargs,
     ):
