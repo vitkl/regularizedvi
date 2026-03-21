@@ -537,8 +537,9 @@ class TestAmbientRegularizedSCVI:
         assert module.library_global_log_mean.item() != 0.0
         # Bias should be initialized to log(sensitivity) = 0 for sens=1.0
         assert abs(module.l_encoder.mean_encoder.bias.item()) < 0.01
-        # Should train without errors
+        # Should train without errors and log w metric
         model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "library_obs_w_train" in model.history_
 
     def test_always_center_library_no_sensitivity(self, adata):
         """Without sensitivity, library should still be centered (global_log_mean != 0)."""

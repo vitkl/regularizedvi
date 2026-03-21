@@ -910,6 +910,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             q_w = LogNormal(w_mu, w_sigma)
             exp_rate = self.library_obs_w_prior_rate
             kl_w_total = -q_w.entropy() + exp_rate * q_w.mean - np.log(exp_rate)
+            self._library_obs_w_mean = q_w.mean.detach()  # for metric logging below
 
         loss = torch.mean(reconst_loss + weighted_kl_local) + kl_w_total
 
@@ -1001,6 +1002,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         if self.decoder_weight_l2 > 0.0:
             extra_metrics_payload["decoder_weight_penalty"] = (decoder_w_penalty / n_obs).detach()
+
+        if self.residual_library_encoder and hasattr(self, "_library_obs_w_mean"):
+            extra_metrics_payload["library_obs_w"] = self._library_obs_w_mean
 
         # Pearson correlation metrics (gene-wise and cell-wise)
         # Normalize to per-cell proportions to remove library size confound:
