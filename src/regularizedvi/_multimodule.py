@@ -222,6 +222,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         modality_scale_prior_concentration: float = 5.0,
         # Decoder weight regularization
         decoder_weight_l2: float = 0.1,
+        decoder_cov_weight_l2: float = 0.0,
         # Data-dependent initialization
         decoder_bias_init: dict[str, np.ndarray] | None = None,
         additive_bg_init_per_gene: dict[str, np.ndarray] | None = None,
@@ -269,6 +270,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.additive_bg_prior_beta = additive_bg_prior_beta
         self.regularise_background = regularise_background
         self.decoder_weight_l2 = decoder_weight_l2
+        self.decoder_cov_weight_l2 = decoder_cov_weight_l2
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
         self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
@@ -592,6 +594,25 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     if isinstance(sublayer, nn.Linear):
                         penalty = penalty + sublayer.weight.pow(2).sum()
             penalty = penalty + decoder.px_scale_decoder[0].weight.pow(2).sum()
+        return penalty
+
+    def _decoder_cov_weight_l2_penalty(self) -> torch.Tensor:
+        """Sum of squared weights for covariate columns of decoder layer 0 (all modalities)."""
+        penalty = torch.tensor(0.0, device=next(self.parameters()).device)
+        for decoder in self.decoders.values():
+            cat_dim = sum(decoder.px_decoder.n_cat_list)
+            if cat_dim == 0:
+                continue
+            layer0 = decoder.px_decoder.fc_layers[0]
+            for sublayer in layer0:
+                if isinstance(sublayer, nn.Linear):
+                    W = sublayer.weight
+                    assert W.shape[1] > cat_dim, (
+                        f"Decoder layer 0 weight has {W.shape[1]} columns but cat_dim={cat_dim}"
+                    )
+                    cov_weights = W[:, -cat_dim:]
+                    penalty = penalty + cov_weights.pow(2).sum()
+                    break
         return penalty
 
     def _get_inference_input(
@@ -1190,6 +1211,12 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             decoder_w_penalty = self.decoder_weight_l2 * self._decoder_weight_l2_penalty()
             loss = loss + decoder_w_penalty / n_obs
             extra_metrics["decoder_weight_penalty"] = (decoder_w_penalty / n_obs).detach()
+
+        # ---- Decoder covariate weight L2 penalty ----
+        if self.decoder_cov_weight_l2 > 0.0:
+            decoder_cov_penalty = self.decoder_cov_weight_l2 * self._decoder_cov_weight_l2_penalty()
+            loss = loss + decoder_cov_penalty / n_obs
+            extra_metrics["decoder_cov_weight_penalty"] = (decoder_cov_penalty / n_obs).detach()
 
         # ---- Modality scaling Gamma prior ----
         if self.learnable_modality_scaling and self.modality_scale_init:

@@ -230,6 +230,7 @@ class AmbientRegularizedSCVI(
         additive_bg_init_std: float | None = None,
         # Decoder weight regularization
         decoder_weight_l2: float = 0.1,
+        decoder_cov_weight_l2: float = 0.0,
         # Data-dependent initialization
         init_decoder_bias: str | None = "mean",
         bg_init_gene_fraction: float | None = 0.2,
@@ -281,6 +282,7 @@ class AmbientRegularizedSCVI(
             "additive_bg_init_mean": additive_bg_init_mean,
             "additive_bg_init_std": additive_bg_init_std,
             "decoder_weight_l2": decoder_weight_l2,
+            "decoder_cov_weight_l2": decoder_cov_weight_l2,
             "residual_library_encoder": residual_library_encoder,
             "library_obs_w_prior_rate": library_obs_w_prior_rate,
             **kwargs,
@@ -498,6 +500,7 @@ class AmbientRegularizedSCVI(
                 additive_bg_init_mean=additive_bg_init_mean,
                 additive_bg_init_std=additive_bg_init_std,
                 decoder_weight_l2=decoder_weight_l2,
+                decoder_cov_weight_l2=decoder_cov_weight_l2,
                 decoder_bias_init=decoder_bias_init,
                 additive_bg_init_per_gene=bg_init_per_gene,
                 residual_library_encoder=residual_library_encoder,

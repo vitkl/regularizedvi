@@ -263,6 +263,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         additive_bg_init_std: float | None = None,
         # Decoder weight regularization
         decoder_weight_l2: float = 0.1,
+        decoder_cov_weight_l2: float = 0.0,
         # Data-dependent initialization
         decoder_bias_init: np.ndarray | None = None,
         additive_bg_init_per_gene: np.ndarray | None = None,
@@ -297,6 +298,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.additive_bg_prior_beta = additive_bg_prior_beta
         self.regularise_background = regularise_background
         self.decoder_weight_l2 = decoder_weight_l2
+        self.decoder_cov_weight_l2 = decoder_cov_weight_l2
         self.residual_library_encoder = residual_library_encoder
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
@@ -562,6 +564,20 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                     penalty = penalty + sublayer.weight.pow(2).sum()
         penalty = penalty + self.decoder.px_scale_decoder[0].weight.pow(2).sum()
         return penalty
+
+    def _decoder_cov_weight_l2_penalty(self) -> torch.Tensor:
+        """Sum of squared weights for covariate columns of decoder layer 0."""
+        cat_dim = sum(self.decoder.px_decoder.n_cat_list)
+        if cat_dim == 0:
+            return torch.tensor(0.0, device=next(self.decoder.parameters()).device)
+        layer0 = self.decoder.px_decoder.fc_layers[0]
+        for sublayer in layer0:
+            if isinstance(sublayer, torch.nn.Linear):
+                W = sublayer.weight
+                assert W.shape[1] > cat_dim, f"Decoder layer 0 weight has {W.shape[1]} columns but cat_dim={cat_dim}"
+                cov_weights = W[:, -cat_dim:]
+                return cov_weights.pow(2).sum()
+        return torch.tensor(0.0, device=next(self.decoder.parameters()).device)
 
     def _get_inference_input(
         self,
@@ -991,6 +1007,11 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             decoder_w_penalty = self.decoder_weight_l2 * self._decoder_weight_l2_penalty()
             loss = loss + decoder_w_penalty / n_obs
 
+        # Decoder covariate weight L2 penalty
+        if self.decoder_cov_weight_l2 > 0.0:
+            decoder_cov_penalty = self.decoder_cov_weight_l2 * self._decoder_cov_weight_l2_penalty()
+            loss = loss + decoder_cov_penalty / n_obs
+
         # a payload to be used during autotune
         if self.extra_payload_autotune:
             extra_metrics_payload = {
@@ -1002,6 +1023,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         if self.decoder_weight_l2 > 0.0:
             extra_metrics_payload["decoder_weight_penalty"] = (decoder_w_penalty / n_obs).detach()
+
+        if self.decoder_cov_weight_l2 > 0.0:
+            extra_metrics_payload["decoder_cov_weight_penalty"] = (decoder_cov_penalty / n_obs).detach()
 
         if self.residual_library_encoder and hasattr(self, "_library_obs_w_mean"):
             extra_metrics_payload["library_obs_w"] = self._library_obs_w_mean

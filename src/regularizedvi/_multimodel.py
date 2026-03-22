@@ -60,6 +60,8 @@ from regularizedvi._training_plan import MultimodalTrainingPlan
 if TYPE_CHECKING:
     from typing import Literal
 
+    import pandas as pd
+
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +174,7 @@ class RegularizedMultimodalVI(
         modality_scale_prior_concentration: float = DEFAULT_MODALITY_SCALE_PRIOR_CONCENTRATION,
         # Decoder weight regularization
         decoder_weight_l2: float = 0.1,
+        decoder_cov_weight_l2: float = 0.0,
         # Data-dependent initialization
         init_decoder_bias: str | None = "mean",
         bg_init_gene_fraction: float | None = 0.2,
@@ -236,6 +239,7 @@ class RegularizedMultimodalVI(
             "learnable_modality_scaling": learnable_modality_scaling,
             "modality_scale_prior_concentration": modality_scale_prior_concentration,
             "decoder_weight_l2": decoder_weight_l2,
+            "decoder_cov_weight_l2": decoder_cov_weight_l2,
             "residual_library_encoder": residual_library_encoder,
             "library_obs_w_prior_rate": library_obs_w_prior_rate,
             **kwargs,
@@ -963,6 +967,8 @@ class RegularizedMultimodalVI(
         indices=None,
         batch_size: int | None = None,
         eps: float = 1e-3,
+        remove_covariates: str | bool = False,
+        covariate_reference: str = "zero",
     ) -> dict[str, dict[str, np.ndarray]]:
         """Compute decoder Jacobian attribution per modality.
 
@@ -984,6 +990,22 @@ class RegularizedMultimodalVI(
             Batch size for data loading.
         eps
             Finite difference step size for Jacobian approximation.
+        remove_covariates
+            Which covariates to remove from decoder computation so that the
+            Jacobian reflects only the z -> rate mapping without covariate
+            confounds. Options:
+
+            - ``False`` (default): keep all covariates as-is (original behavior).
+            - ``"cat_covs"``: replace categorical covariates only.
+            - ``"feature_scaling"``: replace feature scaling covariates only.
+            - ``"all"`` or ``True``: replace both categorical and feature scaling.
+        covariate_reference
+            How to replace removed covariates. Only used when
+            ``remove_covariates`` is not ``False``. Options:
+
+            - ``"zero"``: zero out one-hot encodings (or skip feature scaling).
+            - ``"mean"``: use uniform distribution across categories.
+            - ``"reference"``: use the most common level per covariate column.
 
         Returns
         -------
@@ -1000,6 +1022,52 @@ class RegularizedMultimodalVI(
         self.module.eval()
         device = next(self.module.parameters()).device
         n_latent = self.module.total_latent_dim
+
+        # --- Validate and parse remove_covariates ---
+        if remove_covariates is True:
+            remove_covariates = "all"
+        if remove_covariates not in (False, "cat_covs", "feature_scaling", "all"):
+            msg = (
+                f"remove_covariates must be False, 'cat_covs', 'feature_scaling', 'all', or True. "
+                f"Got {remove_covariates!r}"
+            )
+            raise ValueError(msg)
+        if covariate_reference not in ("zero", "mean", "reference"):
+            msg = f"covariate_reference must be 'zero', 'mean', or 'reference'. Got {covariate_reference!r}"
+            raise ValueError(msg)
+
+        _remove_cat = remove_covariates in ("cat_covs", "all")
+        _remove_fs = remove_covariates in ("feature_scaling", "all")
+
+        # --- For "reference" mode, find most common level per covariate column ---
+        _cat_ref_indices = None
+        _fs_ref_indices = None
+        if covariate_reference == "reference":
+            if _remove_cat and REGISTRY_KEYS.CAT_COVS_KEY in self.adata_manager.data_registry:
+                cat_data = self.adata_manager.get_from_registry(REGISTRY_KEYS.CAT_COVS_KEY)
+                _cat_ref_indices = []
+                for col_i in range(cat_data.shape[1]):
+                    col = cat_data[:, col_i]
+                    if hasattr(col, "numpy"):
+                        col = col.numpy()
+                    vals, counts = np.unique(col, return_counts=True)
+                    _cat_ref_indices.append(int(vals[np.argmax(counts)]))
+
+            if _remove_fs and FEATURE_SCALING_COVS_KEY in self.adata_manager.data_registry:
+                fs_data = self.adata_manager.get_from_registry(FEATURE_SCALING_COVS_KEY)
+                _fs_ref_indices = []
+                for col_i in range(fs_data.shape[1]):
+                    col = fs_data[:, col_i]
+                    if hasattr(col, "numpy"):
+                        col = col.numpy()
+                    vals, counts = np.unique(col, return_counts=True)
+                    _fs_ref_indices.append(int(vals[np.argmax(counts)]))
+
+        # --- Get decoder n_cat_list for building replacement categoricals ---
+        _decoder_n_cat_list = None
+        if _remove_cat:
+            first_mod = self.module.modality_names[0]
+            _decoder_n_cat_list = list(self.module.decoders[first_mod].px_decoder.n_cat_list)
 
         all_z = []
         importances = {name: [] for name in self.module.modality_names}
@@ -1040,16 +1108,66 @@ class RegularizedMultimodalVI(
             cont_covs = tensors.get(REGISTRY_KEYS.CONT_COVS_KEY)
             cat_covs = tensors.get(REGISTRY_KEYS.CAT_COVS_KEY)
             ambient_covs = tensors.get(AMBIENT_COVS_KEY)
+            bs = z.shape[0]
 
             # Prepare categorical inputs (independent of z)
-            if cat_covs is not None:
+            if _remove_cat and _decoder_n_cat_list is not None and cat_covs is not None:
+                # Build replacement categorical tensors that bypass one-hot encoding
+                # in FCLayers.forward() by passing tensors with size(1) == n_cat
+                categorical_input = []
+                cov_i = 0
+                for n_cat in _decoder_n_cat_list:
+                    if n_cat > 1:
+                        if covariate_reference == "zero":
+                            categorical_input.append(torch.zeros(bs, n_cat, device=device))
+                        elif covariate_reference == "mean":
+                            categorical_input.append(torch.full((bs, n_cat), 1.0 / n_cat, device=device))
+                        elif covariate_reference == "reference":
+                            ref_tensor = torch.zeros(bs, n_cat, device=device)
+                            ref_idx = _cat_ref_indices[cov_i] if _cat_ref_indices is not None else 0
+                            ref_tensor[:, ref_idx] = 1.0
+                            categorical_input.append(ref_tensor)
+                        cov_i += 1
+                    else:
+                        # n_cat < 2: pass original (ignored by FCLayers anyway)
+                        if cat_covs is not None:
+                            categorical_input.append(cat_covs[:, cov_i : cov_i + 1])
+                        cov_i += 1
+                categorical_input = tuple(categorical_input)
+            elif cat_covs is not None:
                 categorical_input = torch.split(cat_covs, 1, dim=1)
             else:
                 categorical_input = ()
 
             # Build scaling covariate indicator (cell2location obs2extra_categoricals)
+            skip_feature_scaling = False
             feature_scaling_covs = tensors.get(FEATURE_SCALING_COVS_KEY)
-            if feature_scaling_covs is not None and self.module.n_total_feature_scaling_cats > 0:
+            if _remove_fs:
+                if covariate_reference == "zero":
+                    feature_scaling_indicator = None
+                    skip_feature_scaling = True
+                elif covariate_reference == "mean":
+                    if self.module.n_total_feature_scaling_cats > 0:
+                        feature_scaling_indicator = torch.cat(
+                            [
+                                torch.full((bs, n_cats), 1.0 / n_cats, device=device)
+                                for n_cats in self.module.n_cats_per_feature_scaling_cov
+                            ],
+                            dim=-1,
+                        )
+                    else:
+                        feature_scaling_indicator = None
+                elif covariate_reference == "reference":
+                    if self.module.n_total_feature_scaling_cats > 0 and _fs_ref_indices is not None:
+                        indicator_parts = []
+                        for col_i, n_cats in enumerate(self.module.n_cats_per_feature_scaling_cov):
+                            ref_oh = torch.zeros(bs, n_cats, device=device)
+                            ref_oh[:, _fs_ref_indices[col_i]] = 1.0
+                            indicator_parts.append(ref_oh)
+                        feature_scaling_indicator = torch.cat(indicator_parts, dim=-1)
+                    else:
+                        feature_scaling_indicator = None
+            elif feature_scaling_covs is not None and self.module.n_total_feature_scaling_cats > 0:
                 feature_scaling_indicator = torch.cat(
                     [
                         one_hot(feature_scaling_covs[:, i].long(), n_cats).float()
@@ -1070,6 +1188,7 @@ class RegularizedMultimodalVI(
                 bg,
                 cont_covs,
                 feature_scaling_indicator,
+                skip_feature_scaling=False,
             ):
                 """Create a closure that computes decoder rate for a given z."""
 
@@ -1102,7 +1221,7 @@ class RegularizedMultimodalVI(
                             additive_background=bg,
                         )
 
-                    if name in module.feature_scaling:
+                    if not skip_feature_scaling and name in module.feature_scaling:
                         rf_transformed = torch.nn.functional.softplus(module.feature_scaling[name]) / 0.7
                         if feature_scaling_indicator is not None:
                             scaling = torch.matmul(feature_scaling_indicator, rf_transformed)
@@ -1121,9 +1240,12 @@ class RegularizedMultimodalVI(
                 disp = self.module.dispersion_dict[name]
                 lib = library[name]
 
-                # Additive background (independent of z)
+                # Additive background (independent of z, d(bg)/dz=0)
                 bg = None
-                if name in self.module.additive_background and ambient_covs is not None:
+                if _remove_cat or remove_covariates == "all":
+                    # bg doesn't affect Jacobian (additive, z-independent), skip
+                    bg = None
+                elif name in self.module.additive_background and ambient_covs is not None:
                     concat_ambient = torch.cat(
                         [
                             one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float()
@@ -1143,6 +1265,7 @@ class RegularizedMultimodalVI(
                     bg,
                     cont_covs,
                     feature_scaling_indicator,
+                    skip_feature_scaling=skip_feature_scaling,
                 )
 
                 # Baseline decoder rate
@@ -1253,6 +1376,7 @@ class RegularizedMultimodalVI(
         adata,
         attribution: dict | None = None,
         batch_size: int = 256,
+        suffix: str = "",
     ) -> dict:
         """Compute attribution and store results in ``adata``.
 
@@ -1262,11 +1386,11 @@ class RegularizedMultimodalVI(
 
         For each modality stores:
 
-        - ``X_multiVI_attr_{name}`` in obsm — attribution-weighted latent
-        - ``{name}_decoder_total_attr`` in obs — total attribution per cell
-        - ``{name}_decoder_own_attr`` in obs — attribution from own Z dims
+        - ``X_multiVI_attr_{name}{suffix}`` in obsm — attribution-weighted latent
+        - ``{name}_decoder_total_attr{suffix}`` in obs — total attribution per cell
+        - ``{name}_decoder_own_attr{suffix}`` in obs — attribution from own Z dims
 
-        If exactly 2 modalities, also stores ``log2_{mod0}_vs_{mod1}_attr``.
+        If exactly 2 modalities, also stores ``log2_{mod0}_vs_{mod1}_attr{suffix}``.
 
         Parameters
         ----------
@@ -1277,6 +1401,9 @@ class RegularizedMultimodalVI(
             If None, computes it (requires GPU).
         batch_size
             Batch size for attribution computation (if not pre-computed).
+        suffix
+            Suffix to append to all stored keys. Use e.g. ``"_nocov"`` to store
+            covariate-removed attribution alongside the default results.
 
         Returns
         -------
@@ -1290,14 +1417,14 @@ class RegularizedMultimodalVI(
 
         # Store attribution-weighted latents
         for name in self.module.modality_names:
-            adata.obsm[f"X_multiVI_attr_{name}"] = attribution[name]["weighted_z"]
+            adata.obsm[f"X_multiVI_attr_{name}{suffix}"] = attribution[name]["weighted_z"]
 
         # Per-modality importance scores
         total_attrs = {}
         for name in self.module.modality_names:
             attr = attribution[name]["attribution"]
             total = attr.sum(axis=1)
-            adata.obs[f"{name}_decoder_total_attr"] = total
+            adata.obs[f"{name}_decoder_total_attr{suffix}"] = total
             total_attrs[name] = total
 
             # Own-modality attribution: find column offset for this modality's Z dims
@@ -1305,14 +1432,14 @@ class RegularizedMultimodalVI(
             for mod_name in self.module.modality_names:
                 n = self.module.n_latent_dict[mod_name]
                 if mod_name == name:
-                    adata.obs[f"{name}_decoder_own_attr"] = attr[:, offset : offset + n].sum(axis=1)
+                    adata.obs[f"{name}_decoder_own_attr{suffix}"] = attr[:, offset : offset + n].sum(axis=1)
                     break
                 offset += n
 
         # Log2 ratio for 2-modality case
         if len(self.module.modality_names) == 2:
             mod0, mod1 = self.module.modality_names
-            adata.obs[f"log2_{mod0}_vs_{mod1}_attr"] = np.log2(total_attrs[mod0] / (total_attrs[mod1] + 1e-10))
+            adata.obs[f"log2_{mod0}_vs_{mod1}_attr{suffix}"] = np.log2(total_attrs[mod0] / (total_attrs[mod1] + 1e-10))
 
         return attribution
 
@@ -1322,29 +1449,33 @@ class RegularizedMultimodalVI(
         n_neighbors: int = 50,
         min_dist: float = 0.4,
         spread: float = 1.3,
+        suffix: str = "",
     ) -> None:
         """Compute KNN graphs and UMAPs on attribution-weighted latents.
 
         Requires :meth:`store_attribution_results` to have been called first,
-        which populates ``X_multiVI_attr_{name}`` keys in ``adata.obsm``.
+        which populates ``X_multiVI_attr_{name}{suffix}`` keys in ``adata.obsm``.
 
-        For each modality stores ``X_umap_attr_{name}`` in ``adata.obsm``.
+        For each modality stores ``X_umap_attr_{name}{suffix}`` in ``adata.obsm``.
 
         Parameters
         ----------
         adata
-            AnnData with ``X_multiVI_attr_{name}`` keys in ``.obsm``.
+            AnnData with ``X_multiVI_attr_{name}{suffix}`` keys in ``.obsm``.
         n_neighbors
             Number of neighbors for KNN graph.
         min_dist
             UMAP min_dist parameter.
         spread
             UMAP spread parameter.
+        suffix
+            Suffix that was used in :meth:`store_attribution_results`. Must match
+            to find the correct obsm keys and store UMAPs with the same suffix.
         """
         import scanpy as sc
 
         for name in self.module.modality_names:
-            obsm_key = f"X_multiVI_attr_{name}"
+            obsm_key = f"X_multiVI_attr_{name}{suffix}"
             if obsm_key not in adata.obsm:
                 msg = f"{obsm_key!r} not found in adata.obsm. Call store_attribution_results() first."
                 raise KeyError(msg)
@@ -1353,14 +1484,431 @@ class RegularizedMultimodalVI(
                 use_rep=obsm_key,
                 n_neighbors=n_neighbors,
                 metric="euclidean",
-                key_added=f"attr_{name}",
+                key_added=f"attr_{name}{suffix}",
             )
-            sc.tl.umap(adata, min_dist=min_dist, spread=spread, neighbors_key=f"attr_{name}")
-            adata.obsm[f"X_umap_attr_{name}"] = adata.obsm["X_umap"].copy()
+            sc.tl.umap(adata, min_dist=min_dist, spread=spread, neighbors_key=f"attr_{name}{suffix}")
+            adata.obsm[f"X_umap_attr_{name}{suffix}"] = adata.obsm["X_umap"].copy()
 
         # Restore X_umap to joint UMAP if available
         if "X_umap_joint" in adata.obsm:
             adata.obsm["X_umap"] = adata.obsm["X_umap_joint"]
+
+    @torch.no_grad()
+    def get_covariate_effects(
+        self,
+        adata=None,
+        indices=None,
+        batch_size: int = 256,
+        n_px_scale_batches: int | None = None,
+    ) -> dict[str, dict]:
+        """Extract and quantify all covariate pathway effects in the model.
+
+        Computes metrics for the 5 purpose-based covariate pathways (decoder weights,
+        feature scaling, additive background, dispersion, library) plus decoder px_scale
+        statistics. No-forward-pass components are extracted directly from parameters;
+        library and px_scale require a forward pass over the data.
+
+        Parameters
+        ----------
+        adata
+            MuData to use. Defaults to the MuData used to initialize the model.
+        indices
+            Indices of cells to use.
+        batch_size
+            Batch size for the forward-pass loop (library + px_scale).
+        n_px_scale_batches
+            If set, stop accumulating px_scale after this many batches
+            (saves memory for large datasets). Library is always collected for all cells.
+
+        Returns
+        -------
+        dict with keys:
+            ``"decoder_weights"`` : per-modality Frobenius norm decomposition (z vs cov dims)
+            ``"feature_scaling"`` : per-modality transformed scaling params + per-covariate stats
+            ``"additive_background"`` : per-modality transformed background + per-covariate stats
+            ``"dispersion"`` : per-modality dispersion parameters and correlations
+            ``"library"`` : per-modality log-library and library arrays from encoder
+            ``"px_scale_stats"`` : per-modality mean px_scale per gene
+            ``"covariate_names"`` : registry-derived covariate names and mappings
+        """
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+
+        self.module.eval()
+        device = next(self.module.parameters()).device
+
+        result = {}
+
+        # =====================================================================
+        # 1. Decoder weights: Frobenius norm decomposition (z vs cov dims)
+        # =====================================================================
+        decoder_weights = {}
+        for name in self.module.modality_names:
+            decoder = self.module.decoders[name]
+            # First FC layer in px_decoder
+            first_layer = decoder.px_decoder.fc_layers[0]  # nn.Sequential for "Layer 0"
+            # Find the nn.Linear sublayer
+            linear = None
+            for sublayer in first_layer:
+                if sublayer is not None and isinstance(sublayer, torch.nn.Linear):
+                    linear = sublayer
+                    break
+            if linear is None:
+                logger.warning("Could not find Linear layer in decoder for modality '%s'", name)
+                continue
+
+            weight = linear.weight.detach().cpu()  # (n_hidden, n_input + cat_dim)
+            n_cat_list = decoder.px_decoder.n_cat_list
+            cat_dim = sum(n_cat_list) if n_cat_list else 0
+            n_z_dims = weight.shape[1] - cat_dim
+
+            if cat_dim > 0:
+                z_weight = weight[:, :n_z_dims]
+                cov_weight = weight[:, n_z_dims:]
+                z_norm = torch.linalg.norm(z_weight).item()
+                cov_norm = torch.linalg.norm(cov_weight).item()
+            else:
+                z_norm = torch.linalg.norm(weight).item()
+                cov_norm = 0.0
+
+            total = z_norm + cov_norm
+            decoder_weights[name] = {
+                "z_norm": z_norm,
+                "cov_norm": cov_norm,
+                "cov_fraction": cov_norm / total if total > 0 else 0.0,
+                "n_z_dims": n_z_dims,
+                "n_cov_dims": cat_dim,
+            }
+        result["decoder_weights"] = decoder_weights
+
+        # =====================================================================
+        # 2. Feature scaling (per modality, per covariate block)
+        # =====================================================================
+        feature_scaling_result = {}
+        for name in self.module.feature_scaling_modalities:
+            if name not in self.module.feature_scaling:
+                continue
+            param = self.module.feature_scaling[name].detach().cpu()
+            transformed = (torch.nn.functional.softplus(param) / 0.7).numpy()
+
+            per_covariate = []
+            n_cats_list = self.module.n_cats_per_feature_scaling_cov
+            if n_cats_list:
+                offset = 0
+                for n_cats in n_cats_list:
+                    block = transformed[offset : offset + n_cats, :]
+                    cov_info = {
+                        "n_cats": int(n_cats),
+                        "values": block,
+                        "mean_abs_deviation": np.mean(np.abs(block - 1.0), axis=0),
+                    }
+                    if n_cats > 1:
+                        cov_info["correlation_matrix"] = np.corrcoef(block)
+                    else:
+                        cov_info["correlation_matrix"] = None
+                    per_covariate.append(cov_info)
+                    offset += n_cats
+            else:
+                # Single shared factor (no covariates)
+                per_covariate.append(
+                    {
+                        "n_cats": transformed.shape[0],
+                        "values": transformed,
+                        "mean_abs_deviation": np.mean(np.abs(transformed - 1.0), axis=0),
+                        "correlation_matrix": None,
+                    }
+                )
+
+            feature_scaling_result[name] = {
+                "transformed": transformed,
+                "per_covariate": per_covariate,
+                "relative_to_px_scale": None,  # filled after forward pass
+            }
+        result["feature_scaling"] = feature_scaling_result
+
+        # =====================================================================
+        # 3. Additive background (per modality, per covariate block)
+        # =====================================================================
+        additive_bg_result = {}
+        for name in self.module.additive_background_modalities:
+            if name not in self.module.additive_background:
+                continue
+            param = self.module.additive_background[name].detach().cpu()
+            transformed = torch.exp(param).numpy()  # (n_features, n_total_ambient_cats)
+
+            per_covariate = []
+            n_cats_list = self.module.n_cats_per_ambient_cov
+            if n_cats_list:
+                col_offset = 0
+                for n_cats in n_cats_list:
+                    block = transformed[:, col_offset : col_offset + n_cats]
+                    cov_info = {
+                        "n_cats": int(n_cats),
+                        "values": block,
+                    }
+                    if n_cats > 1:
+                        cov_info["correlation_matrix"] = np.corrcoef(block.T)
+                    else:
+                        cov_info["correlation_matrix"] = None
+                    per_covariate.append(cov_info)
+                    col_offset += n_cats
+
+            additive_bg_result[name] = {
+                "transformed": transformed,
+                "per_covariate": per_covariate,
+                "relative_to_px_scale": None,  # filled after forward pass
+            }
+        result["additive_background"] = additive_bg_result
+
+        # =====================================================================
+        # 4. Dispersion parameters (per modality)
+        # =====================================================================
+        dispersion_result = {}
+        for name in self.module.modality_names:
+            if name not in self.module.px_r_mu:
+                continue
+            mu = self.module.px_r_mu[name].detach().cpu().numpy()
+            disp_type = self.module.dispersion_dict[name]
+
+            disp_info = {
+                "px_r_mu": mu,
+                "px_r_mean": np.exp(mu),
+                "dispersion_type": disp_type,
+            }
+            # For gene-batch: correlations between batch groups
+            if disp_type in ("gene-batch", "region-batch") and mu.ndim == 2 and mu.shape[1] > 1:
+                disp_info["correlation_matrix"] = np.corrcoef(mu.T)
+            else:
+                disp_info["correlation_matrix"] = None
+
+            dispersion_result[name] = disp_info
+        result["dispersion"] = dispersion_result
+
+        # =====================================================================
+        # 5. Forward pass: library + px_scale accumulation
+        # =====================================================================
+        library_lists = {name: [] for name in self.module.modality_names}
+        px_scale_sum = dict.fromkeys(self.module.modality_names)
+        px_scale_n_cells = dict.fromkeys(self.module.modality_names, 0)
+        px_scale_done = False
+        n_batches_seen = 0
+
+        for tensors in scdl:
+            # Move tensors to device
+            tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
+
+            # Run inference
+            inference_inputs = self.module._get_inference_input(tensors)
+            outputs = self.module.inference(**inference_inputs)
+
+            # Collect library per modality
+            for name in self.module.modality_names:
+                if name in outputs["library"]:
+                    library_lists[name].append(outputs["library"][name].cpu().numpy())
+
+            # Accumulate px_scale (optional early stop)
+            if not px_scale_done:
+                gen_inputs = self.module._get_generative_input(tensors, outputs)
+                gen_out = self.module.generative(**gen_inputs)
+
+                for name in self.module.modality_names:
+                    if name in gen_out["px"]:
+                        px_scale = gen_out["px"][name].scale.cpu().numpy()
+                        if px_scale_sum[name] is None:
+                            px_scale_sum[name] = px_scale.sum(axis=0)
+                        else:
+                            px_scale_sum[name] += px_scale.sum(axis=0)
+                        px_scale_n_cells[name] += px_scale.shape[0]
+
+                n_batches_seen += 1
+                if n_px_scale_batches is not None and n_batches_seen >= n_px_scale_batches:
+                    px_scale_done = True
+
+        # Assemble library results
+        library_result = {}
+        for name in self.module.modality_names:
+            if library_lists[name]:
+                log_lib = np.concatenate(library_lists[name], axis=0)
+                library_result[name] = {
+                    "log_library": log_lib,
+                    "library": np.exp(log_lib),
+                }
+        result["library"] = library_result
+
+        # Assemble px_scale stats
+        px_scale_stats = {}
+        for name in self.module.modality_names:
+            if px_scale_sum[name] is not None and px_scale_n_cells[name] > 0:
+                px_scale_stats[name] = {
+                    "mean_per_gene": px_scale_sum[name] / px_scale_n_cells[name],
+                }
+        result["px_scale_stats"] = px_scale_stats
+
+        # =====================================================================
+        # 6. Relative metrics: feature scaling and additive bg vs px_scale
+        # =====================================================================
+        for name in feature_scaling_result:
+            if name in px_scale_stats:
+                mean_px = px_scale_stats[name]["mean_per_gene"]
+                all_vals = feature_scaling_result[name]["transformed"]
+                mean_abs_dev = np.mean(np.abs(all_vals - 1.0), axis=0)
+                safe_px = np.where(mean_px > 0, mean_px, 1.0)
+                feature_scaling_result[name]["relative_to_px_scale"] = mean_abs_dev / safe_px
+
+        for name in additive_bg_result:
+            if name in px_scale_stats:
+                mean_px = px_scale_stats[name]["mean_per_gene"]
+                bg_vals = additive_bg_result[name]["transformed"]
+                mean_bg = np.mean(bg_vals, axis=1)  # mean across covariate levels
+                safe_px = np.where(mean_px > 0, mean_px, 1.0)
+                additive_bg_result[name]["relative_to_px_scale"] = mean_bg / safe_px
+
+        # =====================================================================
+        # 7. Covariate names from registry
+        # =====================================================================
+        covariate_names = {}
+        for reg_key, label in [
+            (FEATURE_SCALING_COVS_KEY, "feature_scaling"),
+            (AMBIENT_COVS_KEY, "ambient"),
+            (ENCODER_COVS_KEY, "encoder"),
+        ]:
+            if reg_key in self.adata_manager.data_registry:
+                try:
+                    state = self.adata_manager.get_state_registry(reg_key)
+                    info = {"n_cats_per_key": list(state.n_cats_per_key)}
+                    if hasattr(state, "field_keys"):
+                        info["field_keys"] = list(state.field_keys)
+                    if hasattr(state, "mappings"):
+                        info["mappings"] = {k: list(v) for k, v in state.mappings.items()}
+                    covariate_names[label] = info
+                except (AttributeError, KeyError):
+                    logger.debug("Could not extract registry info for %s", reg_key)
+
+        for reg_key, label in [
+            (DISPERSION_KEY, "dispersion"),
+            (LIBRARY_SIZE_KEY, "library_size"),
+        ]:
+            if reg_key in self.adata_manager.data_registry:
+                try:
+                    state = self.adata_manager.get_state_registry(reg_key)
+                    covariate_names[label] = {
+                        "categorical_mapping": list(state.categorical_mapping),
+                    }
+                except (AttributeError, KeyError):
+                    logger.debug("Could not extract registry info for %s", reg_key)
+
+        result["covariate_names"] = covariate_names
+
+        return result
+
+    def compute_covariate_lisi(
+        self,
+        adata,
+        covariate_keys: list[str],
+        obsm_keys: list[str] | None = None,
+        n_neighbors: int = 50,
+        subsample_n: int = 40000,
+        subsample_seed: int = 42,
+        stratify_key: str = "cell_type_lvl2_new",
+    ) -> pd.DataFrame:
+        """Compute LISI scores for covariates on attribution embeddings.
+
+        Uses ``scib_metrics.lisi_knn`` to measure mixing of each covariate
+        on KNN graphs built from attribution-weighted latent embeddings.
+
+        Parameters
+        ----------
+        adata
+            AnnData with ``X_multiVI_attr_{name}*`` keys in ``.obsm``.
+        covariate_keys
+            Obs columns to compute LISI for (e.g. ``['Embryo', '10x_kit']``).
+        obsm_keys
+            obsm keys to evaluate. If ``None``, auto-discovers all
+            ``X_multiVI_attr_*`` keys in ``adata.obsm``.
+        n_neighbors
+            Number of neighbors for KNN graph.
+        subsample_n
+            Number of cells to subsample (stratified). LISI only.
+        subsample_seed
+            Random seed for subsampling.
+        stratify_key
+            Obs column for stratified subsampling.
+
+        Returns
+        -------
+        pd.DataFrame
+            Rows = obsm_keys, columns = covariate_keys, values = mean LISI.
+        """
+        import pandas as pd
+        from scib_metrics import lisi_knn
+        from scib_metrics.nearest_neighbors import NeighborsResults
+        from sklearn.neighbors import NearestNeighbors
+
+        # Auto-discover obsm keys
+        if obsm_keys is None:
+            obsm_keys = sorted(k for k in adata.obsm if k.startswith("X_multiVI_attr_"))
+
+        # Stratified subsample
+        n_total = adata.n_obs
+        if subsample_n is not None and subsample_n < n_total:
+            rng = np.random.RandomState(subsample_seed)
+            if stratify_key in adata.obs.columns:
+                groups = adata.obs[stratify_key].astype(str)
+                unique_groups = groups.unique()
+                per_group = max(1, subsample_n // len(unique_groups))
+                indices = []
+                for g in unique_groups:
+                    g_idx = np.where(groups.values == g)[0]
+                    n_take = min(len(g_idx), per_group)
+                    indices.append(rng.choice(g_idx, size=n_take, replace=False))
+                indices = np.concatenate(indices)
+                # If we have fewer than subsample_n, top up randomly
+                if len(indices) < subsample_n:
+                    remaining = np.setdiff1d(np.arange(n_total), indices)
+                    extra = rng.choice(
+                        remaining,
+                        size=min(subsample_n - len(indices), len(remaining)),
+                        replace=False,
+                    )
+                    indices = np.concatenate([indices, extra])
+                indices = np.sort(indices)
+            else:
+                indices = np.sort(rng.choice(n_total, size=subsample_n, replace=False))
+            adata_sub = adata[indices].copy()
+        else:
+            adata_sub = adata
+            indices = np.arange(n_total)
+
+        # Compute LISI for each obsm_key × covariate_key
+        results = {}
+        for obsm_key in obsm_keys:
+            if obsm_key not in adata_sub.obsm:
+                logger.warning("obsm key %r not found in adata, skipping", obsm_key)
+                continue
+
+            X = np.asarray(adata_sub.obsm[obsm_key], dtype=np.float32)
+            # Build KNN
+            nn = NearestNeighbors(n_neighbors=n_neighbors, metric="euclidean")
+            nn.fit(X)
+            distances, indices_knn = nn.kneighbors(X)
+            knn_results = NeighborsResults(
+                indices=indices_knn.astype(np.int32),
+                distances=distances.astype(np.float32),
+            )
+
+            row = {}
+            for cov_key in covariate_keys:
+                if cov_key not in adata_sub.obs.columns:
+                    row[cov_key] = np.nan
+                    continue
+                labels = adata_sub.obs[cov_key].astype("category").cat.codes.values
+                per_cell_lisi = lisi_knn(knn_results, labels)
+                row[cov_key] = float(np.nanmean(per_cell_lisi))
+
+            results[obsm_key] = row
+
+        return pd.DataFrame(results).T
 
     def save_analysis_outputs(
         self,
