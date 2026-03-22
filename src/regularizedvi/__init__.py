@@ -4,6 +4,7 @@ from pyro.distributions import constraints
 from pyro.distributions.transforms import SoftplusTransform
 from torch.distributions import biject_to, transform_to
 
+from regularizedvi import plt
 from regularizedvi._components import (
     RegularizedDecoderSCVI,
     RegularizedEncoder,
