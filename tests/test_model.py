@@ -1675,11 +1675,11 @@ class TestRegularizedMultimodalVI:
         model.train(max_epochs=1, train_size=1.0, batch_size=32)
         adata_rna = mdata["rna"]
         model.compute_latent_umap(adata_rna)
-        assert "X_multiVI_joint" in adata_rna.obsm
+        assert "X_latent_joint" in adata_rna.obsm
         assert "X_umap_joint" in adata_rna.obsm
-        assert "X_multiVI_rna" in adata_rna.obsm
+        assert "X_latent_rna" in adata_rna.obsm
         assert "X_umap_rna" in adata_rna.obsm
-        assert "X_multiVI_atac" in adata_rna.obsm
+        assert "X_latent_atac" in adata_rna.obsm
         assert "X_umap_atac" in adata_rna.obsm
         # X_umap should be set to joint UMAP
         np.testing.assert_array_equal(adata_rna.obsm["X_umap"], adata_rna.obsm["X_umap_joint"])
@@ -1766,9 +1766,9 @@ class TestRegularizedMultimodalVI:
 
         # Pre-store latents manually (simulating GPU → save → CPU workflow)
         latent_dict = model.get_modality_latents()
-        adata_rna.obsm["X_multiVI_joint"] = latent_dict["__joint__"]
+        adata_rna.obsm["X_latent_joint"] = latent_dict["__joint__"]
         for name in model.module.modality_names:
-            adata_rna.obsm[f"X_multiVI_{name}"] = latent_dict[name]
+            adata_rna.obsm[f"X_latent_{name}"] = latent_dict[name]
 
         # Now compute_latent_umap should skip the GPU call and just do KNN+UMAP
         model.compute_latent_umap(adata_rna)
@@ -1794,8 +1794,8 @@ class TestRegularizedMultimodalVI:
 
         # Check obsm keys (weighted latents)
         for name in model.module.modality_names:
-            assert f"X_multiVI_attr_{name}" in adata_rna.obsm
-            assert adata_rna.obsm[f"X_multiVI_attr_{name}"].shape[0] == mdata["rna"].n_obs
+            assert f"X_latent_attr_{name}" in adata_rna.obsm
+            assert adata_rna.obsm[f"X_latent_attr_{name}"].shape[0] == mdata["rna"].n_obs
 
         # Check obs columns
         for name in model.module.modality_names:

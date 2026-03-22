@@ -1308,8 +1308,8 @@ class RegularizedMultimodalVI(
         """Compute joint and per-modality latent representations + UMAPs.
 
         Stores results in ``adata.obsm``:
-        - ``X_multiVI_joint``, ``X_umap_joint``
-        - ``X_multiVI_{modality}``, ``X_umap_{modality}`` (if ``per_modality=True``)
+        - ``X_latent_joint``, ``X_umap_joint``
+        - ``X_latent_{modality}``, ``X_umap_{modality}`` (if ``per_modality=True``)
 
         If latent representations are already stored in ``adata.obsm``
         (e.g. from a previous call to ``get_modality_latents()``), the
@@ -1338,16 +1338,14 @@ class RegularizedMultimodalVI(
         import scanpy as sc
 
         # GPU part: skip if latents already stored (enables CPU-only workflow)
-        if "X_multiVI_joint" not in adata.obsm:
+        if "X_latent_joint" not in adata.obsm:
             latent_dict = self.get_modality_latents()
-            adata.obsm["X_multiVI_joint"] = latent_dict["__joint__"]
+            adata.obsm["X_latent_joint"] = latent_dict["__joint__"]
             if per_modality:
                 for name in self.module.modality_names:
-                    adata.obsm[f"X_multiVI_{name}"] = latent_dict[name]
+                    adata.obsm[f"X_latent_{name}"] = latent_dict[name]
 
-        sc.pp.neighbors(
-            adata, use_rep="X_multiVI_joint", n_neighbors=n_neighbors, metric="euclidean", key_added="joint"
-        )
+        sc.pp.neighbors(adata, use_rep="X_latent_joint", n_neighbors=n_neighbors, metric="euclidean", key_added="joint")
         sc.tl.umap(adata, min_dist=min_dist, spread=spread, neighbors_key="joint")
         adata.obsm["X_umap_joint"] = adata.obsm["X_umap"].copy()
 
@@ -1357,10 +1355,10 @@ class RegularizedMultimodalVI(
         # Per-modality UMAPs (CPU-only: latents already in obsm)
         if per_modality:
             for name in self.module.modality_names:
-                if f"X_multiVI_{name}" in adata.obsm:
+                if f"X_latent_{name}" in adata.obsm:
                     sc.pp.neighbors(
                         adata,
-                        use_rep=f"X_multiVI_{name}",
+                        use_rep=f"X_latent_{name}",
                         n_neighbors=n_neighbors,
                         metric="euclidean",
                         key_added=name,
@@ -1386,7 +1384,7 @@ class RegularizedMultimodalVI(
 
         For each modality stores:
 
-        - ``X_multiVI_attr_{name}{suffix}`` in obsm — attribution-weighted latent
+        - ``X_latent_attr_{name}{suffix}`` in obsm — attribution-weighted latent
         - ``{name}_decoder_total_attr{suffix}`` in obs — total attribution per cell
         - ``{name}_decoder_own_attr{suffix}`` in obs — attribution from own Z dims
 
@@ -1417,7 +1415,7 @@ class RegularizedMultimodalVI(
 
         # Store attribution-weighted latents
         for name in self.module.modality_names:
-            adata.obsm[f"X_multiVI_attr_{name}{suffix}"] = attribution[name]["weighted_z"]
+            adata.obsm[f"X_latent_attr_{name}{suffix}"] = attribution[name]["weighted_z"]
 
         # Per-modality importance scores
         total_attrs = {}
@@ -1454,14 +1452,14 @@ class RegularizedMultimodalVI(
         """Compute KNN graphs and UMAPs on attribution-weighted latents.
 
         Requires :meth:`store_attribution_results` to have been called first,
-        which populates ``X_multiVI_attr_{name}{suffix}`` keys in ``adata.obsm``.
+        which populates ``X_latent_attr_{name}{suffix}`` keys in ``adata.obsm``.
 
         For each modality stores ``X_umap_attr_{name}{suffix}`` in ``adata.obsm``.
 
         Parameters
         ----------
         adata
-            AnnData with ``X_multiVI_attr_{name}{suffix}`` keys in ``.obsm``.
+            AnnData with ``X_latent_attr_{name}{suffix}`` keys in ``.obsm``.
         n_neighbors
             Number of neighbors for KNN graph.
         min_dist
@@ -1475,7 +1473,7 @@ class RegularizedMultimodalVI(
         import scanpy as sc
 
         for name in self.module.modality_names:
-            obsm_key = f"X_multiVI_attr_{name}{suffix}"
+            obsm_key = f"X_latent_attr_{name}{suffix}"
             if obsm_key not in adata.obsm:
                 msg = f"{obsm_key!r} not found in adata.obsm. Call store_attribution_results() first."
                 raise KeyError(msg)
@@ -1820,12 +1818,12 @@ class RegularizedMultimodalVI(
         Parameters
         ----------
         adata
-            AnnData with ``X_multiVI_attr_{name}*`` keys in ``.obsm``.
+            AnnData with ``X_latent_attr_{name}*`` keys in ``.obsm``.
         covariate_keys
             Obs columns to compute LISI for (e.g. ``['Embryo', '10x_kit']``).
         obsm_keys
             obsm keys to evaluate. If ``None``, auto-discovers all
-            ``X_multiVI_attr_*`` keys in ``adata.obsm``.
+            ``X_latent_attr_*`` keys in ``adata.obsm``.
         n_neighbors
             Number of neighbors for KNN graph.
         subsample_n
@@ -1847,7 +1845,7 @@ class RegularizedMultimodalVI(
 
         # Auto-discover obsm keys
         if obsm_keys is None:
-            obsm_keys = sorted(k for k in adata.obsm if k.startswith("X_multiVI_attr_"))
+            obsm_keys = sorted(k for k in adata.obsm if k.startswith("X_latent_attr_"))
 
         # Stratified subsample
         n_total = adata.n_obs
@@ -1957,12 +1955,12 @@ class RegularizedMultimodalVI(
 
         # Latent representations
         if save_latents:
-            latent_keys = [("X_multiVI_joint", "joint")]
+            latent_keys = [("X_latent_joint", "joint")]
             for name in self.module.modality_names:
-                latent_keys.append((f"X_multiVI_{name}", name))
+                latent_keys.append((f"X_latent_{name}", name))
             for obsm_key, label in latent_keys:
                 if obsm_key in adata.obsm:
-                    path = f"{output_dir}/X_multiVI_{label}.csv"
+                    path = f"{output_dir}/X_latent_{label}.csv"
                     pd.DataFrame(
                         adata.obsm[obsm_key],
                         index=adata.obs_names,
