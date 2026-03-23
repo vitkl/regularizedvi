@@ -19,10 +19,11 @@ def plot_marker_dotplots(
     dataset_col: str = "dataset",
     symbol_col: str = "SYMBOL",
     save_dir: str | Path | None = None,
+    per_dataset: bool = True,
     figsize_per_group: tuple[float, float] = (0.4, 0.35),
     **kwargs,
 ) -> list:
-    """Plot scanpy dotplots of marker genes per dataset, grouped by cell type.
+    """Plot scanpy dotplots of marker genes, grouped by cell type.
 
     Parameters
     ----------
@@ -40,6 +41,9 @@ def plot_marker_dotplots(
         Var column mapping var_names to gene symbols.
     save_dir
         Directory to save figures. If None, figures are shown inline.
+    per_dataset
+        If True (default), plot one dotplot per dataset.
+        If False, plot a single dotplot using all cells.
     figsize_per_group
         (width_per_gene, height_per_group) scaling for figure size.
     **kwargs
@@ -47,7 +51,7 @@ def plot_marker_dotplots(
 
     Returns
     -------
-    List of (dataset_name, DotPlot) tuples for successfully plotted datasets.
+    List of (name, DotPlot) tuples for successfully plotted datasets/groups.
     """
     marker_df = pd.read_csv(marker_csv)
 
@@ -82,34 +86,46 @@ def plot_marker_dotplots(
         os.makedirs(save_dir, exist_ok=True)
 
     results = []
-    datasets = sorted(adata.obs[dataset_col].unique())
+
+    if per_dataset:
+        datasets = sorted(adata.obs[dataset_col].unique())
+    else:
+        datasets = [None]
 
     for ds in datasets:
-        mask = adata.obs[dataset_col] == ds
-        adata_sub = adata[mask]
-        n_cells = mask.sum()
+        if ds is not None:
+            mask = adata.obs[dataset_col] == ds
+            adata_sub = adata[mask]
+            n_cells = mask.sum()
+            title = f"{ds} (n={n_cells})"
+            safe_name = ds.replace("/", "_").replace(" ", "_")
+        else:
+            adata_sub = adata
+            n_cells = adata.n_obs
+            title = f"All datasets (n={n_cells})"
+            safe_name = "all"
 
         # Skip if groupby has ≤1 unique value
         n_groups = adata_sub.obs[groupby].nunique()
         if n_groups <= 1:
-            print(f"  {ds}: only {n_groups} group(s) in '{groupby}', skipping")
+            print(f"  {title}: only {n_groups} group(s) in '{groupby}', skipping")
             continue
 
         # Check layer exists
         if layer not in adata_sub.layers and layer is not None:
-            print(f"  {ds}: layer '{layer}' not found, using X")
+            print(f"  {title}: layer '{layer}' not found, using X")
             _layer = None
         else:
             _layer = layer
 
-        print(f"\n{ds} (n={n_cells}, {n_groups} groups)")
+        print(f"\n{title} ({n_groups} groups)")
         try:
             dp = sc.pl.dotplot(
                 adata_sub,
                 var_names=var_names_grouped,
                 groupby=groupby,
                 layer=_layer,
-                title=f"{ds} (n={n_cells})",
+                title=title,
                 show=False,
                 return_fig=True,
                 **kwargs,
@@ -117,14 +133,13 @@ def plot_marker_dotplots(
             dp.make_figure()
 
             if save_dir is not None:
-                safe_name = ds.replace("/", "_").replace(" ", "_")
                 fig_path = os.path.join(save_dir, f"dotplot_{groupby}_{safe_name}.png")
                 dp.savefig(fig_path, dpi=150, bbox_inches="tight")
                 print(f"  Saved to {fig_path}")
 
             plt.show()
-            results.append((ds, dp))
+            results.append((safe_name, dp))
         except Exception as e:  # noqa: BLE001
-            print(f"  {ds}: dotplot failed: {e}")
+            print(f"  {title}: dotplot failed: {e}")
 
     return results
