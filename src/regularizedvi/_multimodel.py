@@ -1044,7 +1044,7 @@ class RegularizedMultimodalVI(
         _fs_ref_indices = None
         if covariate_reference == "reference":
             if _remove_cat and REGISTRY_KEYS.CAT_COVS_KEY in self.adata_manager.data_registry:
-                cat_data = self.adata_manager.get_from_registry(REGISTRY_KEYS.CAT_COVS_KEY)
+                cat_data = np.asarray(self.adata_manager.get_from_registry(REGISTRY_KEYS.CAT_COVS_KEY))
                 _cat_ref_indices = []
                 for col_i in range(cat_data.shape[1]):
                     col = cat_data[:, col_i]
@@ -1054,7 +1054,7 @@ class RegularizedMultimodalVI(
                     _cat_ref_indices.append(int(vals[np.argmax(counts)]))
 
             if _remove_fs and FEATURE_SCALING_COVS_KEY in self.adata_manager.data_registry:
-                fs_data = self.adata_manager.get_from_registry(FEATURE_SCALING_COVS_KEY)
+                fs_data = np.asarray(self.adata_manager.get_from_registry(FEATURE_SCALING_COVS_KEY))
                 _fs_ref_indices = []
                 for col_i in range(fs_data.shape[1]):
                     col = fs_data[:, col_i]
