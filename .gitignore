@@ -34,6 +34,10 @@ __pycache__/
 # Notebook outputs (papermill)
 *_out.ipynb
 
+# Generated experiment report
+experiment_report.html
+experiment_pages/
+
 # Local helper scripts (repo root only)
 run_tests.sh
 _check_cells.py
