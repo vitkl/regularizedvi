@@ -88,7 +88,7 @@ def compute_dispersion_init(
     adata_or_path,
     layer: str | None = None,
     dispersion_key: str | None = None,
-    biological_variance_fraction: float = 10.0,
+    biological_variance_fraction: float = 0.9,
     theta_min: float = 0.01,
     theta_max: float = 10.0,
     chunk_size: int = 5000,
@@ -105,7 +105,7 @@ def compute_dispersion_init(
     Solving for theta:
         excess_raw = Var(x_g) - mu_g - mu_g^2 * CV^2(L)
         excess_adjusted = excess_raw / (1 + CV^2(L))
-        excess_technical = excess_adjusted / biological_variance_fraction
+        excess_technical = excess_adjusted * (1 - biological_variance_fraction)
         theta_g = mu_g^2 / excess_technical
 
     Parameters
@@ -118,7 +118,8 @@ def compute_dispersion_init(
         obs column for batch/dispersion grouping. Used to compute
         within-batch vs between-batch library size variance.
     biological_variance_fraction
-        Fraction of excess variance assumed biological (default 10 = 90% biological).
+        Fraction of excess variance assumed biological (default 0.9 = 90% biological).
+        Technical fraction = 1 - biological_variance_fraction.
         Higher values → larger theta (less overdispersion attributed to technical).
     theta_min
         Lower clamp for theta on linear scale before log transform.
@@ -240,7 +241,9 @@ def _compute_from_h5ad(
         if batch_codes is not None:
             print(f"  CV²(L) within-batch={cv2_L_within:.4f}, between-batch={cv2_L_between:.4f}")
 
-    # --- Pass 2: Per-gene mean and variance via Welford ---
+    # --- Pass 2: Per-gene mean and variance via batch Welford ---
+    # Uses parallel/batch Welford: compute chunk mean+M2, then merge.
+    # Fully vectorized — no Python loop over cells.
     mean_g = np.zeros(n_genes, dtype=np.float64)
     m2_g = np.zeros(n_genes, dtype=np.float64)
     count = 0
@@ -254,15 +257,19 @@ def _compute_from_h5ad(
         else:
             chunk = mat[start:end].astype(np.float64)
 
-        # Welford's update (vectorized over genes, loop over cells)
-        for row in chunk:
-            count += 1
-            delta = row - mean_g
-            mean_g += delta / count
-            delta2 = row - mean_g
-            m2_g += delta * delta2
+        # Batch Welford: merge chunk stats into running accumulators
+        n_chunk = chunk.shape[0]
+        chunk_mean = chunk.mean(axis=0)
+        chunk_m2 = ((chunk - chunk_mean) ** 2).sum(axis=0)
 
-        if verbose and ((i + 1) % 50 == 0 or (i + 1) == n_chunks):
+        # Combine running (count, mean_g, m2_g) with chunk (n_chunk, chunk_mean, chunk_m2)
+        new_count = count + n_chunk
+        delta = chunk_mean - mean_g
+        mean_g = (count * mean_g + n_chunk * chunk_mean) / new_count
+        m2_g = m2_g + chunk_m2 + (delta**2) * count * n_chunk / new_count
+        count = new_count
+
+        if verbose and ((i + 1) % 20 == 0 or (i + 1) == n_chunks):
             print(f"  Welford pass: {min(end, n_cells)}/{n_cells} cells")
 
     var_g = m2_g / count
@@ -336,7 +343,7 @@ def _compute_from_anndata(
     if verbose:
         print(f"  Library sizes: mean={mean_L:.1f}, CV²={cv2_L:.4f}")
 
-    # Per-gene mean and variance via Welford (chunked for large datasets)
+    # Per-gene mean and variance via batch Welford (chunked, fully vectorized)
     mean_g = np.zeros(n_genes, dtype=np.float64)
     m2_g = np.zeros(n_genes, dtype=np.float64)
     count = 0
@@ -351,12 +358,15 @@ def _compute_from_anndata(
         else:
             chunk = np.asarray(X[start:end], dtype=np.float64)
 
-        for row in chunk:
-            count += 1
-            delta = row - mean_g
-            mean_g += delta / count
-            delta2 = row - mean_g
-            m2_g += delta * delta2
+        n_chunk = chunk.shape[0]
+        chunk_mean = chunk.mean(axis=0)
+        chunk_m2 = ((chunk - chunk_mean) ** 2).sum(axis=0)
+
+        new_count = count + n_chunk
+        delta = chunk_mean - mean_g
+        mean_g = (count * mean_g + n_chunk * chunk_mean) / new_count
+        m2_g = m2_g + chunk_m2 + (delta**2) * count * n_chunk / new_count
+        count = new_count
 
     var_g = m2_g / count
 
@@ -403,8 +413,9 @@ def _compute_theta(
     nb_inflation = 1 + cv2_L
     excess_adjusted = excess_raw / nb_inflation
 
-    # Shrinkage: assume 1/biological_variance_fraction is technical
-    excess_technical = excess_adjusted / biological_variance_fraction
+    # Shrinkage: only technical fraction of excess attributed to NB dispersion
+    technical_fraction = 1 - biological_variance_fraction
+    excess_technical = excess_adjusted * technical_fraction
 
     # Theta option 1: full correction
     # Sub-Poisson genes have excess_raw < 0 → excess_technical < 0
@@ -413,7 +424,7 @@ def _compute_theta(
 
     # Option 2: simple (no library correction)
     excess_simple = var_g - poisson_var
-    excess_technical_simple = excess_simple / biological_variance_fraction
+    excess_technical_simple = excess_simple * technical_fraction
     theta_option2 = (mean_g**2) / np.maximum(excess_technical_simple, eps)
 
     # Clamp and log (use max(theta_min, 1e-10) to avoid log(0))

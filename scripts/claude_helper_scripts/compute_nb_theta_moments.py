@@ -25,7 +25,12 @@ def main():
     parser.add_argument("--layer", default=None, help="Layer name (default: X)")
     parser.add_argument("--feature-type", default=None, help="Filter by feature_types (e.g. GEX, ATAC)")
     parser.add_argument("--dispersion-key", default=None, help="obs column for batch grouping")
-    parser.add_argument("--bio-frac", type=float, default=10.0, help="Biological variance fraction (default: 10)")
+    parser.add_argument(
+        "--bio-frac",
+        type=float,
+        default=0.9,
+        help="Biological variance fraction (default: 0.9 = 90%% biological)",
+    )
     parser.add_argument("--chunk-size", type=int, default=5000, help="Chunk size (default: 5000)")
     parser.add_argument("--save-npz", default=None, help="Save all diagnostics to .npz file")
     args = parser.parse_args()
@@ -44,22 +49,26 @@ def main():
 
     print(f"\nlog_theta shape: {log_theta.shape}")
 
-    # Print theta for multiple bio_frac values
-    bio_fracs = [1, 5, 10, 20]
+    # Print theta for multiple biological_variance_fraction values
+    bio_fracs = [0.0, 0.8, 0.9, 0.95]
     cv2_L = diag["cv2_L"]
     nb_inflation = 1 + cv2_L
     excess_raw = diag["excess_raw"]
     mean_g = diag["mean_g"]
     eps = 1e-10
 
-    print(f"\n{'bio_frac':>10s} {'θ_5%':>10s} {'θ_25%':>10s} {'θ_50%':>10s} {'θ_75%':>10s} {'θ_95%':>10s}")
-    print("-" * 65)
+    print(
+        f"\n{'bio_frac':>10s} {'tech_frac':>10s} {'θ_5%':>10s} {'θ_25%':>10s} {'θ_50%':>10s} {'θ_75%':>10s} {'θ_95%':>10s}"
+    )
+    print("-" * 80)
     for bf in bio_fracs:
-        excess_tech = excess_raw / (nb_inflation * bf)
+        tech_frac = 1 - bf
+        excess_tech = excess_raw / nb_inflation * tech_frac
         theta = (mean_g**2) / np.maximum(excess_tech, eps)
         finite_t = theta[np.isfinite(theta) & (theta > 0)]
         print(
-            f"{bf:>10.0f} "
+            f"{bf:>10.2f} "
+            f"{tech_frac:>10.2f} "
             f"{np.quantile(finite_t, 0.05):>10.3f} "
             f"{np.quantile(finite_t, 0.25):>10.3f} "
             f"{np.quantile(finite_t, 0.50):>10.3f} "

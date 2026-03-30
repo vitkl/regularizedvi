@@ -225,7 +225,7 @@ class AmbientRegularizedSCVI(
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
         # Parameter initialization control (for ablation experiments)
         dispersion_init: Literal["prior", "data"] = "prior",
-        dispersion_init_bio_frac: float = 10.0,
+        dispersion_init_bio_frac: float = 0.9,
         dispersion_init_theta_min: float = 0.01,
         dispersion_init_theta_max: float = 10.0,
         px_r_init_mean: float | np.ndarray | None = None,

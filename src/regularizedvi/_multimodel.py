@@ -184,7 +184,7 @@ class RegularizedMultimodalVI(
         library_obs_w_prior_rate: float = 1.0,
         # Data-driven dispersion initialization
         dispersion_init: Literal["prior", "data"] = "prior",
-        dispersion_init_bio_frac: float = 10.0,
+        dispersion_init_bio_frac: float = 0.9,
         dispersion_init_theta_min: float = 0.01,
         dispersion_init_theta_max: float = 10.0,
         **kwargs,
