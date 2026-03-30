@@ -6,7 +6,13 @@ import numpy as np
 import pandas as pd
 
 
-def _lisi_one(distances: np.ndarray, indices: np.ndarray, labels: np.ndarray, perplexity: int = 30) -> np.ndarray:
+def _lisi_one(
+    distances: np.ndarray,
+    indices: np.ndarray,
+    labels: np.ndarray,
+    perplexity: int = 30,
+    valid_mask: np.ndarray | None = None,
+) -> np.ndarray:
     """Compute LISI (Local Inverse Simpson Index) for one label vector.
 
     For each cell, compute the effective number of label categories in its
@@ -16,26 +22,46 @@ def _lisi_one(distances: np.ndarray, indices: np.ndarray, labels: np.ndarray, pe
     Parameters
     ----------
     distances
-        (n_cells, k) KNN distance matrix.
+        (n_query, k) KNN distance matrix.
     indices
-        (n_cells, k) KNN index matrix.
+        (n_query, k) KNN index matrix (indices into the KNN-fitted array).
     labels
-        (n_cells,) integer-encoded label vector.
+        (n_fitted,) integer-encoded label vector for all cells in the
+        KNN-fitted array.
+    perplexity
+        Perplexity for Gaussian kernel bandwidth.
+    valid_mask
+        (n_fitted,) boolean mask. If provided, only neighbors where
+        ``valid_mask[neighbor_idx] == True`` contribute to the Simpson
+        index (weights are re-normalized over valid neighbors).
+        Use this to exclude unlabelled neighbors from cLISI.
 
     Returns
     -------
-    (n_cells,) LISI scores. Higher = more mixed labels in neighborhood.
+    (n_query,) LISI scores. Higher = more mixed labels in neighborhood.
     """
     n_cells, k = indices.shape
     lisi = np.zeros(n_cells, dtype=np.float64)
 
     for i in range(n_cells):
-        neighbor_labels = labels[indices[i]]
-        # Gaussian kernel weights (unnormalized)
+        nb_idx = indices[i]
+        neighbor_labels = labels[nb_idx]
         d = distances[i]
-        # Avoid division by zero
+
+        # Gaussian kernel weights (unnormalized)
         sigma = max(d[min(perplexity, k - 1)], 1e-10)
         weights = np.exp(-(d**2) / (2 * sigma**2))
+
+        # Mask out invalid (unlabelled) neighbors if requested
+        if valid_mask is not None:
+            nb_valid = valid_mask[nb_idx]
+            weights = weights * nb_valid
+            if weights.sum() < 1e-10:
+                lisi[i] = 1.0
+                continue
+            neighbor_labels = neighbor_labels[nb_valid]
+            weights = weights[nb_valid]
+
         weights /= weights.sum()
 
         # Simpson index: sum of squared proportions per label
@@ -103,8 +129,10 @@ def compute_integration_metrics(
     def _add(name, value, category="global"):
         results.append({"metric": name, "value": value, "category": category})
 
-    # Filter to cells with non-null labels
-    has_label = adata.obs[label_key].notna() & (adata.obs[label_key] != "")
+    # Filter to cells with non-null labels (also catch string "nan")
+    has_label = (
+        adata.obs[label_key].notna() & (adata.obs[label_key] != "") & (adata.obs[label_key].astype(str) != "nan")
+    )
     n_labelled = has_label.sum()
 
     # --- Global metrics (on labelled cells) ---
@@ -141,53 +169,54 @@ def compute_integration_metrics(
     except Exception as e:  # noqa: BLE001
         _add("ARI_NMI_error", str(e))
 
-    # --- LISI (subsampled) ---
+    # --- LISI (subsampled, KNN on all cells) ---
     try:
         if n_labelled > 100:
-            rng = np.random.RandomState(random_state + 1)
-            lab_idx = np.where(has_label.values)[0]
-
-            # Stratified subsample
-            n_sub = min(subsample_n, len(lab_idx))
-            strat_key = adata.obs[label_key].astype(str) + "___" + adata.obs[batch_key].astype(str)
-            strat_vals = strat_key.iloc[lab_idx].values
-            unique_strats, counts = np.unique(strat_vals, return_counts=True)
-            # Proportional sampling per stratum
-            sample_idx = []
-            for s, c in zip(unique_strats, counts, strict=False):
-                s_idx = lab_idx[strat_vals == s]
-                n_take = max(1, int(round(n_sub * c / len(lab_idx))))
-                n_take = min(n_take, len(s_idx))
-                sample_idx.extend(rng.choice(s_idx, size=n_take, replace=False))
-            sample_idx = np.array(sample_idx[:n_sub])
-
-            X_sub = X[sample_idx]
-            labels_sub = adata.obs[label_key].values[sample_idx]
-            batches_sub = adata.obs[batch_key].values[sample_idx]
-
-            # Encode labels as integers
             from sklearn.preprocessing import LabelEncoder
 
-            le_label = LabelEncoder().fit(labels_sub)
-            le_batch = LabelEncoder().fit(batches_sub)
-            labels_int = le_label.transform(labels_sub)
-            batches_int = le_batch.transform(batches_sub)
+            rng = np.random.RandomState(random_state + 1)
+            n_total = X.shape[0]
 
-            # KNN
+            # Subsample ALL cells (labelled + unlabelled) for KNN fitting
+            n_knn = min(subsample_n * 2, n_total)
+            if n_total > n_knn:
+                all_idx = rng.choice(n_total, size=n_knn, replace=False)
+            else:
+                all_idx = np.arange(n_total)
+
+            # Track which subsampled cells are labelled
+            is_labelled_sub = has_label.values[all_idx]
+            lab_positions = np.where(is_labelled_sub)[0]  # indices within all_idx
+
+            # Cap labelled query cells at subsample_n
+            if len(lab_positions) > subsample_n:
+                lab_positions = rng.choice(lab_positions, size=subsample_n, replace=False)
+
+            X_knn = X[all_idx]
+
+            # Fit KNN on ALL subsampled cells (preserves latent geometry)
             nn = NearestNeighbors(n_neighbors=lisi_k, metric="euclidean")
-            nn.fit(X_sub)
-            distances, indices = nn.kneighbors(X_sub)
+            nn.fit(X_knn)
+            # Query only labelled cells
+            distances, indices = nn.kneighbors(X_knn[lab_positions])
 
-            # iLISI (batch mixing — higher = better)
-            ilisi = _lisi_one(distances, indices, batches_int)
+            # iLISI: all neighbors have batch labels — no masking needed
+            batches_knn = LabelEncoder().fit_transform(adata.obs[batch_key].values[all_idx])
+            ilisi = _lisi_one(distances, indices, batches_knn)
             _add("iLISI_median", float(np.median(ilisi)))
             _add("iLISI_mean", float(np.mean(ilisi)))
 
-            # cLISI (cell type separation — lower = better)
-            clisi = _lisi_one(distances, indices, labels_int)
+            # cLISI: exclude unlabelled neighbors from weights
+            label_vals_knn = adata.obs[label_key].values[all_idx]
+            labelled_only = label_vals_knn[is_labelled_sub]
+            le_label = LabelEncoder().fit(labelled_only)
+            labels_int_knn = np.full(len(all_idx), -1, dtype=np.int64)
+            labels_int_knn[is_labelled_sub] = le_label.transform(labelled_only)
+
+            clisi = _lisi_one(distances, indices, labels_int_knn, valid_mask=is_labelled_sub)
             _add("cLISI_median", float(np.median(clisi)))
             _add("cLISI_mean", float(np.mean(clisi)))
-            _add("LISI_subsample_n", len(sample_idx))
+            _add("LISI_subsample_n", int(len(lab_positions)))
     except Exception as e:  # noqa: BLE001
         _add("LISI_error", str(e))
 
