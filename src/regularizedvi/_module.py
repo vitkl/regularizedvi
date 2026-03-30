@@ -257,7 +257,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         # Library size covariate (controls per-group library prior, decoupled from batch_key)
         n_library_cats: int | None = None,
         # Parameter initialization control
-        px_r_init_mean: float | None = None,
+        px_r_init_mean: float | np.ndarray | None = None,
         px_r_init_std: float | None = None,
         additive_bg_init_mean: float | None = None,
         additive_bg_init_std: float | None = None,

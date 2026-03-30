@@ -339,9 +339,23 @@ After Tasks 1–3, compare (in the same notebook):
 | `scripts/claude_helper_scripts/extract_learned_dispersion.py` | NEW: P5 theta extraction |
 | `docs/notebooks/model_comparisons/dispersion_init_analysis.ipynb` | NEW: exploration notebook with hist2d plots |
 
+## Task 5: End-to-End Testing with `dispersion_init="data"`
+
+Submit training runs with `dispersion_init="data"` as a papermill parameter on 3 representative datasets:
+
+| # | Dataset | Notebook | Queue | Notes |
+|---|---------|----------|-------|-------|
+| 1 | Bone marrow multimodal | `bone_marrow_multimodal_tutorial.ipynb` | gpu-normal | RNA+ATAC, per-modality init |
+| 2 | Immune RNA only | `bm_pbmc_rna_training_*.ipynb` | gpu-normal | Single-modal, large cell count |
+| 3 | Embryo 4-modality | embryo training notebook | gpu-huge | RNA+ATAC+spliced+unspliced |
+
+Each notebook needs `dispersion_init = "data"` added as a papermill parameter.
+Compare training curves, final loss, and integration metrics vs default init=3 baselines.
+
 ## Verification
 - Extract theta from P5 models and compare distributions across init values
 - Check sigma values from P5: assess median vs mean gap magnitude
-- Run MoM on 3 datasets: check cross-dataset consistency
+- Run MoM on all 6 datasets (3 RNA + 3 ATAC): check cross-dataset/modality consistency
 - Compare MoM log(theta) quantiles to learned values
 - Run package tests after code changes: `bash run_tests.sh tests/test_model.py -x -q`
+- End-to-end training runs with `dispersion_init="data"` on 3 representative datasets

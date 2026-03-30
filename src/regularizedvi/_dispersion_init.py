@@ -153,6 +153,11 @@ def compute_dispersion_init(
             verbose,
         )
     else:
+        if feature_type is not None:
+            raise ValueError(
+                "feature_type filtering is only supported for h5ad file paths, "
+                "not in-memory AnnData. Subset your AnnData before calling."
+            )
         return _compute_from_anndata(
             adata_or_path,
             layer,

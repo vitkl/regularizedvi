@@ -224,7 +224,11 @@ class AmbientRegularizedSCVI(
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
         # Parameter initialization control (for ablation experiments)
-        px_r_init_mean: float | None = None,
+        dispersion_init: Literal["prior", "data"] = "prior",
+        dispersion_init_bio_frac: float = 10.0,
+        dispersion_init_theta_min: float = 0.01,
+        dispersion_init_theta_max: float = 10.0,
+        px_r_init_mean: float | np.ndarray | None = None,
         px_r_init_std: float | None = None,
         additive_bg_init_mean: float | None = None,
         additive_bg_init_std: float | None = None,
@@ -450,6 +454,28 @@ class AmbientRegularizedSCVI(
                 del norm_data
             if data is not None:
                 del data
+
+            # Data-driven dispersion initialization
+            if dispersion_init == "data" and px_r_init_mean is None:
+                from regularizedvi._dispersion_init import compute_dispersion_init
+
+                # Use the registered layer (same data the model trains on)
+                _x_reg = self.adata_manager.data_registry[REGISTRY_KEYS.X_KEY]
+                _disp_layer = None if _x_reg.attr_name == "X" else _x_reg.attr_key
+                logger.info("Computing data-driven dispersion init (method of moments)...")
+                log_theta_init, _diag = compute_dispersion_init(
+                    self.adata,
+                    layer=_disp_layer,
+                    biological_variance_fraction=dispersion_init_bio_frac,
+                    theta_min=dispersion_init_theta_min,
+                    theta_max=dispersion_init_theta_max,
+                    verbose=False,
+                )
+                px_r_init_mean = log_theta_init
+                logger.info(
+                    f"Dispersion init: median theta={np.exp(np.median(log_theta_init)):.3f}, "
+                    f"CV²(L)={_diag['cv2_L']:.3f}, sub-Poisson={_diag['n_sub_poisson']}/{len(log_theta_init)}"
+                )
 
             # Determine use_observed_lib_size:
             # If library_log_means/vars are provided (computed above), learn library size.

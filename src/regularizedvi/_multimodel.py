@@ -182,6 +182,11 @@ class RegularizedMultimodalVI(
         # Residual library encoder
         residual_library_encoder: bool = True,
         library_obs_w_prior_rate: float = 1.0,
+        # Data-driven dispersion initialization
+        dispersion_init: Literal["prior", "data"] = "prior",
+        dispersion_init_bio_frac: float = 10.0,
+        dispersion_init_theta_min: float = 0.01,
+        dispersion_init_theta_max: float = 10.0,
         **kwargs,
     ):
         AmbientRegularizedSCVI._validate_bool_params(
@@ -208,6 +213,10 @@ class RegularizedMultimodalVI(
         self._init_decoder_bias = init_decoder_bias
         self._bg_init_gene_fraction = bg_init_gene_fraction
         self._decoder_bias_multiplier = decoder_bias_multiplier
+        self._dispersion_init = dispersion_init
+        self._dispersion_init_bio_frac = dispersion_init_bio_frac
+        self._dispersion_init_theta_min = dispersion_init_theta_min
+        self._dispersion_init_theta_max = dispersion_init_theta_max
 
         self._module_kwargs = {
             "n_hidden": n_hidden,
@@ -497,10 +506,36 @@ class RegularizedMultimodalVI(
         if ENCODER_COVS_KEY in self.adata_manager.data_registry:
             n_cats_per_encoder_cov = self.adata_manager.get_state_registry(ENCODER_COVS_KEY).n_cats_per_key
 
+        # Data-driven dispersion initialization (per-modality)
+        px_r_init_mean_dict = None
+        if self._dispersion_init == "data":
+            from regularizedvi._dispersion_init import compute_dispersion_init
+
+            px_r_init_mean_dict = {}
+            for mod_name in modality_names:
+                mod_adata = self.adata.mod[mod_name]
+                logger.info(f"Computing data-driven dispersion init for modality '{mod_name}'...")
+                log_theta_init, _diag = compute_dispersion_init(
+                    mod_adata,
+                    biological_variance_fraction=self._dispersion_init_bio_frac,
+                    theta_min=self._dispersion_init_theta_min,
+                    theta_max=self._dispersion_init_theta_max,
+                    verbose=False,
+                )
+                px_r_init_mean_dict[mod_name] = log_theta_init
+                logger.info(
+                    f"  {mod_name}: median theta={np.exp(np.median(log_theta_init)):.3f}, "
+                    f"CV²(L)={_diag['cv2_L']:.3f}, sub-Poisson={_diag['n_sub_poisson']}/{len(log_theta_init)}"
+                )
+
         kwargs = dict(self._module_kwargs)
         # Remove keys that are passed separately
         for k in ["n_hidden", "n_latent", "n_layers", "dropout_rate"]:
             kwargs.pop(k, None)
+
+        # Inject per-modality dispersion init if computed
+        if px_r_init_mean_dict is not None:
+            kwargs["px_r_init_mean"] = px_r_init_mean_dict
 
         self.module = self._module_cls(
             modality_names=modality_names,
