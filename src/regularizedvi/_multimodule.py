@@ -229,6 +229,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # Residual library encoder: library = log(sens) + w*(obs-log(sens)) + encoder
         residual_library_encoder: bool = True,
         library_obs_w_prior_rate: float = 1.0,
+        # Dispersion initialization override
+        px_r_init_mean: float | np.ndarray | dict | None = None,
+        px_r_init_std: float | None = None,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -491,11 +494,19 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # ---- Per-modality dispersion parameters ----
         # Initialize px_r at prior equilibrium when regularisation is active.
         # Containment prior: Exp(rate) on 1/sqrt(theta) → theta = rate² at equilibrium.
-        if self.regularise_dispersion:
+        if px_r_init_mean is not None and not isinstance(px_r_init_mean, dict):
+            _px_r_init = px_r_init_mean
+        elif self.regularise_dispersion:
             _rate = regularise_dispersion_prior
             _px_r_init = math.log(_rate**2)  # log(9) ≈ 2.197
         else:
             _px_r_init = None
+
+        # px_r_init_mean can be a dict {modality_name: np.ndarray} for per-gene init
+        _px_r_init_dict = {}
+        if isinstance(px_r_init_mean, dict):
+            _px_r_init_dict = px_r_init_mean
+        _px_r_std = px_r_init_std if px_r_init_std is not None else 0.1
 
         _log_sigma_init = math.log(0.1)
         self.px_r_mu = nn.ParameterDict()
@@ -503,18 +514,27 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         for name in self.modality_names:
             n_feat = n_input_per_modality[name]
             disp = dispersion_dict[name]
+            # Resolve per-modality init: dict entry > scalar _px_r_init > None
+            _mod_init = _px_r_init_dict.get(name, _px_r_init)
+
             if disp in ("gene", "region"):
-                if _px_r_init is not None:
-                    self.px_r_mu[name] = nn.Parameter(torch.full((n_feat,), _px_r_init) + 0.1 * torch.randn(n_feat))
+                if _mod_init is not None:
+                    if isinstance(_mod_init, np.ndarray):
+                        _init_tensor = torch.tensor(_mod_init, dtype=torch.float32)
+                    else:
+                        _init_tensor = torch.full((n_feat,), _mod_init)
+                    self.px_r_mu[name] = nn.Parameter(_init_tensor + _px_r_std * torch.randn(n_feat))
                 else:
                     self.px_r_mu[name] = nn.Parameter(torch.randn(n_feat))
                 self.px_r_log_sigma[name] = nn.Parameter(torch.full((n_feat,), _log_sigma_init))
             elif disp in ("gene-batch", "region-batch"):
                 n_disp = self.n_dispersion_cats
-                if _px_r_init is not None:
-                    self.px_r_mu[name] = nn.Parameter(
-                        torch.full((n_feat, n_disp), _px_r_init) + 0.1 * torch.randn(n_feat, n_disp)
-                    )
+                if _mod_init is not None:
+                    if isinstance(_mod_init, np.ndarray):
+                        _init_tensor = torch.tensor(_mod_init, dtype=torch.float32).unsqueeze(1).expand(n_feat, n_disp)
+                    else:
+                        _init_tensor = torch.full((n_feat, n_disp), _mod_init)
+                    self.px_r_mu[name] = nn.Parameter(_init_tensor.clone() + _px_r_std * torch.randn(n_feat, n_disp))
                 else:
                     self.px_r_mu[name] = nn.Parameter(torch.randn(n_feat, n_disp))
                 self.px_r_log_sigma[name] = nn.Parameter(torch.full((n_feat, n_disp), _log_sigma_init))

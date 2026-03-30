@@ -349,16 +349,23 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         if self.dispersion == "gene":
             if _px_r_init is not None:
-                self.px_r_mu = torch.nn.Parameter(torch.full((n_input,), _px_r_init) + _px_r_std * torch.randn(n_input))
+                if isinstance(_px_r_init, np.ndarray):
+                    _init_tensor = torch.tensor(_px_r_init, dtype=torch.float32)
+                else:
+                    _init_tensor = torch.full((n_input,), _px_r_init)
+                self.px_r_mu = torch.nn.Parameter(_init_tensor + _px_r_std * torch.randn(n_input))
             else:
                 self.px_r_mu = torch.nn.Parameter(_px_r_std * torch.randn(n_input))
             self.px_r_log_sigma = torch.nn.Parameter(torch.full((n_input,), _log_sigma_init))
         elif self.dispersion == "gene-batch":
             n_disp = self.n_dispersion_cats
             if _px_r_init is not None:
-                self.px_r_mu = torch.nn.Parameter(
-                    torch.full((n_input, n_disp), _px_r_init) + _px_r_std * torch.randn(n_input, n_disp)
-                )
+                if isinstance(_px_r_init, np.ndarray):
+                    # Per-gene init broadcast across dispersion_key categories
+                    _init_tensor = torch.tensor(_px_r_init, dtype=torch.float32).unsqueeze(1).expand(n_input, n_disp)
+                else:
+                    _init_tensor = torch.full((n_input, n_disp), _px_r_init)
+                self.px_r_mu = torch.nn.Parameter(_init_tensor.clone() + _px_r_std * torch.randn(n_input, n_disp))
             else:
                 self.px_r_mu = torch.nn.Parameter(_px_r_std * torch.randn(n_input, n_disp))
             self.px_r_log_sigma = torch.nn.Parameter(torch.full((n_input, n_disp), _log_sigma_init))
@@ -843,7 +850,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             px_r_mu = self.px_r_mu
             px_r_log_sigma = self.px_r_log_sigma
 
-        # Variational LogNormal posterior: sample during training, use mean at inference
+        # Variational LogNormal posterior: sample during training, use median at inference
         px_r_sigma = torch.exp(px_r_log_sigma)
         if self.training:
             px_r = torch.exp(px_r_mu + px_r_sigma * torch.randn_like(px_r_mu))
