@@ -1,9 +1,10 @@
 ---
 name: inspect-data
-description: Use when inspecting h5ad/pickle/parquet files. Auto-detect by extension.
-user-invocable: false
-allowed-tools: Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/inspect_h5ad.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/inspect_pickle.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/check_parquet.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/inspect_h5ad.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/inspect_pickle.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/check_parquet.py:*)
+description: "Use when inspecting, examining, or exploring h5ad, pickle (.pkl), or parquet files. TRIGGER when: user mentions .h5ad, .pkl, .pickle, .parquet file paths, asks about AnnData structure, obs/var columns, layer shapes, pickle keys, or parquet schema. Auto-detects file type by extension."
+user-invocable: true
 ---
+
+**MANDATORY**: All Python scripts MUST be run via `bash scripts/helper_scripts/run_python_cmd.sh`. NEVER run Python scripts directly with `python3`, `python`, or bare script paths.
 
 # Inspect Data Files
 

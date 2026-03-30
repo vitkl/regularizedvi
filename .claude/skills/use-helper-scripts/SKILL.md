@@ -18,8 +18,14 @@ Claude MUST use helper scripts instead of bare python3, conda run, inline Python
 | Inspect h5ad | `scripts/claude_helper_scripts/inspect_h5ad.py` |
 | Inspect pickle | `scripts/claude_helper_scripts/inspect_pickle.py` |
 | Inspect parquet | `scripts/claude_helper_scripts/check_parquet.py` |
-| Monitor jobs | Root-level `_check_alive.sh`, `_check_job_mem.sh`, `_monitor_process.sh` |
-| Run tests | `bash run_tests.sh tests/test_model.py -x -q` |
+| Check bsub jobs | Root-level `_check_alive.sh`, `_check_job_mem.sh` |
+| Monitor process memory | Root-level `_monitor_process.sh` (can kill processes) |
+| Run tests | `run_tests.sh` (at project root) |
+| Inspect package source | `scripts/claude_helper_scripts/inspect_package_source.py` |
+| Compare h5ad files | `scripts/claude_helper_scripts/compare_h5ad.py` |
+| Compute gene variance | `scripts/claude_helper_scripts/compute_gene_variance.py` |
+| Syntax check | `scripts/claude_helper_scripts/syntax_check.py` |
+| Check imports | `scripts/claude_helper_scripts/check_imports.py` |
 
 All Python scripts are called via: `bash scripts/helper_scripts/run_python_cmd.sh [--env ENV] SCRIPT.py [args]`
 

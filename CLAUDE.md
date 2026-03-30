@@ -91,5 +91,11 @@ GPU experiment specs in `_gpu_jobs.yaml` (~20+ experiments on NeurIPS 2021 adult
 ## Immune Integration Pipeline
 `docs/notebooks/immune_integration/` — 7-dataset multi-site study (706k cells after QC): bone marrow, TEA-seq PBMC, NEAT-seq CD4, Crohn's PBMC, COVID infant PBMC, lung/spleen, infant/adult spleen. 7 notebooks: data loading -> scrublet -> ATAC loading -> RNA training -> annotation -> CRE selection -> multimodal training.
 
+## Plan Completion Verification — MANDATORY
+When a plan reaches its final step, launch a subagent (Agent tool) to independently verify that ALL steps in the plan have been completed. The subagent must check each step against the actual codebase/output state and report any incomplete or missing items before the plan is marked as done.
+
+## Subagent File Creation — MANDATORY
+Subagents (Plan, Explore, etc.) that lack Write/Edit tools must NEVER use Bash heredocs (`cat > file << EOF`, `echo >`) to create files. Instead, they must return the file content in their response text, and the parent agent must use Write/Edit to create the file. When launching subagents that need to produce files (plans, scripts, configs), use `subagent_type: "general-purpose"` which has Write/Edit access, or handle file creation in the parent after the subagent returns.
+
 ## GPU Job Submission
 bsub -q gpu-normal -n 8 -M 40000 -R"select[mem>40000] rusage[mem=40000] span[hosts=1]" -gpu "mode=shared:j_exclusive=yes:gmem=80000:num=1" -e ./%J.gpu.err -o ./%J.gpu.out -J <job_name> 'PYTHONNOUSERSITE=TRUE module load ISG/conda && conda activate regularizedvi && papermill <input.ipynb> <output.ipynb>'

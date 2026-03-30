@@ -1,9 +1,10 @@
 ---
 name: inspect-notebook
-description: Use when examining Jupyter notebooks - structure, progress, errors, search, execution status, stdout tail, progress bars, papermill params.
-user-invocable: false
-allowed-tools: Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/_inspect_notebook.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/_extract_params.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/check_notebook_progress_bar.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/_inspect_notebook.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/_extract_params.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/check_notebook_progress_bar.py:*)
+description: "Use when examining, checking, or debugging Jupyter notebooks (.ipynb). TRIGGER when: user asks about notebook structure, cell contents, execution progress, errors, output sizes, progress bars, papermill parameters, or asks to search/grep within a notebook. Also use when monitoring running papermill jobs by checking notebook output."
+user-invocable: true
 ---
+
+**MANDATORY**: All Python scripts MUST be run via `bash scripts/helper_scripts/run_python_cmd.sh`. NEVER run Python scripts directly with `python3`, `python`, or bare script paths.
 
 # Inspect Notebook
 

@@ -1,9 +1,10 @@
 ---
 name: qc-filter-summary
-description: Use when checking QC filter thresholds on h5ad files, with optional scrublet and ATAC QC joins. Fast h5py-based obs loading.
-user-invocable: false
-allowed-tools: Bash(bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/qc_filter_summary.py:*), Bash(bash scripts/helper_scripts/run_python_cmd.sh --env regularizedvi scripts/claude_helper_scripts/qc_filter_summary.py:*)
+description: "Use when checking QC filter thresholds on h5ad files or summarising cell filtering. TRIGGER when: user asks about QC metrics, cell counts after filtering, scrublet doublet scores, ATAC QC, or per-dataset/per-batch quality summaries. Fast h5py-based obs loading with optional scrublet and ATAC QC joins."
+user-invocable: true
 ---
+
+**MANDATORY**: All Python scripts MUST be run via `bash scripts/helper_scripts/run_python_cmd.sh`. NEVER run Python scripts directly with `python3`, `python`, or bare script paths.
 
 # QC Filter Summary
 
