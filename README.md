@@ -62,6 +62,12 @@ $$y_{t,g} = \text{softplus}(\gamma_{t,g})\,/\,0.7, \qquad y_{t,g} \sim \text{Gam
 
 $$\lambda_d \sim \text{Gamma}(9,\, 3), \qquad 1/\sqrt{\theta_{g,d}} \sim \text{Exponential}(\lambda_d)$$
 
+**Data-driven dispersion initialisation** (`dispersion_init="data"`) — the variational posterior mean `px_r_mu` can be initialised from data using method-of-moments variance decomposition via the law of total variance ([`_dispersion_init.py`](src/regularizedvi/_dispersion_init.py)). The total variance of raw counts $x_g$ for gene $g$ is decomposed into four components, and the equation is rearranged to solve for the technical $\theta_g^{\text{tech}}$:
+
+$$\text{Var}(x_g) = \underbrace{\mu_g}_{\text{Poisson}} + \underbrace{\mu_g^2 \cdot \text{CV}^2(L)}_{\text{library size}} + \underbrace{\frac{\mu_g^2}{\theta_g^{\text{bio}}} \cdot (1 + \text{CV}^2(L)) \cdot 0.9}_{\text{biological overdispersion}} + \underbrace{\frac{\mu_g^2}{\theta_g^{\text{tech}}} \cdot (1 + \text{CV}^2(L)) \cdot 0.1}_{\text{technical overdispersion}}$$
+
+where $\text{CV}^2(L) = \text{Var}(L)/\mathbb{E}[L]^2$ is the squared coefficient of variation of library sizes, and the 0.9/0.1 split (controlled by `biological_variance_fraction`) assumes 90% of gene-specific excess variance is biological (captured by the latent space) and 10% is technical (captured by $\theta$). Per-gene mean and variance are computed via chunked batch Welford's algorithm for memory efficiency on large datasets.
+
 **Expected mean counts** — decoder output plus optional background, scaled by library size and feature scaling ([`_components.py:467`](src/regularizedvi/_components.py#L467) base rate, [`_module.py:853–867`](src/regularizedvi/_module.py#L853-L867) feature scaling):
 
 $$\mu_{ng} = \ell_n \cdot \big(\rho_{ng} + s_{e_n,g}\big) \cdot y_{t_n,g}$$
