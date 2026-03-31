@@ -27,7 +27,7 @@ z_n \sim \text{Normal}(0, I)
 $$
 
 $$
-\ell_n \sim \text{LogNormal}(\ell_\mu^\top s_n,\; \ell_{\sigma^2}^\top s_n)
+\ell_n \sim \text{LogNormal}(\ell_\mu^\top s_n, \ell_{\sigma^2}^\top s_n)
 $$
 
 $$
@@ -35,7 +35,7 @@ $$
 $$
 
 $$
-x_{ng} \sim \text{NB}(\mu = \ell_n \rho_{ng},\; \theta_{g,s_n})
+x_{ng} \sim \text{NB}(\mu = \ell_n \rho_{ng}, \theta_{g,s_n})
 $$
 
 where:
@@ -60,7 +60,7 @@ z_n \sim \text{Normal}(0, I)
 $$
 
 $$
-\ell_n \sim \text{LogNormal}(\ell_p^{\mu},\; 0.5 \cdot \ell_p^{\sigma^2})
+\ell_n \sim \text{LogNormal}(\ell_p^{\mu}, 0.5 \cdot \ell_p^{\sigma^2})
 $$
 
 **Decoder output** — batch-free decoder maps $`z_n`$ and categorical covariates $`c_{k,n}`$ (not ambient/library covariates) to non-negative gene expression via softplus. Categorical covariates are selected by `nn_conditioning_covariate_keys` (many keys, [`_module.py:791–835`](src/regularizedvi/_module.py#L791-L835), [`_components.py:461–462`](src/regularizedvi/_components.py#L461-L462)):
@@ -72,19 +72,19 @@ $$
 **Additive background** — per-gene ambient RNA with Gamma prior pushing $`s_{e,g}`$ toward 0.01. Background parameters are indexed by `ambient_covariate_keys` (many keys, concatenated one-hot, [`_module.py:390–418`](src/regularizedvi/_module.py#L390-L418) init, [`_module.py:794–804`](src/regularizedvi/_module.py#L794-L804) one-hot selection, [`_module.py:981–991`](src/regularizedvi/_module.py#L981-L991) prior penalty). The background parameter is always initialized at the prior mean (or at `bg_init_gene_fraction` of per-gene, per-batch mean expression when data-dependent init is active), but the Gamma prior penalty in the loss is **off by default** (`regularise_background=False`); enable it explicitly if needed:
 
 $$
-s_{e,g} = \exp(\beta_{e,g}), \qquad s_{e,g} \sim \text{Gamma}(1,\, 100)
+s_{e,g} = \exp(\beta_{e,g}), \qquad s_{e,g} \sim \text{Gamma}(1, 100)
 $$
 
 **Feature scaling** — per-gene, per-covariate multiplicative scaling capturing systematic biases (e.g. PCR amplification, RT efficiency differences between protocols). Parameterised as $`\text{softplus}(\gamma)/0.7`$ with a tight Gamma prior centered at 1.0. Scaling covariates $`t`$ are selected by `feature_scaling_covariate_keys` (many keys); each covariate category gets its own scaling factor. When no scaling covariates are provided, a single $`(1, G)`$ fallback parameter is created ([`_module.py:420–432`](src/regularizedvi/_module.py#L420-L432) init, [`_module.py:853–867`](src/regularizedvi/_module.py#L853-L867) application, [`_module.py:993–1002`](src/regularizedvi/_module.py#L993-L1002) prior penalty):
 
 $$
-y_{t,g} = \text{softplus}(\gamma_{t,g})\,/\,0.7, \qquad y_{t,g} \sim \text{Gamma}(200,\, 200)
+y_{t,g} = \text{softplus}(\gamma_{t,g})/0.7, \qquad y_{t,g} \sim \text{Gamma}(200, 200)
 $$
 
 **Hierarchical dispersion prior with variational posterior** — two-level prior on inverse dispersion $`\theta_{g,d}`$ with a variational LogNormal posterior $`q(\log \theta_{g,d}) = \text{Normal}(\mu_{g,d}, \sigma_{g,d})`$ parameterised by learnable `px_r_mu` and `px_r_log_sigma`. During training, $`\theta`$ is sampled via reparameterisation: $`\theta = \exp(\mu + \sigma \varepsilon)`$, $`\varepsilon \sim \text{Normal}(0,1)`$; at inference the posterior mean $`\theta = \exp(\mu)`$ is used ([`_module.py:846–851`](src/regularizedvi/_module.py#L846-L851) sampling). Dispersion groups $`d`$ are selected by `dispersion_key` (one key). A learned rate $`\lambda_d`$ adapts regularisation strength per group. The KL divergence is computed as $`-\text{entropy}(q) - \mathbb{E}_q[\log p(1/\sqrt{\theta})]`$ ([`_module.py:933–979`](src/regularizedvi/_module.py#L933-L979) full block, [`_module.py:950`](src/regularizedvi/_module.py#L950) Level 1 softplus, [`_module.py:973–975`](src/regularizedvi/_module.py#L973-L975) Level 2 transform):
 
 $$
-\lambda_d \sim \text{Gamma}(9,\, 3), \qquad 1/\sqrt{\theta_{g,d}} \sim \text{Exponential}(\lambda_d)
+\lambda_d \sim \text{Gamma}(9, 3), \qquad 1/\sqrt{\theta_{g,d}} \sim \text{Exponential}(\lambda_d)
 $$
 
 **Data-driven dispersion initialisation** (`dispersion_init="data"`) — the variational posterior mean `px_r_mu` can be initialised from data using method-of-moments variance decomposition via the law of total variance ([`_dispersion_init.py`](src/regularizedvi/_dispersion_init.py)). The total variance of raw counts $`x_g`$ for gene $`g`$ is decomposed into four components, and the equation is rearranged to solve for the technical $`\theta_g^{\text{tech}}`$:
@@ -132,7 +132,7 @@ z^{(m)}_n \sim \text{Normal}(0, I_{d_m})
 $$
 
 $$
-z_n = [z^{(1)}_n;~ z^{(2)}_n;~ \ldots;~ z^{(M)}_n] \in \mathbb{R}^{\sum_m d_m}
+z_n = [z^{(1)}_n; z^{(2)}_n; \ldots; z^{(M)}_n] \in \mathbb{R}^{\sum_m d_m}
 $$
 
 where $`d_m`$ is the latent dimensionality assigned to modality $`m`$ (e.g. `n_latent={"rna": 96, "atac": 32}`). Because every decoder receives the full $`z_n`$, signals across modalities can interact through the decoders even though each encoder sees only its own modality.
@@ -144,25 +144,25 @@ The following equations describe how observed counts $`x^{(m)}_{nf}`$ — UMIs f
 **Library size** — always learned (observed totals include ambient contamination). A low-capacity encoder infers library size per cell, regularised by a tight LogNormal prior estimated per `library_size_key` group $`p`$ (one key, [`_multimodule.py:443–479`](src/regularizedvi/_multimodule.py#L443-L479) prior buffers, [`_multimodule.py:1101–1110`](src/regularizedvi/_multimodule.py#L1101-L1110) loss):
 
 $$
-\ell^{(m)}_n \sim \text{LogNormal}\big(\ell^{(m),\mu}_p,\; 0.5 \cdot \ell^{(m),\sigma^2}_p\big)
+\ell^{(m)}_n \sim \text{LogNormal}\big(\ell^{(m),\mu}_p, 0.5 \cdot \ell^{(m),\sigma^2}_p\big)
 $$
 
 **Decoder output** — maps joint latent code $`z_n`$ and categorical covariates $`c_{k,n}`$ (selected by `nn_conditioning_covariate_keys`, many keys) to non-negative feature signal via softplus ([`_multimodule.py:911–928`](src/regularizedvi/_multimodule.py#L911-L928)):
 
 $$
-\rho^{(m)}_{nf} = \text{softplus}\big(f^{(m)}_w(z_n,\, c_{k,n})\big) \in \mathbb{R}_{\geq 0}
+\rho^{(m)}_{nf} = \text{softplus}\big(f^{(m)}_w(z_n, c_{k,n})\big) \in \mathbb{R}_{\geq 0}
 $$
 
 **Additive background** — per-feature ambient contamination with Gamma prior, indexed by `ambient_covariate_keys` (many keys, concatenated one-hot, [`_multimodule.py:535–560`](src/regularizedvi/_multimodule.py#L535-L560) init, [`_multimodule.py:899–909`](src/regularizedvi/_multimodule.py#L899-L909) one-hot selection, [`_multimodule.py:1194–1210`](src/regularizedvi/_multimodule.py#L1194-L1210) prior penalty):
 
 $$
-s^{(m)}_{e,f} = \exp(\beta^{(m)}_{e,f}), \qquad s^{(m)}_{e,f} \sim \text{Gamma}(1,\, 100)
+s^{(m)}_{e,f} = \exp(\beta^{(m)}_{e,f}), \qquad s^{(m)}_{e,f} \sim \text{Gamma}(1, 100)
 $$
 
 **Feature scaling** — per-feature, per-covariate multiplicative scaling capturing systematic biases (GC content, mappability, peak caller sensitivity). Parameterised as $`\text{softplus}(\gamma)/0.7`$ with a tight Gamma prior centered at 1. Scaling covariates $`t`$ are selected by `feature_scaling_covariate_keys` (many keys); each covariate category gets its own factor ([`_multimodule.py:562–571`](src/regularizedvi/_multimodule.py#L562-L571) init, [`_multimodule.py:930–940`](src/regularizedvi/_multimodule.py#L930-L940) activation and selection, [`_multimodule.py:1175–1192`](src/regularizedvi/_multimodule.py#L1175-L1192) prior penalty):
 
 $$
-y^{(m)}_{t,f} = \text{softplus}(\gamma^{(m)}_{t,f})\,/\,0.7, \qquad y^{(m)}_{t,f} \sim \text{Gamma}(200,\, 200)
+y^{(m)}_{t,f} = \text{softplus}(\gamma^{(m)}_{t,f})/0.7, \qquad y^{(m)}_{t,f} \sim \text{Gamma}(200, 200)
 $$
 
 **Expected mean counts** — decoder output plus optional background, scaled by library size and feature scaling ([`_components.py:467`](src/regularizedvi/_components.py#L467) base rate, [`_multimodule.py:940`](src/regularizedvi/_multimodule.py#L940) feature scaling):
@@ -174,7 +174,7 @@ $$
 **Hierarchical dispersion prior** — same two-level structure as single-modality with variational LogNormal posterior, per modality and `dispersion_key` group $`d`$ (one key, [`_multimodule.py:1131–1173`](src/regularizedvi/_multimodule.py#L1131-L1173)):
 
 $$
-\lambda^{(m)}_d \sim \text{Gamma}(9,\, 3), \qquad 1/\sqrt{\theta^{(m)}_{f,d}} \sim \text{Exponential}(\lambda^{(m)}_d)
+\lambda^{(m)}_d \sim \text{Gamma}(9, 3), \qquad 1/\sqrt{\theta^{(m)}_{f,d}} \sim \text{Exponential}(\lambda^{(m)}_d)
 $$
 
 **Observation model** — GammaPoisson (= negative binomial) with mean $`\mu^{(m)}_{nf}`$ and inverse dispersion $`\theta^{(m)}_{f,d}`$:
@@ -200,17 +200,17 @@ Setting $`s^{(m)}_{e,f} = 0`$ (no ambient) and $`y^{(m)}_{t,f} = 1`$ (no feature
 **Per-modality encoder** — each modality's encoder takes its own observed counts as input and independently constructs a Gaussian posterior over its private latent slice. The RNA encoder sees only RNA counts; the ATAC encoder sees only ATAC counts. This forces the model to build a dedicated representation for each modality before combining them:
 
 $$
-q_\eta(z^{(m)}_n \mid x^{(m)}_n, e_n, c_{k,n}, p_n) = \text{Normal}\!\big(\mu^{(m)}_\eta(x^{(m)}_n),\; (\sigma^{(m)}_\eta)^2(x^{(m)}_n)\big)
+q_\eta(z^{(m)}_n \mid x^{(m)}_n, e_n, c_{k,n}, p_n) = \text{Normal}\!\big(\mu^{(m)}_\eta(x^{(m)}_n), (\sigma^{(m)}_\eta)^2(x^{(m)}_n)\big)
 $$
 
 **Posterior concatenation** — samples from the per-modality posteriors are concatenated to form the joint representation fed to all decoders. Because every decoder $`f^{(m)}_w`$ receives the full $`z_n`$, cross-modal coupling can emerge through the decoders during training. The training objective (ELBO) penalises each encoder's KL divergence independently:
 
 $$
-z_n = [z^{(1)}_n;\; \ldots;\; z^{(M)}_n], \quad z^{(m)}_n \sim q_\eta(z^{(m)}_n \mid x^{(m)}_n)
+z_n = [z^{(1)}_n; \ldots; z^{(M)}_n], \quad z^{(m)}_n \sim q_\eta(z^{(m)}_n \mid x^{(m)}_n)
 $$
 
 $$
-\text{KL} = \sum_m \text{KL}\big[q_\eta(z^{(m)}_n \mid x^{(m)}_n)\;\|\;\mathcal{N}(0, I_{d_m})\big]
+\text{KL} = \sum_m \text{KL}\big[q_\eta(z^{(m)}_n \mid x^{(m)}_n) \| \mathcal{N}(0, I_{d_m})\big]
 $$
 
 **Alternative latent strategies** (selectable via `latent_mode`):
