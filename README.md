@@ -10,10 +10,11 @@ Regularized scVI with ambient RNA correction and overdispersion regularisation, 
 
 The modifications (ambient RNA correction, dispersion prior, batch-free decoder, learned library size) act as structural inductive biases that make a high-capacity model (`n_hidden=512+`, `n_latent=128+`) well-behaved by default, removing the need for careful per-dataset hyperparameter tuning. This is particularly important for complex datasets with hundreds of cell types (e.g. whole-embryo atlases, cross-atlas integration) where large latent spaces and wide hidden layers are needed to avoid competition between cell types for representational capacity.
 
-**[Quick start](#quick-start)** | [Installation](#installation) | [Covariate design](#covariate-design)
+**[Quick start](#quick-start)** | [Installation](#installation) | [Model description](#motivation) | [Covariate design](#covariate-design)
 
-<details>
-<summary><b>Model description</b> (motivation, generative model, key modifications, covariate design)</summary>
+> Jump to: [Quick start](#quick-start) to get running, [Installation](#installation) for setup, or read on for the model description and math.
+
+---
 
 ## Motivation
 
@@ -359,7 +360,7 @@ regularizedvi.AmbientRegularizedSCVI.setup_anndata(
 )
 ```
 
-</details>
+---
 
 ## Installation
 
