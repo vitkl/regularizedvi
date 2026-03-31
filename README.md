@@ -180,7 +180,7 @@ $$
 **Observation model** — GammaPoisson (= negative binomial) with mean $`\mu^{(m)}_{nf}`$ and inverse dispersion $`\theta^{(m)}_{f,d}`$:
 
 $$
-x^{(m)}_{nf} \sim \text{GammaPoisson}\!\Big(\text{concentration} = \theta^{(m)}_{f,d_n},\quad \text{rate} = \frac{\theta^{(m)}_{f,d_n}}{\mu^{(m)}_{nf}}\Big)
+x^{(m)}_{nf} \sim \text{GammaPoisson}\Big(\text{concentration} = \theta^{(m)}_{f,d_n},\quad \text{rate} = \frac{\theta^{(m)}_{f,d_n}}{\mu^{(m)}_{nf}}\Big)
 $$
 
 #### Optional per-modality correction terms
@@ -200,7 +200,7 @@ Setting $`s^{(m)}_{e,f} = 0`$ (no ambient) and $`y^{(m)}_{t,f} = 1`$ (no feature
 **Per-modality encoder** — each modality's encoder takes its own observed counts as input and independently constructs a Gaussian posterior over its private latent slice. The RNA encoder sees only RNA counts; the ATAC encoder sees only ATAC counts. This forces the model to build a dedicated representation for each modality before combining them:
 
 $$
-q_\eta(z^{(m)}_n \mid x^{(m)}_n, e_n, c_{k,n}, p_n) = \text{Normal}\!\big(\mu^{(m)}_\eta(x^{(m)}_n), (\sigma^{(m)}_\eta)^2(x^{(m)}_n)\big)
+q_\eta(z^{(m)}_n \mid x^{(m)}_n, e_n, c_{k,n}, p_n) = \text{Normal}\big(\mu^{(m)}_\eta(x^{(m)}_n), (\sigma^{(m)}_\eta)^2(x^{(m)}_n)\big)
 $$
 
 **Posterior concatenation** — samples from the per-modality posteriors are concatenated to form the joint representation fed to all decoders. Because every decoder $`f^{(m)}_w`$ receives the full $`z_n`$, cross-modal coupling can emerge through the decoders during training. The training objective (ELBO) penalises each encoder's KL divergence independently:
