@@ -104,7 +104,7 @@ $$
 **Observation model** — GammaPoisson (= negative binomial) with mean $`\mu_{ng}`$ and inverse dispersion $`\theta_{g,d}`$:
 
 $$
-x_{ng} \sim \text{GammaPoisson}\Big(\text{concentration} = \theta_{g,d_n},\;\; \text{rate} = \frac{\theta_{g,d_n}}{\mu_{ng}}\Big)
+x_{ng} \sim \text{GammaPoisson}\Big(\text{concentration} = \theta_{g,d_n},\quad \text{rate} = \frac{\theta_{g,d_n}}{\mu_{ng}}\Big)
 $$
 
 **Notation:**
@@ -132,7 +132,7 @@ z^{(m)}_n \sim \text{Normal}(0, I_{d_m})
 $$
 
 $$
-z_n = [\,z^{(1)}_n;\; z^{(2)}_n;\; \ldots;\; z^{(M)}_n\,] \in \mathbb{R}^{\sum_m d_m}
+z_n = [z^{(1)}_n;~ z^{(2)}_n;~ \ldots;~ z^{(M)}_n] \in \mathbb{R}^{\sum_m d_m}
 $$
 
 where $`d_m`$ is the latent dimensionality assigned to modality $`m`$ (e.g. `n_latent={"rna": 96, "atac": 32}`). Because every decoder receives the full $`z_n`$, signals across modalities can interact through the decoders even though each encoder sees only its own modality.
@@ -180,7 +180,7 @@ $$
 **Observation model** — GammaPoisson (= negative binomial) with mean $`\mu^{(m)}_{nf}`$ and inverse dispersion $`\theta^{(m)}_{f,d}`$:
 
 $$
-x^{(m)}_{nf} \sim \text{GammaPoisson}\!\Big(\text{concentration} = \theta^{(m)}_{f,d_n},\;\; \text{rate} = \frac{\theta^{(m)}_{f,d_n}}{\mu^{(m)}_{nf}}\Big)
+x^{(m)}_{nf} \sim \text{GammaPoisson}\!\Big(\text{concentration} = \theta^{(m)}_{f,d_n},\quad \text{rate} = \frac{\theta^{(m)}_{f,d_n}}{\mu^{(m)}_{nf}}\Big)
 $$
 
 #### Optional per-modality correction terms
@@ -261,7 +261,7 @@ The following defaults were validated in production training runs on whole-embry
 **Residual library encoder** (`residual_library_encoder=True`, default): Instead of inferring library size purely from the encoder, the residual formulation blends the observed log-library with the encoder output via a learnable shrinkage weight:
 
 $$
-\text{library} = \log(\text{sens}) + w \cdot (\text{centered\_obs} - \log(\text{sens})) + \text{encoder\_output}
+\text{library} = \log(\text{sens}) + w \cdot (\text{centered_obs} - \log(\text{sens})) + \text{encoder_output}
 $$
 
 where $`\text{centered\_obs} = \log(\text{total\_counts}) - \text{global\_log\_mean} + \log(\text{sensitivity})`$ and $`w \sim \text{LogNormal}(\mu_w, \sigma_w)`$ with an $`\text{Exponential}(1)`$ shrinkage prior. At initialization $`w \approx 1`$, so library $`\approx`$ observed. The centering (subtracting `global_log_mean` from library prior means) is always on, regardless of the residual encoder setting.
