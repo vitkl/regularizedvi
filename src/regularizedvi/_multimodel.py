@@ -34,8 +34,6 @@ from regularizedvi._constants import (
     DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
     DEFAULT_ADDITIVE_BG_PRIOR_BETA,
     DEFAULT_COMPUTE_PEARSON,
-    DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
-    DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
     DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
     DEFAULT_FEATURE_SCALING_PRIOR_BETA,
     DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
@@ -43,7 +41,6 @@ from regularizedvi._constants import (
     DEFAULT_MODALITY_SCALE_PRIOR_CONCENTRATION,
     DEFAULT_REGULARISE_BACKGROUND,
     DEFAULT_REGULARISE_DISPERSION,
-    DEFAULT_REGULARISE_DISPERSION_PRIOR,
     DEFAULT_SCALE_ACTIVATION,
     DEFAULT_USE_BATCH_IN_DECODER,
     DEFAULT_USE_BATCH_NORM,
@@ -161,9 +158,9 @@ class RegularizedMultimodalVI(
         feature_scaling_prior_alpha: float = DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
         feature_scaling_prior_beta: float = DEFAULT_FEATURE_SCALING_PRIOR_BETA,
         regularise_dispersion: bool = DEFAULT_REGULARISE_DISPERSION,
-        regularise_dispersion_prior: float = DEFAULT_REGULARISE_DISPERSION_PRIOR,
-        dispersion_hyper_prior_alpha: float = DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
-        dispersion_hyper_prior_beta: float = DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
+        regularise_dispersion_prior: dict[str, float] | float | None = None,
+        dispersion_hyper_prior_alpha: dict[str, float] | float | None = None,
+        dispersion_hyper_prior_beta: dict[str, float] | float | None = None,
         additive_bg_prior_alpha: float = DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
         additive_bg_prior_beta: float = DEFAULT_ADDITIVE_BG_PRIOR_BETA,
         regularise_background: bool = DEFAULT_REGULARISE_BACKGROUND,
@@ -183,10 +180,14 @@ class RegularizedMultimodalVI(
         residual_library_encoder: bool = True,
         library_obs_w_prior_rate: float = 1.0,
         # Data-driven dispersion initialization
-        dispersion_init: Literal["prior", "data"] = "prior",
+        dispersion_init: Literal["prior", "data", "variance_burst_size"] = "prior",
         dispersion_init_bio_frac: float = 0.9,
         dispersion_init_theta_min: float = 0.01,
         dispersion_init_theta_max: float = 10.0,
+        # Bursting model decoder type (per modality)
+        decoder_type: dict[str, str] | str = "expected_RNA",
+        burst_size_intercept: dict[str, float] | float = 1.0,
+        burst_size_n_hidden: dict[str, int] | int | None = None,
         **kwargs,
     ):
         AmbientRegularizedSCVI._validate_bool_params(
@@ -251,6 +252,9 @@ class RegularizedMultimodalVI(
             "decoder_cov_weight_l2": decoder_cov_weight_l2,
             "residual_library_encoder": residual_library_encoder,
             "library_obs_w_prior_rate": library_obs_w_prior_rate,
+            "decoder_type": decoder_type,
+            "burst_size_intercept": burst_size_intercept,
+            "burst_size_n_hidden": burst_size_n_hidden,
             **kwargs,
         }
 
@@ -528,6 +532,43 @@ class RegularizedMultimodalVI(
                     f"CV²(L)={_diag['cv2_L']:.3f}, sub-Poisson={_diag['n_sub_poisson']}/{len(log_theta_init)}"
                 )
 
+        # Bursting model init (per-modality, only for burst_frequency_size modalities)
+        _bursting_init_per_modality = {}
+        if self._dispersion_init == "variance_burst_size":
+            from regularizedvi._constants import DEFAULT_DECODER_TYPE
+            from regularizedvi._dispersion_init import compute_bursting_init
+
+            _decoder_type = self._module_kwargs.get("decoder_type", DEFAULT_DECODER_TYPE)
+            _decoder_type_resolved = (
+                _decoder_type if isinstance(_decoder_type, dict) else dict.fromkeys(modality_names, _decoder_type)
+            )
+            _burst_intercept = self._module_kwargs.get("burst_size_intercept", 1.0)
+            _burst_intercept_resolved = (
+                _burst_intercept
+                if isinstance(_burst_intercept, dict)
+                else dict.fromkeys(modality_names, _burst_intercept)
+            )
+
+            px_r_init_mean_dict = px_r_init_mean_dict or {}
+            for mod_name in modality_names:
+                if _decoder_type_resolved.get(mod_name) == "burst_frequency_size":
+                    mod_adata = self.adata.mod[mod_name]
+                    logger.info(f"Computing bursting model init for modality '{mod_name}'...")
+                    _init_vals, _diag = compute_bursting_init(
+                        mod_adata,
+                        biological_variance_fraction=self._dispersion_init_bio_frac,
+                        burst_size_intercept=_burst_intercept_resolved.get(mod_name, 1.0),
+                        theta_min=self._dispersion_init_theta_min,
+                        theta_max=self._dispersion_init_theta_max,
+                        verbose=True,
+                    )
+                    px_r_init_mean_dict[mod_name] = _init_vals["log_theta"]
+                    _bursting_init_per_modality[mod_name] = _init_vals
+                    logger.info(
+                        f"  {mod_name}: median burst_freq={np.median(_init_vals['burst_freq']):.3f}, "
+                        f"median stochastic_v={np.median(_init_vals['stochastic_v_scale']):.4f}"
+                    )
+
         kwargs = dict(self._module_kwargs)
         # Remove keys that are passed separately
         for k in ["n_hidden", "n_latent", "n_layers", "dropout_rate"]:
@@ -558,6 +599,31 @@ class RegularizedMultimodalVI(
             additive_bg_init_per_gene=bg_init_per_gene_dict or None,
             **kwargs,
         )
+
+        # Apply bursting model init values to px_r (reused as stochastic_v) and decoder biases
+        if _bursting_init_per_modality:
+            import torch
+
+            for mod_name, _init_vals in _bursting_init_per_modality.items():
+                # px_r_mu stores stochastic_v init: px_r = exp(px_r_mu) ≈ v_scale^2
+                if mod_name in self.module.px_r_mu:
+                    sv_scale = torch.tensor(_init_vals["stochastic_v_scale"], dtype=torch.float32)
+                    sv_log_init = torch.log(torch.clamp(sv_scale.pow(2), min=1e-8))
+                    _px_r_param = self.module.px_r_mu[mod_name]
+                    if _px_r_param.dim() == 1:
+                        _px_r_param.data.copy_(sv_log_init)
+                    else:
+                        _px_r_param.data.copy_(sv_log_init.unsqueeze(1).expand_as(_px_r_param))
+
+                # Initialize burst_freq decoder bias (px_scale_decoder[0] is nn.Linear)
+                bf_bias = torch.tensor(_init_vals["burst_freq_bias"], dtype=torch.float32)
+                self.module.decoders[mod_name].px_scale_decoder[0].bias.data.copy_(bf_bias)
+
+                # Initialize burst_size decoder bias
+                bs_bias = torch.tensor(_init_vals["burst_size_bias"], dtype=torch.float32)
+                self.module.decoders[mod_name].burst_size_head[0].bias.data.copy_(bs_bias)
+
+                logger.info(f"Applied bursting model init to '{mod_name}' px_r (stochastic_v) and decoder biases.")
 
     @classmethod
     @setup_anndata_dsp.dedent

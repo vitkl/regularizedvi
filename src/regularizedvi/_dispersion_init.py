@@ -468,3 +468,116 @@ def _compute_theta(
     }
 
     return log_theta, diagnostics
+
+
+def compute_bursting_init(
+    adata_or_path,
+    layer: str | None = None,
+    dispersion_key: str | None = None,
+    biological_variance_fraction: float = 0.9,
+    burst_size_intercept: float = 1.0,
+    theta_min: float = 0.01,
+    theta_max: float = 10.0,
+    chunk_size: int = 5000,
+    feature_type: str | None = None,
+    verbose: bool = True,
+) -> tuple[dict, dict]:
+    """Compute init values for burst_frequency_size decoder.
+
+    Returns per-gene initial values for:
+    - stochastic_v_raw: pre-softplus scale of technical variance
+    - burst_freq bias: log(burst_frequency) for decoder bias init
+    - burst_size bias: pre-softplus(burst_size - intercept) for decoder bias init
+
+    Uses the same MoM variance decomposition as compute_dispersion_init,
+    then splits excess into biological (burst_freq) and technical (stochastic_v).
+
+    Parameters
+    ----------
+    adata_or_path
+        AnnData object or path to .h5ad file.
+    layer
+        Layer to use. None or "X" for X matrix.
+    dispersion_key
+        obs column for batch/dispersion grouping.
+    biological_variance_fraction
+        Fraction of excess variance attributed to biology (default 0.9).
+    burst_size_intercept
+        The intercept added to softplus(burst_size_decoder_output).
+    theta_min, theta_max
+        Clamp range for burst_freq (same as theta).
+    chunk_size
+        Cells per chunk for Welford computation.
+    feature_type
+        Filter by var['feature_types'] (e.g. 'GEX').
+    verbose
+        Print progress.
+
+    Returns
+    -------
+    init_values : dict
+        Keys: 'stochastic_v_raw', 'burst_freq_bias', 'burst_size_bias', 'log_theta'
+        All np.ndarray of shape (n_genes,).
+    diagnostics : dict
+        Intermediate quantities for inspection.
+    """
+    # First compute theta via existing MoM (reuse all the machinery)
+    log_theta, diagnostics = compute_dispersion_init(
+        adata_or_path,
+        layer=layer,
+        dispersion_key=dispersion_key,
+        biological_variance_fraction=biological_variance_fraction,
+        theta_min=theta_min,
+        theta_max=theta_max,
+        chunk_size=chunk_size,
+        feature_type=feature_type,
+        verbose=verbose,
+    )
+
+    mean_g = diagnostics["mean_g"]
+    excess_adjusted = diagnostics["excess_adjusted"]
+    eps = 1e-4
+
+    # Split excess into biological and technical components
+    technical_fraction = 1 - biological_variance_fraction
+    excess_technical = np.maximum(excess_adjusted * technical_fraction, eps**2)
+    excess_biological = np.maximum(excess_adjusted * biological_variance_fraction, eps**2)
+
+    # stochastic_v: scale param (std-like), then .pow(2) gives variance in the model
+    sv_scale = np.sqrt(excess_technical)
+
+    # burst_freq: biological concentration = mean^2 / excess_biological
+    burst_freq = np.clip(mean_g**2 / excess_biological, theta_min, theta_max)
+
+    # burst_size: mean / burst_freq - intercept, then inverse_softplus
+    valid = burst_freq > eps
+    burst_size_values = np.where(valid, mean_g / burst_freq, 0.0)
+    default_burst_size = np.min(burst_size_values[valid]) if np.any(valid) else 1.0
+    burst_size_raw_val = np.where(valid, burst_size_values, default_burst_size) - burst_size_intercept
+    burst_size_raw_val = np.maximum(burst_size_raw_val, eps)
+    burst_size_bias = np.log(np.expm1(burst_size_raw_val)).astype(np.float32)
+
+    # burst_freq bias: log(burst_freq) for decoder bias init (pre-softplus)
+    burst_freq_clamped = np.maximum(burst_freq, eps)
+    burst_freq_bias = np.log(np.expm1(burst_freq_clamped)).astype(np.float32)
+
+    if verbose:
+        print("\n  Bursting model init:")
+        print(f"    stochastic_v scale: median={np.median(sv_scale):.4f}, mean={np.mean(sv_scale):.4f}")
+        print(f"    burst_freq: median={np.median(burst_freq):.4f}, mean={np.mean(burst_freq):.4f}")
+        print(
+            f"    burst_size: median={np.median(burst_size_values[valid]):.4f}, "
+            f"mean={np.mean(burst_size_values[valid]):.4f}"
+        )
+        print(f"    genes with valid burst_size: {np.sum(valid)}/{len(mean_g)}")
+
+    init_values = {
+        "burst_freq_bias": burst_freq_bias,
+        "burst_size_bias": burst_size_bias,
+        "log_theta": log_theta,
+        "burst_freq": burst_freq.astype(np.float32),
+        "burst_size": burst_size_values.astype(np.float32),
+        "stochastic_v_scale": sv_scale.astype(np.float32),
+    }
+
+    return init_values, diagnostics

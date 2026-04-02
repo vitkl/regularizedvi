@@ -272,6 +272,10 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         # Residual library encoder: library = log(sens) + w*(obs-log(sens)) + encoder
         residual_library_encoder: bool = True,
         library_obs_w_prior_rate: float = 1.0,
+        # Bursting model decoder type
+        decoder_type: str = "expected_RNA",
+        burst_size_intercept: float = 1.0,
+        burst_size_n_hidden: int | None = None,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -300,6 +304,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.decoder_weight_l2 = decoder_weight_l2
         self.decoder_cov_weight_l2 = decoder_cov_weight_l2
         self.residual_library_encoder = residual_library_encoder
+        self.decoder_type = decoder_type
+        self.burst_size_intercept = burst_size_intercept
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
         self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
@@ -546,6 +552,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             use_batch_norm=use_batch_norm_decoder,
             use_layer_norm=use_layer_norm_decoder,
             scale_activation=_scale_activation,
+            decoder_type=decoder_type,
+            burst_size_n_hidden=burst_size_n_hidden,
+            burst_size_intercept=burst_size_intercept,
             **_extra_decoder_kwargs,
         )
 
@@ -811,11 +820,12 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             bg = torch.matmul(concat_ambient, torch.exp(self.additive_background).T)
 
         # Decoder call: batch-free or with batch
+        _burst_freq = _burst_size = None
         if self.use_batch_in_decoder:
             if self.batch_representation == "embedding":
                 batch_rep = self.compute_embedding(REGISTRY_KEYS.BATCH_KEY, batch_index)
                 decoder_input = torch.cat([decoder_input, batch_rep], dim=-1)
-                px_scale, px_r, px_rate, px_dropout = self.decoder(
+                _dec_out = self.decoder(
                     self.dispersion,
                     decoder_input,
                     size_factor,
@@ -823,7 +833,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                     additive_background=bg,
                 )
             else:
-                px_scale, px_r, px_rate, px_dropout = self.decoder(
+                _dec_out = self.decoder(
                     self.dispersion,
                     decoder_input,
                     size_factor,
@@ -833,13 +843,18 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 )
         else:
             # Batch-free decoder: omit batch_index, only pass categorical covariates
-            px_scale, px_r, px_rate, px_dropout = self.decoder(
+            _dec_out = self.decoder(
                 self.dispersion,
                 decoder_input,
                 size_factor,
                 *categorical_input,
                 additive_background=bg,
             )
+        # Unpack decoder outputs (burst_frequency_size returns 6 values, others return 4)
+        if self.decoder_type == "burst_frequency_size":
+            px_scale, px_r, px_rate, px_dropout, _burst_freq, _burst_size = _dec_out
+        else:
+            px_scale, px_r, px_rate, px_dropout = _dec_out
 
         if self.dispersion == "gene-batch":
             _disp_idx = dispersion_index if dispersion_index is not None else batch_index
@@ -858,6 +873,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             px_r = torch.exp(px_r_mu)
 
         # Feature scaling (cell2location-style per-covariate multiplicative scaling)
+        _feature_scaling_factor = None
         if self.use_feature_scaling:
             fs_transformed = torch.nn.functional.softplus(self.feature_scaling) / 0.7
             if feature_scaling_covs is not None and self.n_total_feature_scaling_cats > 0:
@@ -868,13 +884,35 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                     ],
                     dim=-1,
                 )
-                scaling = torch.matmul(feature_scaling_indicator, fs_transformed)
+                _feature_scaling_factor = torch.matmul(feature_scaling_indicator, fs_transformed)
             else:
-                scaling = fs_transformed  # (1, n_genes) broadcasts
-            px_rate = px_rate * scaling
+                _feature_scaling_factor = fs_transformed  # (1, n_genes) broadcasts
+            px_rate = px_rate * _feature_scaling_factor
 
-        # GammaPoisson (= NB): concentration=theta, rate=theta/mu
-        px = GammaPoissonWithScale(concentration=px_r, rate=px_r / px_rate, scale=px_scale)
+        # Build likelihood distribution
+        if self.decoder_type == "burst_frequency_size" and _burst_freq is not None:
+            # px_r (from LogNormal posterior) is repurposed as stochastic_v (technical variance)
+            # px_r is already resolved per dispersion group and sampled above
+            stochastic_v_cg = px_r  # variance in count-space (px_r plays role of technical variance)
+
+            # Biological variance (rate-space)
+            var_biol = _burst_freq * _burst_size.pow(2)
+
+            # sensitivity = exp(library) * feature_scaling
+            _sensitivity = torch.exp(size_factor)
+            if _feature_scaling_factor is not None:
+                _sensitivity = _sensitivity * _feature_scaling_factor
+
+            # Form 2 (exact): alpha = mu^2 / var
+            _var = _sensitivity.pow(2) * var_biol + stochastic_v_cg
+            _alpha = px_rate.pow(2) / (_var + 1e-8)  # eps for numerical stability
+
+            # scale = burst_freq * burst_size (biological rate, for get_normalized_expression)
+            _bio_rate = _burst_freq * _burst_size
+            px = GammaPoissonWithScale(concentration=_alpha, rate=_alpha / px_rate, scale=_bio_rate)
+        else:
+            # Standard expected_RNA path: GammaPoisson with learned theta
+            px = GammaPoissonWithScale(concentration=px_r, rate=px_r / px_rate, scale=px_scale)
 
         # Priors
         if self.use_observed_lib_size:
@@ -888,7 +926,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             pl = Normal(local_library_log_means, local_library_log_vars.sqrt())
         pz = Normal(torch.zeros_like(z), torch.ones_like(z))
 
-        return {
+        _gen_out = {
             MODULE_KEYS.PX_KEY: px,
             MODULE_KEYS.PL_KEY: pl,
             MODULE_KEYS.PZ_KEY: pz,
@@ -896,6 +934,12 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             "px_r_log_sigma": px_r_log_sigma,
             "px_r_sampled": px_r,
         }
+        if self.decoder_type == "burst_frequency_size" and _burst_freq is not None:
+            _gen_out["burst_freq"] = _burst_freq
+            _gen_out["burst_size"] = _burst_size
+            _gen_out["stochastic_v_cg"] = stochastic_v_cg  # = px_r (reused)
+            _gen_out["alpha_total"] = _alpha
+        return _gen_out
 
     def loss(
         self,
@@ -976,9 +1020,14 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             # Analytic LogNormal entropy: H[q] = sum(log_sigma + 0.5*log(2*pi*e))
             entropy = (px_r_log_sigma + 0.5 * math.log(2 * math.pi * math.e)).sum()
 
-            # MC estimate of E_q[log p(1/sqrt(theta))] using fresh sample from parameter-level posterior
+            # MC estimate of E_q[log p(transform(theta))] using fresh sample
             px_r_sample = torch.exp(self.px_r_mu + px_r_sigma * torch.randn_like(self.px_r_mu))
-            px_r_transformed = (1.0 / px_r_sample).pow(0.5)
+            if self.decoder_type == "burst_frequency_size":
+                # Prior on sqrt(v) ~ Exp(lambda): pushes technical variance toward zero
+                px_r_transformed = px_r_sample.pow(0.5)
+            else:
+                # Prior on 1/sqrt(theta) ~ Exp(lambda): pushes theta toward large (Poisson)
+                px_r_transformed = (1.0 / px_r_sample).pow(0.5)
             log_prior = Exponential(rate).log_prob(px_r_transformed).sum()
 
             # KL = -entropy - E_q[log p]
@@ -1036,6 +1085,26 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         if self.residual_library_encoder and hasattr(self, "_library_obs_w_mean"):
             extra_metrics_payload["library_obs_w"] = self._library_obs_w_mean
+
+        # Dispersion / alpha monitoring metrics
+        if self.regularise_dispersion:
+            extra_metrics_payload["dispersion_kl"] = (dispersion_kl / n_obs).detach()
+        px_r_sampled = generative_outputs.get("px_r_sampled")
+        if px_r_sampled is not None:
+            extra_metrics_payload["theta_mean"] = px_r_sampled.detach().mean()
+        if self.decoder_type == "burst_frequency_size":
+            _bf = generative_outputs.get("burst_freq")
+            _bs = generative_outputs.get("burst_size")
+            _sv = generative_outputs.get("stochastic_v_cg")
+            _at = generative_outputs.get("alpha_total")
+            if _bf is not None:
+                extra_metrics_payload["burst_freq_mean"] = _bf.detach().mean()
+            if _bs is not None:
+                extra_metrics_payload["burst_size_mean"] = _bs.detach().mean()
+            if _sv is not None:
+                extra_metrics_payload["stochastic_v_mean"] = _sv.detach().mean()
+            if _at is not None:
+                extra_metrics_payload["alpha_total_mean"] = _at.detach().mean()
 
         # Pearson correlation metrics (gene-wise and cell-wise)
         # Normalize to per-cell proportions to remove library size confound:

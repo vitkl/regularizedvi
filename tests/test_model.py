@@ -2285,3 +2285,107 @@ class TestCoercePapermillParams:
 
         with pytest.raises(TypeError, match="Cannot coerce"):
             coerce_papermill_params(flag=("notabool", bool))
+
+
+class TestBurstFrequencySizeDecoder:
+    """Tests for decoder_type='burst_frequency_size' (bursting model)."""
+
+    def test_single_modal_burst_frequency_size(self, adata):
+        """Test AmbientRegularizedSCVI with burst_frequency_size decoder."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=32,
+            n_latent=8,
+            decoder_type="burst_frequency_size",
+            burst_size_intercept=1.0,
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=64)
+
+        # Check training completed and metrics are present
+        history = model.history
+        assert "burst_freq_mean_train" in history
+        assert "burst_size_mean_train" in history
+        assert "stochastic_v_mean_train" in history
+        assert "alpha_total_mean_train" in history
+
+        # Check latent representation works
+        latent = model.get_latent_representation()
+        assert latent.shape == (adata.n_obs, 8)
+
+    def test_single_modal_burst_size_intercept_small(self, adata):
+        """Test burst_size_intercept=0.01 doesn't break training."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=32,
+            n_latent=8,
+            decoder_type="burst_frequency_size",
+            burst_size_intercept=0.01,
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=64)
+        latent = model.get_latent_representation()
+        assert latent.shape == (adata.n_obs, 8)
+
+    def test_single_modal_variance_burst_size_init(self, adata):
+        """Test dispersion_init='variance_burst_size' with burst_frequency_size decoder."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=32,
+            n_latent=8,
+            decoder_type="burst_frequency_size",
+            dispersion_init="variance_burst_size",
+            dispersion_init_bio_frac=0.9,
+        )
+        # Verify px_r_mu was initialized from data (not default prior init)
+        px_r_mu = model.module.px_r_mu.data
+        # Default init would be ~log(9)=2.197; variance_burst_size init gives different values
+        default_init = torch.full_like(px_r_mu, 2.197)
+        assert not torch.allclose(px_r_mu, default_init, atol=0.5), "px_r_mu should be initialized from data, not prior"
+        model.train(max_epochs=2, train_size=1.0, batch_size=64)
+        latent = model.get_latent_representation()
+        assert latent.shape == (adata.n_obs, 8)
+
+    def test_multimodal_burst_frequency_size_rna_only(self, mdata):
+        """Test RegularizedMultimodalVI with burst_frequency_size for RNA, expected_RNA for ATAC."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=32,
+            n_latent=8,
+            decoder_type={"rna": "burst_frequency_size", "atac": "expected_RNA"},
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=64)
+        latent = model.get_latent_representation()
+        assert latent.shape[0] == mdata.n_obs
+
+
+class TestSingleModalityMultimodal:
+    """Tests for N=1 (single modality) multimodal model."""
+
+    def test_setup_mudata_single_modality(self, mdata_single_rna):
+        """Test setup_mudata works with single RNA modality."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata_single_rna, batch_key="batch")
+
+    def test_train_single_modality(self, mdata_single_rna):
+        """Test training with N=1 multimodal mode."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata_single_rna, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata_single_rna, n_hidden=16, n_latent=4)
+        assert model.module.modality_names == ["rna"]
+        model.train(max_epochs=2, train_size=1.0, batch_size=64)
+        latent = model.get_latent_representation()
+        assert latent.shape == (100, 4)
+
+    def test_single_modality_burst_frequency_size(self, mdata_single_rna):
+        """Test N=1 with burst_frequency_size decoder."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata_single_rna, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata_single_rna,
+            n_hidden=16,
+            n_latent=4,
+            decoder_type="burst_frequency_size",
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=64)
+        latent = model.get_latent_representation()
+        assert latent.shape == (100, 4)

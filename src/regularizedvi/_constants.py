@@ -62,6 +62,28 @@ LIBRARY_SIZE_KEY = "library_size_cov"
 # Registry key for encoder covariates (controls what categoricals the encoder sees)
 ENCODER_COVS_KEY = "encoder_covs"
 
+# --- Decoder type switching ---
+DECODER_TYPES = ("expected_RNA", "Kon_Koff", "burst_frequency_size", "probability")
+DEFAULT_DECODER_TYPE = "expected_RNA"
+DEFAULT_BURST_SIZE_INTERCEPT = 1.0
+
+# --- Per-decoder-type default hyperparameters ---
+# Auto-applied when user doesn't override. Different decoder types need different priors.
+DECODER_TYPE_DEFAULTS = {
+    "expected_RNA": {
+        "dispersion_hyper_prior_alpha": DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,  # 9.0
+        "dispersion_hyper_prior_beta": DEFAULT_DISPERSION_HYPER_PRIOR_BETA,  # 3.0
+        "regularise_dispersion_prior": DEFAULT_REGULARISE_DISPERSION_PRIOR,  # 3.0
+    },
+    "burst_frequency_size": {
+        # Gamma(2, 0.04) hyper-prior: E[lambda]=50, marginal median(v_std)=0.017
+        # Wider than expected_RNA because technical variance spans ~3 orders of magnitude.
+        "dispersion_hyper_prior_alpha": 2.0,
+        "dispersion_hyper_prior_beta": 0.04,
+        "regularise_dispersion_prior": 3.0,
+    },
+}
+
 # --- Network architecture ---
 DEFAULT_USE_BATCH_NORM = "none"
 DEFAULT_USE_LAYER_NORM = "both"

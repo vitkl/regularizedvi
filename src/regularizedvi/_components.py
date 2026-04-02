@@ -385,9 +385,14 @@ class RegularizedDecoderSCVI(nn.Module):
         use_batch_norm: bool = False,
         use_layer_norm: bool = False,
         scale_activation: Literal["softmax", "softplus"] = "softmax",
+        decoder_type: str = "expected_RNA",
+        burst_size_n_hidden: int | None = None,
+        burst_size_intercept: float = 1.0,
         **kwargs,
     ):
         super().__init__()
+        self.decoder_type = decoder_type
+        self.burst_size_intercept = burst_size_intercept
         self.px_decoder = RegularizedFCLayers(
             n_in=n_input,
             n_out=n_hidden,
@@ -410,6 +415,26 @@ class RegularizedDecoderSCVI(nn.Module):
             nn.Linear(n_hidden, n_output),
             px_scale_activation,
         )
+
+        # Secondary decoder for burst_frequency_size (burst_size head)
+        if decoder_type == "burst_frequency_size":
+            _bs_n_hidden = burst_size_n_hidden if burst_size_n_hidden is not None else max(1, n_hidden // 2)
+            self.burst_size_decoder = RegularizedFCLayers(
+                n_in=n_input,
+                n_out=_bs_n_hidden,
+                n_cat_list=n_cat_list,
+                n_layers=max(1, n_layers - 1),
+                n_hidden=_bs_n_hidden,
+                dropout_rate=0,
+                inject_covariates=inject_covariates,
+                use_batch_norm=use_batch_norm,
+                use_layer_norm=use_layer_norm,
+                **kwargs,
+            )
+            self.burst_size_head = nn.Sequential(
+                nn.Linear(_bs_n_hidden, n_output),
+                nn.Softplus(),
+            )
 
         # dispersion: here we only deal with gene-cell dispersion case
         self.px_r_decoder = nn.Linear(n_hidden, n_output)
@@ -462,11 +487,25 @@ class RegularizedDecoderSCVI(nn.Module):
         px_scale = self.px_scale_decoder(px)
         px_dropout = self.px_dropout_decoder(px)
 
-        # Ambient RNA: add per-gene, per-batch background before scaling by library
-        if additive_background is not None:
-            px_rate = torch.exp(library) * (px_scale + additive_background)
-        else:
-            px_rate = torch.exp(library) * px_scale
+        if self.decoder_type == "burst_frequency_size":
+            # px_scale is burst_frequency (softplus output from main decoder)
+            burst_freq = px_scale
+            burst_size = self.burst_size_head(self.burst_size_decoder(z, *cat_list)) + self.burst_size_intercept
 
-        px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
-        return px_scale, px_r, px_rate, px_dropout
+            # Ambient RNA: add per-gene, per-batch background before scaling by library
+            if additive_background is not None:
+                px_rate = torch.exp(library) * (burst_freq * burst_size + additive_background)
+            else:
+                px_rate = torch.exp(library) * burst_freq * burst_size
+
+            px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
+            return px_scale, px_r, px_rate, px_dropout, burst_freq, burst_size
+        else:
+            # Standard expected_RNA path
+            if additive_background is not None:
+                px_rate = torch.exp(library) * (px_scale + additive_background)
+            else:
+                px_rate = torch.exp(library) * px_scale
+
+            px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
+            return px_scale, px_r, px_rate, px_dropout

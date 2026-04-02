@@ -130,3 +130,22 @@ def mdata_distinct_covs():
             a.obs[col] = a.obs[col].astype("category")
 
     return mu.MuData({"rna": adata_rna, "atac": adata_atac})
+
+
+@pytest.fixture
+def mdata_single_rna():
+    """Create MuData with single RNA modality for N=1 testing."""
+    n_obs, n_rna = 100, 50
+    n_batches = 3
+    rng = np.random.default_rng(42)
+
+    rna_counts = rng.poisson(lam=5, size=(n_obs, n_rna)).astype(np.float32)
+    adata_rna = ad.AnnData(X=rna_counts)
+    adata_rna.var_names = [f"gene_{i}" for i in range(n_rna)]
+    adata_rna.obs_names = [f"cell_{i}" for i in range(n_obs)]
+    adata_rna.obs["batch"] = [f"batch_{i % n_batches}" for i in range(n_obs)]
+    adata_rna.obs["batch"] = adata_rna.obs["batch"].astype("category")
+    adata_rna.obs["site"] = [f"site_{i % 2}" for i in range(n_obs)]
+    adata_rna.obs["site"] = adata_rna.obs["site"].astype("category")
+
+    return mu.MuData({"rna": adata_rna})

@@ -48,8 +48,6 @@ from regularizedvi._constants import (
     DEFAULT_ADDITIVE_BG_PRIOR_BETA,
     DEFAULT_COMPUTE_PEARSON,
     DEFAULT_DISPERSION,
-    DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
-    DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
     DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
     DEFAULT_FEATURE_SCALING_PRIOR_BETA,
     DEFAULT_GENE_LIKELIHOOD,
@@ -57,7 +55,6 @@ from regularizedvi._constants import (
     DEFAULT_LIBRARY_N_HIDDEN,
     DEFAULT_REGULARISE_BACKGROUND,
     DEFAULT_REGULARISE_DISPERSION,
-    DEFAULT_REGULARISE_DISPERSION_PRIOR,
     DEFAULT_SCALE_ACTIVATION,
     DEFAULT_USE_ADDITIVE_BACKGROUND,
     DEFAULT_USE_BATCH_IN_DECODER,
@@ -211,9 +208,9 @@ class AmbientRegularizedSCVI(
         use_additive_background: bool = DEFAULT_USE_ADDITIVE_BACKGROUND,
         use_batch_in_decoder: bool = DEFAULT_USE_BATCH_IN_DECODER,
         regularise_dispersion: bool = DEFAULT_REGULARISE_DISPERSION,
-        regularise_dispersion_prior: float = DEFAULT_REGULARISE_DISPERSION_PRIOR,
-        dispersion_hyper_prior_alpha: float = DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,
-        dispersion_hyper_prior_beta: float = DEFAULT_DISPERSION_HYPER_PRIOR_BETA,
+        regularise_dispersion_prior: float | None = None,
+        dispersion_hyper_prior_alpha: float | None = None,
+        dispersion_hyper_prior_beta: float | None = None,
         additive_bg_prior_alpha: float = DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
         additive_bg_prior_beta: float = DEFAULT_ADDITIVE_BG_PRIOR_BETA,
         regularise_background: bool = DEFAULT_REGULARISE_BACKGROUND,
@@ -224,7 +221,7 @@ class AmbientRegularizedSCVI(
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = DEFAULT_USE_LAYER_NORM,
         compute_pearson: bool = DEFAULT_COMPUTE_PEARSON,
         # Parameter initialization control (for ablation experiments)
-        dispersion_init: Literal["prior", "data"] = "prior",
+        dispersion_init: Literal["prior", "data", "variance_burst_size"] = "prior",
         dispersion_init_bio_frac: float = 0.9,
         dispersion_init_theta_min: float = 0.01,
         dispersion_init_theta_max: float = 10.0,
@@ -242,6 +239,10 @@ class AmbientRegularizedSCVI(
         # Residual library encoder
         residual_library_encoder: bool = True,
         library_obs_w_prior_rate: float = 1.0,
+        # Bursting model decoder type
+        decoder_type: str = "expected_RNA",
+        burst_size_intercept: float = 1.0,
+        burst_size_n_hidden: int | None = None,
         **kwargs,
     ):
         self._validate_bool_params(
@@ -253,6 +254,17 @@ class AmbientRegularizedSCVI(
             compute_pearson=compute_pearson,
         )
         super().__init__(adata)
+
+        # Apply decoder-type defaults for dispersion priors (None → from DECODER_TYPE_DEFAULTS)
+        from regularizedvi._constants import DECODER_TYPE_DEFAULTS
+
+        _dt_defaults = DECODER_TYPE_DEFAULTS.get(decoder_type, DECODER_TYPE_DEFAULTS["expected_RNA"])
+        if regularise_dispersion_prior is None:
+            regularise_dispersion_prior = _dt_defaults["regularise_dispersion_prior"]
+        if dispersion_hyper_prior_alpha is None:
+            dispersion_hyper_prior_alpha = _dt_defaults["dispersion_hyper_prior_alpha"]
+        if dispersion_hyper_prior_beta is None:
+            dispersion_hyper_prior_beta = _dt_defaults["dispersion_hyper_prior_beta"]
 
         self._module_kwargs = {
             "n_hidden": n_hidden,
@@ -289,6 +301,9 @@ class AmbientRegularizedSCVI(
             "decoder_cov_weight_l2": decoder_cov_weight_l2,
             "residual_library_encoder": residual_library_encoder,
             "library_obs_w_prior_rate": library_obs_w_prior_rate,
+            "decoder_type": decoder_type,
+            "burst_size_intercept": burst_size_intercept,
+            "burst_size_n_hidden": burst_size_n_hidden,
             **kwargs,
         }
         self._decoder_bias_multiplier = decoder_bias_multiplier
@@ -456,6 +471,7 @@ class AmbientRegularizedSCVI(
                 del data
 
             # Data-driven dispersion initialization
+            _bursting_init_values = None
             if dispersion_init == "data" and px_r_init_mean is None:
                 from regularizedvi._dispersion_init import compute_dispersion_init
 
@@ -475,6 +491,27 @@ class AmbientRegularizedSCVI(
                 logger.info(
                     f"Dispersion init: median theta={np.exp(np.median(log_theta_init)):.3f}, "
                     f"CV²(L)={_diag['cv2_L']:.3f}, sub-Poisson={_diag['n_sub_poisson']}/{len(log_theta_init)}"
+                )
+            elif dispersion_init == "variance_burst_size" and decoder_type == "burst_frequency_size":
+                from regularizedvi._dispersion_init import compute_bursting_init
+
+                _x_reg = self.adata_manager.data_registry[REGISTRY_KEYS.X_KEY]
+                _disp_layer = None if _x_reg.attr_name == "X" else _x_reg.attr_key
+                logger.info("Computing bursting model init (variance decomposition)...")
+                _bursting_init_values, _diag = compute_bursting_init(
+                    self.adata,
+                    layer=_disp_layer,
+                    biological_variance_fraction=dispersion_init_bio_frac,
+                    burst_size_intercept=burst_size_intercept,
+                    theta_min=dispersion_init_theta_min,
+                    theta_max=dispersion_init_theta_max,
+                    verbose=True,
+                )
+                # Use log_theta for px_r_init_mean (backward compatible with dispersion path)
+                px_r_init_mean = _bursting_init_values["log_theta"]
+                logger.info(
+                    f"Bursting init: median burst_freq={np.median(_bursting_init_values['burst_freq']):.3f}, "
+                    f"median stochastic_v={np.median(_bursting_init_values['stochastic_v_scale']):.4f}"
                 )
 
             # Determine use_observed_lib_size:
@@ -531,9 +568,37 @@ class AmbientRegularizedSCVI(
                 additive_bg_init_per_gene=bg_init_per_gene,
                 residual_library_encoder=residual_library_encoder,
                 library_obs_w_prior_rate=library_obs_w_prior_rate,
+                decoder_type=decoder_type,
+                burst_size_intercept=burst_size_intercept,
+                burst_size_n_hidden=burst_size_n_hidden,
                 **kwargs,
             )
             self.module.minified_data_type = self.minified_data_type
+
+            # Apply bursting model init values to px_r (reused as stochastic_v) and decoder biases
+            if _bursting_init_values is not None:
+                import torch
+
+                # px_r_mu stores stochastic_v init (reusing the same parameter)
+                # stochastic_v_raw contains inverse_softplus values, but px_r_mu is log-space
+                # for the LogNormal posterior. Convert: px_r_mu = log(stochastic_v_scale^2)
+                # since px_r = exp(px_r_mu) during sampling, and we want px_r ≈ v_scale^2
+                sv_scale = torch.tensor(_bursting_init_values["stochastic_v_scale"], dtype=torch.float32)
+                sv_log_init = torch.log(torch.clamp(sv_scale.pow(2), min=1e-8))
+                if self.module.px_r_mu.dim() == 1:
+                    self.module.px_r_mu.data.copy_(sv_log_init)
+                else:
+                    self.module.px_r_mu.data.copy_(sv_log_init.unsqueeze(1).expand_as(self.module.px_r_mu))
+
+                # Initialize burst_freq decoder bias
+                bf_bias = torch.tensor(_bursting_init_values["burst_freq_bias"], dtype=torch.float32)
+                self.module.decoder.px_scale_decoder[0].bias.data.copy_(bf_bias)
+
+                # Initialize burst_size decoder bias
+                bs_bias = torch.tensor(_bursting_init_values["burst_size_bias"], dtype=torch.float32)
+                self.module.decoder.burst_size_head[0].bias.data.copy_(bs_bias)
+
+                logger.info("Applied bursting model init values to px_r (stochastic_v) and decoder biases.")
 
         self.init_params_ = self._get_init_params(locals())
 
