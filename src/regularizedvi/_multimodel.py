@@ -1305,7 +1305,7 @@ class RegularizedMultimodalVI(
                         dec_input = torch.cat([z_input, cont_covs], dim=-1)
 
                     if module.use_batch_in_decoder:
-                        _, _, px_rate, _ = module.decoders[name](
+                        _dec_out = module.decoders[name](
                             disp,
                             dec_input,
                             lib,
@@ -1314,13 +1314,15 @@ class RegularizedMultimodalVI(
                             additive_background=bg,
                         )
                     else:
-                        _, _, px_rate, _ = module.decoders[name](
+                        _dec_out = module.decoders[name](
                             disp,
                             dec_input,
                             lib,
                             *categorical_input,
                             additive_background=bg,
                         )
+                    # px_rate is always the 3rd element (burst_frequency_size returns 6, others 4)
+                    px_rate = _dec_out[2]
 
                     if not skip_feature_scaling and name in module.feature_scaling:
                         rf_transformed = torch.nn.functional.softplus(module.feature_scaling[name]) / 0.7

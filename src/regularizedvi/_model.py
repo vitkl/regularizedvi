@@ -197,7 +197,7 @@ class AmbientRegularizedSCVI(
         n_latent: int = 10,
         n_layers: int = 1,
         dropout_rate: float = 0.1,
-        dispersion: Literal["gene", "gene-batch", "gene-cell"] = DEFAULT_DISPERSION,
+        dispersion: Literal["gene", "gene-batch"] = DEFAULT_DISPERSION,
         gene_likelihood: Literal["zinb", "nb", "poisson", "normal"] = DEFAULT_GENE_LIKELIHOOD,
         latent_distribution: Literal["normal", "ln"] = "normal",
         # regularizedvi defaults (from _constants.py)

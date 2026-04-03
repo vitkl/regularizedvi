@@ -963,6 +963,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         px_dict = {}
         px_r_mu_dict = {}
+        burst_outputs = {}
         px_r_log_sigma_dict = {}
         px_r_sampled_dict = {}
         for name in self.modality_names:
@@ -1032,9 +1033,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 _px_r_mu = torch.nn.functional.linear(_oh, self.px_r_mu[name])
                 _px_r_log_sigma = torch.nn.functional.linear(_oh, self.px_r_log_sigma[name])
             elif disp in ("gene-cell", "region-cell"):
-                px_r = px_r_cell
-                _px_r_mu = None
-                _px_r_log_sigma = None
+                raise ValueError(
+                    f"{disp} dispersion is deprecated. Use 'gene'/'region' or 'gene-batch'/'region-batch'."
+                )
             else:
                 _px_r_mu = self.px_r_mu[name]
                 _px_r_log_sigma = self.px_r_log_sigma[name]
@@ -1076,6 +1077,16 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 px_r_log_sigma_dict[name] = _px_r_log_sigma
             px_r_sampled_dict[name] = px_r if _mod_decoder_type != "burst_frequency_size" else _alpha
 
+            if _mod_decoder_type == "burst_frequency_size" and _burst_freq is not None:
+                burst_outputs[name] = {
+                    "burst_freq": _burst_freq,
+                    "burst_size": _burst_size,
+                    "stochastic_v_cg": stochastic_v_cg,
+                    "alpha_total": _alpha,
+                    "var_biol": _var_biol,
+                    "var_total": _var,
+                }
+
         # Prior on z
         pz = Normal(torch.zeros_like(z), torch.ones_like(z))
 
@@ -1105,6 +1116,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             "px_r_mu": px_r_mu_dict,
             "px_r_log_sigma": px_r_log_sigma_dict,
             "px_r_sampled": px_r_sampled_dict,
+            "burst_outputs": burst_outputs,
         }
 
     def loss(
@@ -1359,12 +1371,19 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         # ---- Burst frequency/size metrics (for burst_frequency_size modalities) ----
         px_r_sampled_dict = generative_outputs.get("px_r_sampled", {})
+        burst_outputs = generative_outputs.get("burst_outputs", {})
         for name in self.modality_names:
             if name in px_r_sampled_dict:
                 extra_metrics[f"theta_mean_{name}"] = px_r_sampled_dict[name].detach().mean()
-            if self.decoder_type_dict.get(name) == "burst_frequency_size":
-                # These are stored as alpha_total in px_r_sampled_dict for bursting modalities
-                pass  # alpha_total_mean already captured via theta_mean above
+            if name in burst_outputs:
+                bo = burst_outputs[name]
+                extra_metrics[f"burst_freq_mean_{name}"] = bo["burst_freq"].detach().mean()
+                extra_metrics[f"burst_size_mean_{name}"] = bo["burst_size"].detach().mean()
+                extra_metrics[f"stochastic_v_mean_{name}"] = bo["stochastic_v_cg"].detach().mean()
+                extra_metrics[f"alpha_total_mean_{name}"] = bo["alpha_total"].detach().mean()
+                extra_metrics[f"var_biol_mean_{name}"] = bo["var_biol"].detach().mean()
+                extra_metrics[f"var_total_mean_{name}"] = bo["var_total"].detach().mean()
+                extra_metrics[f"var_biol_frac_{name}"] = (bo["var_biol"] / (bo["var_total"] + 1e-8)).detach().mean()
 
         return LossOutput(
             loss=loss,

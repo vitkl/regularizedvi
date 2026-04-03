@@ -2360,6 +2360,38 @@ class TestBurstFrequencySizeDecoder:
         latent = model.get_latent_representation()
         assert latent.shape[0] == mdata.n_obs
 
+    def test_multimodal_burst_attribution(self, mdata):
+        """Test get_modality_attribution works with burst_frequency_size decoder."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=32,
+            n_latent=8,
+            decoder_type={"rna": "burst_frequency_size", "atac": "expected_RNA"},
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=64)
+        attribution = model.get_modality_attribution(batch_size=64)
+        assert "rna" in attribution
+        assert "atac" in attribution
+        for name in ("rna", "atac"):
+            assert attribution[name]["attribution"].shape[0] == mdata.n_obs
+
+    def test_multimodal_burst_variance_metrics(self, mdata):
+        """Test burst variance metrics are logged in model.history."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=32,
+            n_latent=8,
+            decoder_type={"rna": "burst_frequency_size", "atac": "expected_RNA"},
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=64)
+        history = model.history
+        assert "burst_freq_mean_rna_train" in history
+        assert "var_biol_mean_rna_train" in history
+        assert "var_total_mean_rna_train" in history
+        assert "var_biol_frac_rna_train" in history
+
 
 class TestSingleModalityMultimodal:
     """Tests for N=1 (single modality) multimodal model."""

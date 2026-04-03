@@ -211,7 +211,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         n_continuous_cov: int = 0,
         n_cats_per_cov: list[int] | None = None,
         dropout_rate: float = 0.1,
-        dispersion: Literal["gene", "gene-batch", "gene-cell"] = "gene-batch",
+        dispersion: Literal["gene", "gene-batch"] = "gene-batch",
         log_variational: bool = True,
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "zinb",
         latent_distribution: Literal["normal", "ln"] = "normal",
@@ -376,9 +376,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 self.px_r_mu = torch.nn.Parameter(_px_r_std * torch.randn(n_input, n_disp))
             self.px_r_log_sigma = torch.nn.Parameter(torch.full((n_input, n_disp), _log_sigma_init))
         elif self.dispersion == "gene-cell":
-            pass
+            raise ValueError("gene-cell dispersion is deprecated. Use 'gene' or 'gene-batch'.")
         else:
-            raise ValueError("`dispersion` must be one of 'gene', 'gene-batch', 'gene-cell'.")
+            raise ValueError("`dispersion` must be one of 'gene', 'gene-batch'.")
 
         # Learnable dispersion prior rate (cell2location-style hierarchical prior)
         # Initialized at inverse_softplus(regularise_dispersion_prior) so that
@@ -939,6 +939,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             _gen_out["burst_size"] = _burst_size
             _gen_out["stochastic_v_cg"] = stochastic_v_cg  # = px_r (reused)
             _gen_out["alpha_total"] = _alpha
+            _gen_out["var_biol"] = var_biol
+            _gen_out["var_total"] = _var
         return _gen_out
 
     def loss(
@@ -1097,6 +1099,8 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             _bs = generative_outputs.get("burst_size")
             _sv = generative_outputs.get("stochastic_v_cg")
             _at = generative_outputs.get("alpha_total")
+            _vb = generative_outputs.get("var_biol")
+            _vt = generative_outputs.get("var_total")
             if _bf is not None:
                 extra_metrics_payload["burst_freq_mean"] = _bf.detach().mean()
             if _bs is not None:
@@ -1105,6 +1109,12 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 extra_metrics_payload["stochastic_v_mean"] = _sv.detach().mean()
             if _at is not None:
                 extra_metrics_payload["alpha_total_mean"] = _at.detach().mean()
+            if _vb is not None:
+                extra_metrics_payload["var_biol_mean"] = _vb.detach().mean()
+            if _vt is not None:
+                extra_metrics_payload["var_total_mean"] = _vt.detach().mean()
+            if _vb is not None and _vt is not None:
+                extra_metrics_payload["var_biol_frac"] = (_vb / (_vt + 1e-8)).detach().mean()
 
         # Pearson correlation metrics (gene-wise and cell-wise)
         # Normalize to per-cell proportions to remove library size confound:

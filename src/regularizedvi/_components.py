@@ -436,7 +436,7 @@ class RegularizedDecoderSCVI(nn.Module):
                 nn.Softplus(),
             )
 
-        # dispersion: here we only deal with gene-cell dispersion case
+        # px_r_decoder kept for backward compatibility with saved models (gene-cell deprecated)
         self.px_r_decoder = nn.Linear(n_hidden, n_output)
 
         # dropout
@@ -498,8 +498,7 @@ class RegularizedDecoderSCVI(nn.Module):
             else:
                 px_rate = torch.exp(library) * burst_freq * burst_size
 
-            px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
-            return px_scale, px_r, px_rate, px_dropout, burst_freq, burst_size
+            return px_scale, None, px_rate, px_dropout, burst_freq, burst_size
         else:
             # Standard expected_RNA path
             if additive_background is not None:
@@ -507,5 +506,4 @@ class RegularizedDecoderSCVI(nn.Module):
             else:
                 px_rate = torch.exp(library) * px_scale
 
-            px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
-            return px_scale, px_r, px_rate, px_dropout
+            return px_scale, None, px_rate, px_dropout
