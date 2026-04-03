@@ -536,7 +536,7 @@ class RegularizedMultimodalVI(
         _bursting_init_per_modality = {}
         if self._dispersion_init == "variance_burst_size":
             from regularizedvi._constants import DEFAULT_DECODER_TYPE
-            from regularizedvi._dispersion_init import compute_bursting_init
+            from regularizedvi._dispersion_init import compute_bursting_init, compute_dispersion_init
 
             _decoder_type = self._module_kwargs.get("decoder_type", DEFAULT_DECODER_TYPE)
             _decoder_type_resolved = (
@@ -568,6 +568,19 @@ class RegularizedMultimodalVI(
                         f"  {mod_name}: median burst_freq={np.median(_init_vals['burst_freq']):.3f}, "
                         f"median stochastic_v={np.median(_init_vals['stochastic_v_scale']):.4f}"
                     )
+            # Fallback: non-burst modalities get data-driven MoM theta init
+            for mod_name in modality_names:
+                if mod_name not in px_r_init_mean_dict:
+                    mod_adata = self.adata.mod[mod_name]
+                    logger.info(f"Computing data-driven dispersion init for non-burst modality '{mod_name}'...")
+                    log_theta_init, _diag = compute_dispersion_init(
+                        mod_adata,
+                        biological_variance_fraction=self._dispersion_init_bio_frac,
+                        theta_min=self._dispersion_init_theta_min,
+                        theta_max=self._dispersion_init_theta_max,
+                        verbose=False,
+                    )
+                    px_r_init_mean_dict[mod_name] = log_theta_init
 
         kwargs = dict(self._module_kwargs)
         # Remove keys that are passed separately
