@@ -498,7 +498,7 @@ class RegularizedDecoderSCVI(nn.Module):
             else:
                 px_rate = torch.exp(library) * burst_freq * burst_size
 
-            return px_scale, None, px_rate, px_dropout, burst_freq, burst_size
+            return px_scale, None, px_rate, px_dropout, px, burst_freq, burst_size
         else:
             # Standard expected_RNA path
             if additive_background is not None:
@@ -506,4 +506,4 @@ class RegularizedDecoderSCVI(nn.Module):
             else:
                 px_rate = torch.exp(library) * px_scale
 
-            return px_scale, None, px_rate, px_dropout
+            return px_scale, None, px_rate, px_dropout, px

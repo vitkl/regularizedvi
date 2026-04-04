@@ -243,6 +243,12 @@ class AmbientRegularizedSCVI(
         decoder_type: str = "expected_RNA",
         burst_size_intercept: float = 1.0,
         burst_size_n_hidden: int | None = None,
+        # Sparsity priors
+        z_sparsity_prior: str | None = None,
+        n_active_latent_per_cell: float = 20.0,
+        decoder_hidden_l1: float = 0.0,
+        hidden_activation_sparsity: bool = False,
+        n_active_hidden_per_cell: float = 40.0,
         **kwargs,
     ):
         self._validate_bool_params(
@@ -304,6 +310,11 @@ class AmbientRegularizedSCVI(
             "decoder_type": decoder_type,
             "burst_size_intercept": burst_size_intercept,
             "burst_size_n_hidden": burst_size_n_hidden,
+            "z_sparsity_prior": z_sparsity_prior,
+            "n_active_latent_per_cell": n_active_latent_per_cell,
+            "decoder_hidden_l1": decoder_hidden_l1,
+            "hidden_activation_sparsity": hidden_activation_sparsity,
+            "n_active_hidden_per_cell": n_active_hidden_per_cell,
             **kwargs,
         }
         self._decoder_bias_multiplier = decoder_bias_multiplier
@@ -571,6 +582,11 @@ class AmbientRegularizedSCVI(
                 decoder_type=decoder_type,
                 burst_size_intercept=burst_size_intercept,
                 burst_size_n_hidden=burst_size_n_hidden,
+                z_sparsity_prior=z_sparsity_prior,
+                n_active_latent_per_cell=n_active_latent_per_cell,
+                decoder_hidden_l1=decoder_hidden_l1,
+                hidden_activation_sparsity=hidden_activation_sparsity,
+                n_active_hidden_per_cell=n_active_hidden_per_cell,
                 **kwargs,
             )
             self.module.minified_data_type = self.minified_data_type

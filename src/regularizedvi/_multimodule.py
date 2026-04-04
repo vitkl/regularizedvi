@@ -236,6 +236,12 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         decoder_type: dict[str, str] | str = "expected_RNA",
         burst_size_intercept: dict[str, float] | float = 1.0,
         burst_size_n_hidden: dict[str, int] | int | None = None,
+        # Sparsity priors
+        z_sparsity_prior: str | None = None,
+        n_active_latent_per_cell: float = 20.0,
+        decoder_hidden_l1: float = 0.0,
+        hidden_activation_sparsity: bool = False,
+        n_active_hidden_per_cell: float = 40.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -263,6 +269,11 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.residual_library_encoder = residual_library_encoder
         self.regularise_dispersion = regularise_dispersion
         self.encode_covariates = encode_covariates
+        self.z_sparsity_prior = z_sparsity_prior
+        self.n_active_latent_per_cell = n_active_latent_per_cell
+        self.decoder_hidden_l1 = decoder_hidden_l1
+        self.hidden_activation_sparsity = hidden_activation_sparsity
+        self.n_active_hidden_per_cell = n_active_hidden_per_cell
 
         # Resolve decoder_type early (needed for hyper-prior defaults)
         decoder_type_dict = _resolve_per_modality(decoder_type, self.modality_names)
@@ -672,6 +683,16 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             penalty = penalty + decoder.px_scale_decoder[0].weight.pow(2).sum()
         return penalty
 
+    def _decoder_hidden_l1_penalty(self) -> torch.Tensor:
+        """Sum of absolute weights in all decoder FC layers (excludes biases)."""
+        penalty = torch.tensor(0.0, device=next(self.parameters()).device)
+        for decoder in self.decoders.values():
+            for layer_seq in decoder.px_decoder.fc_layers:
+                for sublayer in layer_seq:
+                    if isinstance(sublayer, nn.Linear):
+                        penalty = penalty + sublayer.weight.abs().sum()
+        return penalty
+
     def _decoder_cov_weight_l2_penalty(self) -> torch.Tensor:
         """Sum of squared weights for covariate columns of decoder layer 0 (all modalities)."""
         penalty = torch.tensor(0.0, device=next(self.parameters()).device)
@@ -966,6 +987,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         burst_outputs = {}
         px_r_log_sigma_dict = {}
         px_r_sampled_dict = {}
+        hidden_act_dict = {}
         for name in self.modality_names:
             if name not in library:
                 continue
@@ -1006,9 +1028,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     additive_background=bg,
                 )
             if _mod_decoder_type == "burst_frequency_size":
-                px_scale, px_r_cell, px_rate, px_dropout, _burst_freq, _burst_size = _dec_out
+                px_scale, px_r_cell, px_rate, px_dropout, hidden_act, _burst_freq, _burst_size = _dec_out
             else:
-                px_scale, px_r_cell, px_rate, px_dropout = _dec_out
+                px_scale, px_r_cell, px_rate, px_dropout, hidden_act = _dec_out
 
             # Feature scaling (cell2location-style per-covariate scaling)
             # softplus(param)/0.7: centered at ~1.0 when param=0, positive, unbounded
@@ -1087,6 +1109,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     "var_total": _var,
                 }
 
+            hidden_act_dict[name] = hidden_act
+
         # Prior on z
         pz = Normal(torch.zeros_like(z), torch.ones_like(z))
 
@@ -1117,6 +1141,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             "px_r_log_sigma": px_r_log_sigma_dict,
             "px_r_sampled": px_r_sampled_dict,
             "burst_outputs": burst_outputs,
+            "hidden_activations": hidden_act_dict,
         }
 
     def loss(
@@ -1237,6 +1262,22 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 kl_w_total = kl_w_total + kl_w
                 extra_metrics[f"library_obs_w_{name}"] = q_w.mean.detach()
 
+        # ---- Z sparsity: Gamma prior on |z| ----
+        if self.z_sparsity_prior == "gamma":
+            z = inference_outputs["z"]
+            _shape_z = torch.tensor(
+                self.n_active_latent_per_cell / self.total_latent_dim,
+                device=z.device,
+                dtype=z.dtype,
+            )
+            _gamma_z = Gamma(
+                concentration=_shape_z,
+                rate=torch.tensor(1.0, device=z.device, dtype=z.dtype),
+            )
+            z_sparsity_penalty = -_gamma_z.log_prob(z.abs() + 1e-8).sum(dim=-1)
+            extra_metrics["z_sparsity_penalty"] = z_sparsity_penalty.mean().detach()
+            kl_z = kl_z + z_sparsity_penalty
+
         # ---- Weighted loss ----
         loss = torch.mean(recon_loss + kl_weight * kl_z + kl_l) + kl_w_total
 
@@ -1332,6 +1373,34 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             decoder_cov_penalty = self.decoder_cov_weight_l2 * self._decoder_cov_weight_l2_penalty()
             loss = loss + decoder_cov_penalty / n_obs
             extra_metrics["decoder_cov_weight_penalty"] = (decoder_cov_penalty / n_obs).detach()
+
+        # ---- Decoder weight L1 penalty (sparsity-inducing) ----
+        if self.decoder_hidden_l1 > 0.0:
+            n_obs = recon_loss.shape[0]
+            decoder_l1_penalty = self.decoder_hidden_l1 * self._decoder_hidden_l1_penalty()
+            loss = loss + decoder_l1_penalty / n_obs
+            extra_metrics["decoder_l1_penalty"] = (decoder_l1_penalty / n_obs).detach()
+
+        # ---- Hidden activation sparsity: Gamma prior on decoder hidden activations ----
+        if self.hidden_activation_sparsity:
+            n_obs = recon_loss.shape[0]
+            hidden_act_dict = generative_outputs["hidden_activations"]
+            for name in self.modality_names:
+                if name not in hidden_act_dict:
+                    continue
+                _hidden_act = hidden_act_dict[name]
+                _shape_h = torch.tensor(
+                    self.n_active_hidden_per_cell / _hidden_act.shape[-1],
+                    device=_hidden_act.device,
+                    dtype=_hidden_act.dtype,
+                )
+                _gamma_h = Gamma(
+                    concentration=_shape_h,
+                    rate=torch.tensor(1.0, device=_hidden_act.device, dtype=_hidden_act.dtype),
+                )
+                _h_penalty = -_gamma_h.log_prob(_hidden_act + 1e-8).sum(dim=-1)
+                loss = loss + _h_penalty.mean() / n_obs
+                extra_metrics[f"hidden_sparsity_{name}"] = _h_penalty.mean().detach()
 
         # ---- Modality scaling Gamma prior ----
         if self.learnable_modality_scaling and self.modality_scale_init:

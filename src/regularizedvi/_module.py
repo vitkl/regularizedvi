@@ -276,6 +276,12 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         decoder_type: str = "expected_RNA",
         burst_size_intercept: float = 1.0,
         burst_size_n_hidden: int | None = None,
+        # Sparsity priors
+        z_sparsity_prior: str | None = None,
+        n_active_latent_per_cell: float = 20.0,
+        decoder_hidden_l1: float = 0.0,
+        hidden_activation_sparsity: bool = False,
+        n_active_hidden_per_cell: float = 40.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -306,6 +312,11 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.residual_library_encoder = residual_library_encoder
         self.decoder_type = decoder_type
         self.burst_size_intercept = burst_size_intercept
+        self.z_sparsity_prior = z_sparsity_prior
+        self.n_active_latent_per_cell = n_active_latent_per_cell
+        self.decoder_hidden_l1 = decoder_hidden_l1
+        self.hidden_activation_sparsity = hidden_activation_sparsity
+        self.n_active_hidden_per_cell = n_active_hidden_per_cell
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
         self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
@@ -581,6 +592,15 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         penalty = penalty + self.decoder.px_scale_decoder[0].weight.pow(2).sum()
         return penalty
 
+    def _decoder_hidden_l1_penalty(self) -> torch.Tensor:
+        """Sum of absolute weights in decoder FC layers (excludes biases)."""
+        penalty = torch.tensor(0.0, device=next(self.decoder.parameters()).device)
+        for layer_seq in self.decoder.px_decoder.fc_layers:
+            for sublayer in layer_seq:
+                if isinstance(sublayer, torch.nn.Linear):
+                    penalty = penalty + sublayer.weight.abs().sum()
+        return penalty
+
     def _decoder_cov_weight_l2_penalty(self) -> torch.Tensor:
         """Sum of squared weights for covariate columns of decoder layer 0."""
         cat_dim = sum(self.decoder.px_decoder.n_cat_list)
@@ -850,11 +870,11 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 *categorical_input,
                 additive_background=bg,
             )
-        # Unpack decoder outputs (burst_frequency_size returns 6 values, others return 4)
+        # Unpack decoder outputs (burst_frequency_size returns 7 values, others return 5)
         if self.decoder_type == "burst_frequency_size":
-            px_scale, px_r, px_rate, px_dropout, _burst_freq, _burst_size = _dec_out
+            px_scale, px_r, px_rate, px_dropout, hidden_act, _burst_freq, _burst_size = _dec_out
         else:
-            px_scale, px_r, px_rate, px_dropout = _dec_out
+            px_scale, px_r, px_rate, px_dropout, hidden_act = _dec_out
 
         if self.dispersion == "gene-batch":
             _disp_idx = dispersion_index if dispersion_index is not None else batch_index
@@ -933,6 +953,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             "px_r_mu": px_r_mu,
             "px_r_log_sigma": px_r_log_sigma,
             "px_r_sampled": px_r,
+            "hidden_activations": hidden_act,
         }
         if self.decoder_type == "burst_frequency_size" and _burst_freq is not None:
             _gen_out["burst_freq"] = _burst_freq
@@ -966,7 +987,18 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         reconst_loss = -generative_outputs[MODULE_KEYS.PX_KEY].log_prob(x).sum(-1)
 
-        kl_local_for_warmup = kl_divergence_z
+        # Z sparsity: Gamma prior on |z| encourages sparse latent activations
+        if self.z_sparsity_prior == "gamma":
+            from torch.distributions import Gamma
+
+            z = inference_outputs[MODULE_KEYS.Z_KEY]
+            _shape = torch.tensor(self.n_active_latent_per_cell / self.n_latent, device=z.device, dtype=z.dtype)
+            _gamma_z = Gamma(concentration=_shape, rate=torch.tensor(1.0, device=z.device, dtype=z.dtype))
+            z_sparsity_penalty = -_gamma_z.log_prob(z.abs() + 1e-8).sum(dim=-1)
+        else:
+            z_sparsity_penalty = 0.0
+
+        kl_local_for_warmup = kl_divergence_z + z_sparsity_penalty
         kl_local_no_warmup = kl_divergence_l
 
         weighted_kl_local = kl_weight * kl_local_for_warmup + kl_local_no_warmup
@@ -1070,6 +1102,30 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             decoder_cov_penalty = self.decoder_cov_weight_l2 * self._decoder_cov_weight_l2_penalty()
             loss = loss + decoder_cov_penalty / n_obs
 
+        # Decoder weight L1 penalty (sparsity-inducing on decoder weights)
+        if self.decoder_hidden_l1 > 0.0:
+            n_obs = x.shape[0]
+            decoder_l1_penalty = self.decoder_hidden_l1 * self._decoder_hidden_l1_penalty()
+            loss = loss + decoder_l1_penalty / n_obs
+
+        # Hidden activation sparsity: Gamma prior on decoder hidden activations
+        if self.hidden_activation_sparsity:
+            from torch.distributions import Gamma
+
+            n_obs = x.shape[0]
+            _hidden_act = generative_outputs["hidden_activations"]
+            _shape_h = torch.tensor(
+                self.n_active_hidden_per_cell / _hidden_act.shape[-1],
+                device=_hidden_act.device,
+                dtype=_hidden_act.dtype,
+            )
+            _gamma_h = Gamma(
+                concentration=_shape_h,
+                rate=torch.tensor(1.0, device=_hidden_act.device, dtype=_hidden_act.dtype),
+            )
+            hidden_sparsity_penalty = -_gamma_h.log_prob(_hidden_act + 1e-8).sum(dim=-1)
+            loss = loss + hidden_sparsity_penalty.mean() / n_obs
+
         # a payload to be used during autotune
         if self.extra_payload_autotune:
             extra_metrics_payload = {
@@ -1084,6 +1140,19 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         if self.decoder_cov_weight_l2 > 0.0:
             extra_metrics_payload["decoder_cov_weight_penalty"] = (decoder_cov_penalty / n_obs).detach()
+
+        # Z diagnostics
+        z = inference_outputs[MODULE_KEYS.Z_KEY]
+        extra_metrics_payload["z_var"] = z.var(dim=0).mean().detach()
+
+        if self.z_sparsity_prior == "gamma":
+            extra_metrics_payload["z_sparsity_penalty"] = z_sparsity_penalty.mean().detach()
+
+        if self.decoder_hidden_l1 > 0.0:
+            extra_metrics_payload["decoder_l1_penalty"] = (decoder_l1_penalty / n_obs).detach()
+
+        if self.hidden_activation_sparsity:
+            extra_metrics_payload["hidden_sparsity_penalty"] = hidden_sparsity_penalty.mean().detach()
 
         if self.residual_library_encoder and hasattr(self, "_library_obs_w_mean"):
             extra_metrics_payload["library_obs_w"] = self._library_obs_w_mean
