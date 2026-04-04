@@ -998,7 +998,25 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         else:
             z_sparsity_penalty = 0.0
 
-        kl_local_for_warmup = kl_divergence_z + z_sparsity_penalty
+        # Hidden activation sparsity: Gamma prior on decoder hidden activations (per-cell)
+        if self.hidden_activation_sparsity:
+            from torch.distributions import Gamma
+
+            _hidden_act = generative_outputs["hidden_activations"]
+            _shape_h = torch.tensor(
+                self.n_active_hidden_per_cell / _hidden_act.shape[-1],
+                device=_hidden_act.device,
+                dtype=_hidden_act.dtype,
+            )
+            _gamma_h = Gamma(
+                concentration=_shape_h,
+                rate=torch.tensor(1.0, device=_hidden_act.device, dtype=_hidden_act.dtype),
+            )
+            hidden_sparsity_penalty = -_gamma_h.log_prob(_hidden_act + 1e-8).sum(dim=-1)
+        else:
+            hidden_sparsity_penalty = 0.0
+
+        kl_local_for_warmup = kl_divergence_z + z_sparsity_penalty + hidden_sparsity_penalty
         kl_local_no_warmup = kl_divergence_l
 
         weighted_kl_local = kl_weight * kl_local_for_warmup + kl_local_no_warmup
@@ -1107,24 +1125,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             n_obs = x.shape[0]
             decoder_l1_penalty = self.decoder_hidden_l1 * self._decoder_hidden_l1_penalty()
             loss = loss + decoder_l1_penalty / n_obs
-
-        # Hidden activation sparsity: Gamma prior on decoder hidden activations
-        if self.hidden_activation_sparsity:
-            from torch.distributions import Gamma
-
-            n_obs = x.shape[0]
-            _hidden_act = generative_outputs["hidden_activations"]
-            _shape_h = torch.tensor(
-                self.n_active_hidden_per_cell / _hidden_act.shape[-1],
-                device=_hidden_act.device,
-                dtype=_hidden_act.dtype,
-            )
-            _gamma_h = Gamma(
-                concentration=_shape_h,
-                rate=torch.tensor(1.0, device=_hidden_act.device, dtype=_hidden_act.dtype),
-            )
-            hidden_sparsity_penalty = -_gamma_h.log_prob(_hidden_act + 1e-8).sum(dim=-1)
-            loss = loss + hidden_sparsity_penalty.mean() / n_obs
 
         # a payload to be used during autotune
         if self.extra_payload_autotune:

@@ -269,6 +269,22 @@ class RegularizedMultimodalVI(
             **kwargs,
         }
 
+        if hidden_activation_sparsity and any(
+            v > 1
+            for v in (
+                self._module_kwargs["n_layers"].values()
+                if isinstance(self._module_kwargs["n_layers"], dict)
+                else [self._module_kwargs["n_layers"]]
+            )
+        ):
+            warnings.warn(
+                "hidden_activation_sparsity=True with n_layers>1: the sparsity penalty is applied "
+                "to the LAST hidden layer activations only. Multi-layer decoders may not behave as "
+                "expected — consider using n_layers=1.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         if self._module_init_on_train:
             self.module = None
             warnings.warn(

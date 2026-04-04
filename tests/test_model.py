@@ -2421,3 +2421,93 @@ class TestSingleModalityMultimodal:
         model.train(max_epochs=2, train_size=1.0, batch_size=64)
         latent = model.get_latent_representation()
         assert latent.shape == (100, 4)
+
+
+class TestSparsityFeatures:
+    """Tests for z_sparsity_prior, decoder_hidden_l1, and hidden_activation_sparsity."""
+
+    def test_z_sparsity_prior_single_modal(self, adata):
+        """z_sparsity_prior='gamma' trains and logs z_sparsity_penalty."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, z_sparsity_prior="gamma")
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "z_sparsity_penalty_train" in model.history_
+        vals = model.history_["z_sparsity_penalty_train"].values
+        assert all(v > 0 for v in vals.flatten() if not np.isnan(v))
+
+    def test_decoder_hidden_l1_single_modal(self, adata):
+        """decoder_hidden_l1 > 0 trains and logs decoder_l1_penalty."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, decoder_hidden_l1=0.01)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "decoder_l1_penalty_train" in model.history_
+        vals = model.history_["decoder_l1_penalty_train"].values
+        assert all(v > 0 for v in vals.flatten() if not np.isnan(v))
+
+    def test_hidden_activation_sparsity_single_modal(self, adata):
+        """hidden_activation_sparsity=True trains and logs hidden_sparsity_penalty."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, hidden_activation_sparsity=True)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "hidden_sparsity_penalty_train" in model.history_
+        vals = model.history_["hidden_sparsity_penalty_train"].values
+        assert all(v > 0 for v in vals.flatten() if not np.isnan(v))
+
+    def test_all_sparsity_combined_single_modal(self, adata):
+        """All three sparsity features together should train without error."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            z_sparsity_prior="gamma",
+            decoder_hidden_l1=0.01,
+            hidden_activation_sparsity=True,
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "z_sparsity_penalty_train" in model.history_
+        assert "decoder_l1_penalty_train" in model.history_
+        assert "hidden_sparsity_penalty_train" in model.history_
+
+    def test_z_sparsity_prior_multimodal(self, mdata):
+        """z_sparsity_prior='gamma' trains and logs z_sparsity_penalty (multimodal)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, z_sparsity_prior="gamma")
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "z_sparsity_penalty_train" in model.history_
+        vals = model.history_["z_sparsity_penalty_train"].values
+        assert all(v > 0 for v in vals.flatten() if not np.isnan(v))
+
+    def test_decoder_hidden_l1_multimodal(self, mdata):
+        """decoder_hidden_l1 > 0 trains and logs decoder_l1_penalty (multimodal)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, decoder_hidden_l1=0.01)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "decoder_l1_penalty_train" in model.history_
+        vals = model.history_["decoder_l1_penalty_train"].values
+        assert all(v > 0 for v in vals.flatten() if not np.isnan(v))
+
+    def test_hidden_activation_sparsity_multimodal(self, mdata):
+        """hidden_activation_sparsity=True logs per-modality hidden_sparsity metrics."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, hidden_activation_sparsity=True)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "hidden_sparsity_rna_train" in model.history_
+        assert "hidden_sparsity_atac_train" in model.history_
+
+    def test_all_sparsity_combined_multimodal(self, mdata):
+        """All three sparsity features together should train without error (multimodal)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            z_sparsity_prior="gamma",
+            decoder_hidden_l1=0.01,
+            hidden_activation_sparsity=True,
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "z_sparsity_penalty_train" in model.history_
+        assert "decoder_l1_penalty_train" in model.history_
+        assert "hidden_sparsity_rna_train" in model.history_
+        assert "hidden_sparsity_atac_train" in model.history_

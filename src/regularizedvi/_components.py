@@ -478,8 +478,11 @@ class RegularizedDecoderSCVI(nn.Module):
 
         Returns
         -------
-        4-tuple of :py:class:`torch.Tensor`
-            parameters for the ZINB distribution of expression
+        5-tuple or 7-tuple of :py:class:`torch.Tensor`
+            ``(px_scale, None, px_rate, px_dropout, px)`` for expected_RNA, or
+            ``(px_scale, None, px_rate, px_dropout, px, burst_freq, burst_size)``
+            for burst_frequency_size. ``px`` is the hidden activations from the
+            decoder FC layers (before the scale head).
 
         """
         # The decoder returns values for the parameters of the ZINB distribution

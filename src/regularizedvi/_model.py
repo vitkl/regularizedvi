@@ -328,6 +328,15 @@ class AmbientRegularizedSCVI(
             f"regularise_dispersion: {regularise_dispersion}."
         )
 
+        if hidden_activation_sparsity and self._module_kwargs.get("n_layers", 1) > 1:
+            warnings.warn(
+                "hidden_activation_sparsity=True with n_layers>1: the sparsity penalty is applied "
+                "to the LAST hidden layer activations only. Multi-layer decoders may not behave as "
+                "expected — consider using n_layers=1.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         if self._module_init_on_train:
             self.module = None
             warnings.warn(
