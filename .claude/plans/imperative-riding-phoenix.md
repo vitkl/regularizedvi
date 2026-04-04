@@ -143,6 +143,12 @@ The secondary decoder (`burst_size_decoder`, `burst_size_head`, `burst_size_inte
 
 All four are already per-modality dicts in `_multimodel.py`.
 
+**Note:** While named "burst_size_*", these parameters serve double duty:
+- For `burst_frequency_size`: compute burst_size (multiplicative scaling of mean)
+- For `Kon_Koff`: compute Koff (kinetic rate, OFF rate)
+
+Mathematically compatible: both use Softplus activation to ensure positivity. Consider future refactoring to `secondary_decoder` / `secondary_head` if additional decoder types are added.
+
 ```python
 # Existing condition expanded:
 if decoder_type in ("burst_frequency_size", "Kon_Koff"):
@@ -154,44 +160,69 @@ if decoder_type == "probability":
     self.px_p_decoder = nn.Linear(n_hidden, n_output)
 ```
 
+### 3c: Validation — Additive Background Incompatibility
+
+Add to `RegularizedMultimodalVAE.__init__()` (around line 250-280):
+
+```python
+# Validate that additive_background is only used with count-based decoders
+for name, dec_type in self.decoder_type_dict.items():
+    if dec_type in ("probability", "Kon_Koff"):
+        if name in additive_background_modalities:
+            raise ValueError(
+                f"Modality '{name}' uses decoder_type='{dec_type}' which operates in probability "
+                f"space ∈ (0,1). additive_background (absolute counts) is mathematically incompatible. "
+                f"Remove '{name}' from 'additive_background_modalities' or switch to 'expected_RNA' decoder."
+            )
+```
+
+**Reason:** probability/Kon_Koff decoders output px_rate in probability space ∈ (0,1). additive_background is absolute counts. Mixing the two spaces produces invalid results. This validation prevents silent errors.
+
 ### 3b: `forward()` — New Branches
 
 **`probability` decoder:**
 ```python
 elif self.decoder_type == "probability":
+    """Probability-based decoder for ATAC or other 0-1 bounded modalities.
+
+    Library is passed as sensitivity ∈ (0,1), already sigmoid-mapped in inference.
+    No additive_background (incompatible with probability space).
+    """
     px = self.px_decoder(z, *cat_list)
     p = torch.sigmoid(self.px_p_decoder(px))  # accessibility probability ∈ (0,1)
-    # Library transform: sigmoid(lib) for logit-mode, exp(lib) for log-mode
-    # Determined by how lib was computed in inference — decoder doesn't know
-    # px_rate is the FULL observable mean
-    if additive_background is not None:
-        px_rate = torch.exp(library) * (p + additive_background)
-    else:
-        px_rate = torch.exp(library) * p
+
+    # px_rate = library * p (both in probability space)
+    px_rate = library * p
+
     px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
     px_dropout = self.px_dropout_decoder(px)
-    return p, px_r, px_rate, px_dropout
-    # Note: px_scale = p (accessibility probability), px_rate = sensitivity * p
+    return p, px_r, px_rate, px_dropout, px
 ```
 
 **`Kon_Koff` decoder:**
 ```python
 elif self.decoder_type == "Kon_Koff":
+    """Kinetic 2-state decoder (ON/OFF rates) for ATAC or other 0-1 bounded modalities.
+
+    Computes p = Kon / (Kon + Koff) then multiplies by library sensitivity.
+    No additive_background (incompatible with probability space).
+    """
     px = self.px_decoder(z, *cat_list)
-    kon = self.px_scale_decoder(px)  # softplus output
+    kon = self.px_scale_decoder(px)  # softplus output, positivity ensured
     koff = self.burst_size_head(self.burst_size_decoder(z, *cat_list)) + self.burst_size_intercept
-    p = kon / (kon + koff)  # accessibility probability ∈ (0,1)
-    if additive_background is not None:
-        px_rate = torch.exp(library) * (p + additive_background)
-    else:
-        px_rate = torch.exp(library) * p
+
+    # p ∈ (0,1): accessibility probability from kinetic rates
+    p = kon / (kon + koff)
+
+    # px_rate = library * p (both in probability space)
+    px_rate = library * p
+
     px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
     px_dropout = self.px_dropout_decoder(px)
-    return p, px_r, px_rate, px_dropout, kon, koff
-    # Note: px_scale = p = Kon/(Kon+Koff), px_rate = sensitivity * p
+    return p, px_r, px_rate, px_dropout, px, kon, koff
 ```
 
-**Important:** `px_rate = exp(library) * (p + bg)` is the FULL observable mean for all decoder types. The decoder does NOT know whether `exp(library)` gives counts or sensitivity — that's determined upstream by how `library` was computed.
+**Important:** Both `library` and `p` are in probability space ∈ (0,1). Library is prepared as sigmoid(logit) in inference (Step 4c). The decoder receives probability and multiplies by `p`, both in same space. **No additive_background is compatible** with probability decoders.
 
 ---
 
@@ -206,9 +237,17 @@ elif self.decoder_type == "Kon_Koff":
 New parameter:
 ```python
 modality_genomic_width: int | dict[str, int] | None = None,
-# Also make per-modality:
+# CRITICAL: Also make per-modality dict (affects both BetaBinomial AND burst_frequency_size):
 dispersion_init_bio_frac: float | dict[str, float] = 0.9,
 ```
+
+**Why per-modality dict for dispersion_init_bio_frac:**
+- Different modalities (RNA vs ATAC) have different overdispersion signatures
+- RNA: typically driven by biological variation (burst kinetics, biology) → higher bio_frac
+- ATAC: often driven by technical factors (detection, batch) → lower bio_frac
+- Example: `{"rna": 0.9, "atac": 0.7}` reflects tissue-specific priors
+
+This change affects BOTH `compute_dispersion_init()` (for expected_RNA) AND `compute_bb_dispersion_init()` (for probability/Kon_Koff) AND `compute_bursting_init()` (for burst_frequency_size).
 
 In the library statistics computation block (around line 377-400), for logit-mode modalities:
 
@@ -266,45 +305,48 @@ if width is not None:
     self.register_buffer(f"total_count_{name}", torch.tensor(n, dtype=torch.long))
 ```
 
-### 4c: `_multimodule.py` `inference()` — Logit-Space Library
+### 4c: `_multimodule.py` `inference()` — Logit-Space Library (SIMPLIFIED)
 
 In the residual library encoder block (lines 846-867), add logit-mode branch:
 
 ```python
 decoder_type_for_name = self.decoder_type_dict.get(name, "expected_RNA")
 if decoder_type_for_name in ("probability", "Kon_Koff"):
-    # Logit-space library
+    # Logit-space library: compute per-cell sensitivity as probability
     global_max_robust = getattr(self, f"library_global_max_robust_{name}")
     raw_sum = x.sum(dim=-1, keepdim=True).clamp(min=1.0)
     p_obs = (raw_sum / global_max_robust).clamp(1e-6, 1 - 1e-6)
     logit_obs = torch.log(p_obs / (1 - p_obs))
 
-    glm = getattr(self, f"library_global_log_mean_{name}", None)
-    ls = getattr(self, f"library_log_sensitivity_{name}", None)
-    if glm is not None and ls is not None:
-        logit_obs_centered = logit_obs - glm + ls
+    global_log_mean = getattr(self, f"library_global_log_mean_{name}", None)
+    log_sensitivity = getattr(self, f"library_log_sensitivity_{name}", None)
+    if global_log_mean is not None and log_sensitivity is not None:
+        logit_obs_centered = logit_obs - global_log_mean + log_sensitivity
     else:
         logit_obs_centered = logit_obs
-    log_sens = ls if ls is not None else torch.tensor(0.0, device=x.device)
+    log_sens = log_sensitivity if log_sensitivity is not None else torch.tensor(0.0, device=x.device)
 
-    # Shrinkage + residual (identical structure to log-space)
+    # Shrinkage + residual encoder (same structure as log-space)
     w_mu = self.library_obs_w_mu[name]
     w_sigma = torch.exp(self.library_obs_w_log_sigma[name])
     w = LogNormal(w_mu, w_sigma).rsample()
     obs_contribution = log_sens + w * (logit_obs_centered - log_sens)
-    # Convert logit → log so that exp(lib) = sigmoid(logit)
-    # log(sigmoid(x)) = -softplus(-x)
     lib_logit = obs_contribution + lib_enc
-    lib = -torch.nn.functional.softplus(-lib_logit)  # now exp(lib) = sigmoid(lib_logit) ∈ (0,1)
-    ql = Normal(obs_contribution + ql_enc.loc, ql_enc.scale)  # posterior in logit space
-    library[name] = lib
+
+    # SIMPLIFIED: Apply sigmoid directly to get probability ∈ (0,1)
+    # Decoder receives library as a probability, not log-transformed
+    library[name] = torch.sigmoid(lib_logit)
+
+    # Posterior and prior both in logit space (Normal distributions)
+    # KL divergence is computed in logit space, unchanged
+    ql = Normal(obs_contribution + ql_enc.loc, ql_enc.scale)
     ql_per_modality[name] = ql
 else:
     # Existing log-space path (unchanged)
     ...
 ```
 
-**Why the `-softplus(-x)` conversion is needed:** The decoder does `exp(library) * px_scale`. We need `exp(library)` to give sensitivity ∈ (0,1). Since `exp(log(sigmoid(x))) = sigmoid(x)`, storing `lib = log(sigmoid(lib_logit)) = -softplus(-lib_logit)` achieves this. The KL divergence is computed between `ql` (in logit space) and `pl` (in logit space), both Normal — unaffected by this transform which only affects `library[name]` passed to generative.
+**Why this is better:** Direct `sigmoid()` is clear and standard. Library[name] is directly usable as probability ∈ (0,1). Decoder contract is simple: receives probability and multiplies by `p`. No confusing `-softplus` magic.
 
 ### 4d: Library Prior in `generative()`
 
@@ -314,33 +356,37 @@ The prior `pl_dict[name]` uses `library_log_means_{name}` and `library_log_vars_
 
 ## Step 5: BetaBinomial Generative Path (`_multimodule.py`)
 
-### 5a: Generative Branching
+### 5a: Generative Branching (CORRECTED)
 
 After dispersion resolution (px_r = exp(sampled)), add branches:
 
 ```python
 if _mod_decoder_type == "probability":
     from scvi.distributions import BetaBinomial as BetaBinomialDist
+
     p = px_scale  # sigmoid output from decoder = accessibility probability
-    d = px_r      # concentration from hierarchical dispersion (same machinery as theta)
-    # sensitivity = exp(lib) which is sigmoid(lib_logit) ∈ (0,1) due to Step 4c
-    # px_rate = exp(lib) * p = sensitivity * p (already computed in decoder)
+    d = px_r      # concentration parameter from hierarchical dispersion
     n = getattr(self, f"total_count_{name}")
-    sp = px_rate / (px_rate + 1e-8)  # sensitivity * p, clamp to (0,1)
-    sp = sp.clamp(1e-8, 1 - 1e-8)
+
+    # px_rate is already = library * p (both in probability space)
+    # Clamp to valid range for BetaBinomial
+    sp = px_rate.clamp(1e-8, 1 - 1e-8)
     alpha = d * sp
     beta = d * (1 - sp)
     px = BetaBinomialDist(total_count=n, alpha=alpha, beta=beta)
 
 elif _mod_decoder_type == "Kon_Koff":
     from scvi.distributions import BetaBinomial as BetaBinomialDist
-    kon, koff = _kon, _koff  # from decoder secondary outputs
-    d = px_r
-    sensitivity = torch.exp(lib)  # ∈ (0,1) due to logit→log conversion
+
+    kon = _kon  # Kinetic ON rate from decoder
+    koff = _koff  # Kinetic OFF rate from decoder (burst_size_head)
+    d = px_r    # Concentration parameter
     n = getattr(self, f"total_count_{name}")
-    alpha = d * sensitivity * kon
-    beta = d * koff * (1 - sensitivity)
-    # px_rate = sensitivity * kon/(kon+koff) already computed in decoder
+
+    # px_rate is already = library * kon/(kon+koff) (both in probability space)
+    sp = px_rate.clamp(1e-8, 1 - 1e-8)
+    alpha = d * sp
+    beta = d * (1 - sp)
     px = BetaBinomialDist(total_count=n, alpha=alpha, beta=beta)
 
 elif _mod_decoder_type == "burst_frequency_size":
@@ -350,16 +396,24 @@ else:  # expected_RNA
     ...  # existing code (unchanged)
 ```
 
-### 5b: Decoder Output Unpacking
+### 5b: Decoder Output Unpacking (CORRECTED)
+
+The decoder returns different numbers of values based on `decoder_type`. **Explicit unpacking is essential to prevent index errors:**
 
 ```python
+# Initialize accumulators
+_burst_freq = _burst_size = _kon = _koff = None
+
+# Explicit unpacking prevents index errors when return arity changes
 if _mod_decoder_type == "burst_frequency_size":
-    px_scale, px_r_cell, px_rate, px_dropout, _burst_freq, _burst_size = _dec_out
+    px_scale, px_r_cell, px_rate, px_dropout, hidden_act, _burst_freq, _burst_size = _dec_out
 elif _mod_decoder_type == "Kon_Koff":
-    px_scale, px_r_cell, px_rate, px_dropout, _kon, _koff = _dec_out
-else:  # expected_RNA and probability both return 4 values
-    px_scale, px_r_cell, px_rate, px_dropout = _dec_out
+    px_scale, px_r_cell, px_rate, px_dropout, hidden_act, _kon, _koff = _dec_out
+else:  # expected_RNA and probability both return 5 values
+    px_scale, px_r_cell, px_rate, px_dropout, hidden_act = _dec_out
 ```
+
+All decoders return `px` (the distribution object). This unpacking pattern ensures correct handling of variable arity.
 
 ### 5c: Loss Clamping
 
@@ -387,9 +441,81 @@ dispersion_init_bio_frac: float | dict[str, float] = 0.9,  # make per-modality
 Thread `modality_genomic_width` through `_module_kwargs`.
 
 When `dispersion_init="data"`:
-- For `probability`/`Kon_Koff` decoder types: call `compute_bb_dispersion_init()` with `n` from `modality_genomic_width`
-- For `expected_RNA`: call existing `compute_dispersion_init()` (unchanged)
-- For `burst_frequency_size`: call existing `compute_bursting_init()` (unchanged)
+
+**New dispersion init routing** (in `_multimodel.py._setup_module()` around lines 515-545):
+
+```python
+# Data-driven dispersion initialization (per-modality, decoder-type aware)
+px_r_init_mean_dict = None
+if self._dispersion_init == "data":
+    from regularizedvi._dispersion_init import compute_dispersion_init, compute_bb_dispersion_init
+
+    px_r_init_mean_dict = {}
+
+    # Resolve decoder types once
+    _decoder_type = self._module_kwargs.get("decoder_type", DEFAULT_DECODER_TYPE)
+    _decoder_type_resolved = (
+        _decoder_type if isinstance(_decoder_type, dict)
+        else dict.fromkeys(modality_names, _decoder_type)
+    )
+
+    # Resolve per-modality parameters
+    _dispersion_init_bio_frac = getattr(self, "_dispersion_init_bio_frac", 0.9)
+    _dispersion_init_bio_frac_resolved = (
+        _dispersion_init_bio_frac if isinstance(_dispersion_init_bio_frac, dict)
+        else dict.fromkeys(modality_names, _dispersion_init_bio_frac)
+    )
+
+    _modality_genomic_width = self._module_kwargs.get("modality_genomic_width", None)
+    _modality_genomic_width_resolved = (
+        _modality_genomic_width if isinstance(_modality_genomic_width, dict)
+        else dict.fromkeys(modality_names, _modality_genomic_width) if _modality_genomic_width is not None
+        else dict.fromkeys(modality_names, DEFAULT_MODALITY_GENOMIC_WIDTH)
+    )
+
+    for mod_name in modality_names:
+        decoder_type_for_mod = _decoder_type_resolved.get(mod_name, "expected_RNA")
+
+        if decoder_type_for_mod in ("probability", "Kon_Koff"):
+            # BetaBinomial dispersion init
+            n_val = _modality_genomic_width_resolved.get(mod_name, DEFAULT_MODALITY_GENOMIC_WIDTH)
+            bf_val = _dispersion_init_bio_frac_resolved.get(mod_name, 0.9)
+
+            log_theta_init, _diag = compute_bb_dispersion_init(
+                self.adata.mod[mod_name],
+                modality_genomic_width=n_val,
+                biological_variance_fraction=bf_val,
+                theta_min=self._dispersion_init_theta_min,
+                theta_max=self._dispersion_init_theta_max,
+                verbose=False,
+            )
+            px_r_init_mean_dict[mod_name] = log_theta_init
+        else:
+            # Gamma-Poisson NB dispersion init (expected_RNA, or any other default)
+            bf_val = _dispersion_init_bio_frac_resolved.get(mod_name, 0.9)
+
+            log_theta_init, _diag = compute_dispersion_init(
+                self.adata.mod[mod_name],
+                biological_variance_fraction=bf_val,
+                theta_min=self._dispersion_init_theta_min,
+                theta_max=self._dispersion_init_theta_max,
+                verbose=False,
+            )
+            px_r_init_mean_dict[mod_name] = log_theta_init
+
+# Bursting model init UNCHANGED (per-modality, ONLY for burst_frequency_size decoder)
+if self._dispersion_init == "variance_burst_size":
+    # Existing code: calls compute_bursting_init() for burst_frequency_size modalities
+    # (lines 537-570 unchanged)
+    ...
+```
+
+**Key differences from current code:**
+1. Current `dispersion_init="data"` block (lines 515-533) calls `compute_dispersion_init()` for ALL modalities
+2. NEW routing checks `decoder_type_for_mod` to decide which init function to call per modality
+3. `variance_burst_size` path UNCHANGED (still calls `compute_bursting_init()` only for burst_frequency_size)
+4. Backward compatible: single-decoder-type models work exactly as before
+5. Mixed-type models supported: can use "data" for heterogeneous decoders (expected_RNA, probability, Kon_Koff together)
 
 ---
 
