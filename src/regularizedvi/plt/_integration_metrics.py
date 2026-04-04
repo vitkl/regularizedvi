@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
 
 
 def _lisi_one(
@@ -80,7 +85,7 @@ def compute_integration_metrics(
     adata,
     latent_key: str = "X_scVI",
     label_key: str = "level_1",
-    batch_key: str = "dataset",
+    batch_key: str = "batch",
     dataset_col: str = "dataset",
     tissue_col: str = "tissue",
     leiden_key: str = "leiden",
@@ -129,10 +134,12 @@ def compute_integration_metrics(
     def _add(name, value, category="global"):
         results.append({"metric": name, "value": value, "category": category})
 
-    # Filter to cells with non-null labels (also catch string "nan")
+    # Filter to cells with non-null labels (also catch string "nan") and non-null batch
     has_label = (
         adata.obs[label_key].notna() & (adata.obs[label_key] != "") & (adata.obs[label_key].astype(str) != "nan")
     )
+    has_batch = adata.obs[batch_key].notna()
+    has_label = has_label & has_batch
     n_labelled = has_label.sum()
 
     # --- Global metrics (on labelled cells) ---
@@ -200,8 +207,14 @@ def compute_integration_metrics(
             # Query only labelled cells
             distances, indices = nn.kneighbors(X_knn[lab_positions])
 
-            # iLISI: all neighbors have batch labels — no masking needed
-            batches_knn = LabelEncoder().fit_transform(adata.obs[batch_key].values[all_idx])
+            # iLISI: filter NaN batches from encoding
+            batch_vals_knn = adata.obs[batch_key].values[all_idx]
+            valid_batch_knn = pd.notna(batch_vals_knn)
+            batches_knn = np.full(len(all_idx), -1, dtype=np.int64)
+            if valid_batch_knn.all():
+                batches_knn = LabelEncoder().fit_transform(batch_vals_knn)
+            else:
+                batches_knn[valid_batch_knn] = LabelEncoder().fit_transform(batch_vals_knn[valid_batch_knn])
             ilisi = _lisi_one(distances, indices, batches_knn)
             _add("iLISI_median", float(np.median(ilisi)))
             _add("iLISI_mean", float(np.mean(ilisi)))
@@ -227,7 +240,7 @@ def compute_integration_metrics(
                 ds_mask = (adata.obs[dataset_col] == ds).values & has_label.values
                 if ds_mask.sum() < 50:
                     continue
-                ds_batches = adata.obs.loc[ds_mask, "batch"].values
+                ds_batches = adata.obs.loc[ds_mask, batch_key].values
                 if len(np.unique(ds_batches)) > 1:
                     ds_labels = adata.obs.loc[ds_mask, label_key].values
                     if len(np.unique(ds_labels)) > 1:
@@ -283,3 +296,283 @@ def compute_integration_metrics(
                 print(f"  {row['metric']}: {v}  [{row['category']}]")
 
     return df
+
+
+# ---------------------------------------------------------------------------
+# Integration metrics heatmap
+# ---------------------------------------------------------------------------
+
+# Metric group classification for column header coloring
+_SUMMARY_METRICS = {"Total", "Bio conservation", "Batch correction"}
+_BIO_METRICS = {
+    "Isolated labels",
+    "KMeans NMI",
+    "KMeans ARI",
+    "Silhouette label",
+    "cLISI",
+    "BRAS",
+    # Alternative names from scib-metrics
+    "NMI cluster/label",
+    "ARI cluster/label",
+}
+_BATCH_METRICS = {
+    "iLISI",
+    "KBET",
+    "Graph connectivity",
+    "PCR comparison",
+    "kBET",  # alternative capitalization
+}
+
+# Colors for column header groups
+_GROUP_COLORS = {
+    "summary": "#808080",  # gray
+    "bio": "#2ca02c",  # green
+    "batch": "#ff7f0e",  # orange
+    "hyperparam": "#9467bd",  # purple
+}
+
+
+def _classify_metric_col(col_name: str) -> str:
+    """Return group name for a metric column."""
+    if col_name in _SUMMARY_METRICS:
+        return "summary"
+    if col_name in _BIO_METRICS:
+        return "bio"
+    if col_name in _BATCH_METRICS:
+        return "batch"
+    return "hyperparam"
+
+
+def plot_integration_heatmap(
+    scib_df: pd.DataFrame,
+    experiments_df: pd.DataFrame | None = None,
+    hyperparam_cols: list[str] | None = None,
+    sort_by: str = "Total",
+    figsize: tuple[float, float] | None = None,
+    save_path: str | None = None,
+    dpi: int = 150,
+) -> Figure:
+    """Plot integration benchmark heatmap with metrics and hyperparameters.
+
+    Parameters
+    ----------
+    scib_df
+        DataFrame from ``Benchmarker.get_results()`` — rows = methods,
+        columns = metrics.  Index = experiment names.
+    experiments_df
+        Pre-loaded DataFrame with experiment metadata (from
+        ``integration_metrics_experiments.tsv``).  Joined on ``name`` column
+        matching ``scib_df`` index for hyperparameter columns.
+    hyperparam_cols
+        Which hyperparameter columns from *experiments_df* to show.
+        ``None`` → auto-detect columns with >1 unique value.
+    sort_by
+        Column to sort rows by (descending).  Default ``"Total"``.
+    figsize
+        ``(width, height)`` in inches.  ``None`` → auto-sized.
+    save_path
+        If given, save ``{save_path}.svg`` and ``{save_path}.png``.
+    dpi
+        Resolution for PNG output.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
+
+    # ── 1. Clean scib_df: drop "Metric Type" row, keep numeric metric cols ──
+    metric_type_mask = scib_df.index == "Metric Type"
+    plot_df = scib_df[~metric_type_mask].copy()
+
+    # Identify numeric metric columns
+    metric_cols = []
+    for c in plot_df.columns:
+        try:
+            plot_df[c] = pd.to_numeric(plot_df[c])
+            metric_cols.append(c)
+        except (ValueError, TypeError):
+            pass
+
+    # ── 2. Merge hyperparameters from experiments_df ──
+    hp_cols_to_show = []
+    if experiments_df is not None and hyperparam_cols is not None:
+        exp_indexed = experiments_df.set_index("name")
+        for hc in hyperparam_cols:
+            if hc in exp_indexed.columns:
+                # Match experiment names (scib_df index) to experiments_df
+                matched = exp_indexed[hc].reindex(plot_df.index)
+                plot_df[hc] = matched.values
+                hp_cols_to_show.append(hc)
+    elif experiments_df is not None and hyperparam_cols is None:
+        # Auto-detect: columns with >1 unique value among matched experiments
+        exp_indexed = experiments_df.set_index("name")
+        matched_exp = exp_indexed.reindex(plot_df.index).dropna(how="all")
+        for c in exp_indexed.columns:
+            if c in ("name", "results_folder", "notebook", "label", "notes", "status"):
+                continue
+            vals = matched_exp[c].dropna().unique()
+            if len(vals) > 1:
+                plot_df[c] = exp_indexed[c].reindex(plot_df.index).values
+                hp_cols_to_show.append(c)
+
+    # ── 3. Sort rows ──
+    if sort_by in plot_df.columns:
+        plot_df = plot_df.sort_values(sort_by, ascending=False)
+
+    # ── 4. Define column order: summary → bio → batch → hyperparams ──
+    ordered_metric_cols = []
+    for group_name in ["summary", "bio", "batch"]:
+        for c in metric_cols:
+            if _classify_metric_col(c) == group_name:
+                ordered_metric_cols.append(c)
+    all_display_cols = ordered_metric_cols + hp_cols_to_show
+    n_metric = len(ordered_metric_cols)
+    n_cols = len(all_display_cols)
+    n_rows = len(plot_df)
+
+    if n_cols == 0 or n_rows == 0:
+        raise ValueError("No data to plot")
+
+    # ── 5. Build figure ──
+    if figsize is None:
+        figsize = (max(10, n_cols * 1.1 + 3), max(4, n_rows * 0.45 + 2))
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Allocate data matrix
+    data = np.full((n_rows, n_cols), np.nan)
+
+    # Fill metric columns (numeric)
+    for j, c in enumerate(ordered_metric_cols):
+        data[:, j] = plot_df[c].values.astype(float)
+
+    # ── 6. Per-column color normalization for metrics ──
+    col_norms = []
+    for j in range(n_metric):
+        col_vals = data[:, j]
+        valid = col_vals[~np.isnan(col_vals)]
+        if len(valid) > 0:
+            vmin, vmax = valid.min(), valid.max()
+            if vmin == vmax:
+                vmin, vmax = vmin - 0.01, vmax + 0.01
+        else:
+            vmin, vmax = 0, 1
+        col_norms.append(Normalize(vmin=vmin, vmax=vmax))
+
+    # ── 7. Build categorical colormaps for hyperparams ──
+    hp_cmap = matplotlib.colormaps.get_cmap("tab10")
+    hp_cat_maps = {}  # col_name -> {value: color_idx}
+    for j, hc in enumerate(hp_cols_to_show):
+        vals = plot_df[hc].fillna("—").astype(str).values
+        unique_vals = sorted(set(vals))
+        hp_cat_maps[hc] = {v: i for i, v in enumerate(unique_vals)}
+        # Fill data matrix with category indices
+        for i, v in enumerate(vals):
+            data[i, n_metric + j] = hp_cat_maps[hc][v]
+
+    # ── 8. Draw cells ──
+    # Metric cells
+    metric_cmap = matplotlib.colormaps.get_cmap("RdYlGn")
+    for i in range(n_rows):
+        for j in range(n_metric):
+            val = data[i, j]
+            if np.isnan(val):
+                color = "white"
+            else:
+                color = metric_cmap(col_norms[j](val))
+            rect = plt.Rectangle((j, i), 1, 1, facecolor=color, edgecolor="white", linewidth=0.5)
+            ax.add_patch(rect)
+            if not np.isnan(val):
+                text_color = "white" if col_norms[j](val) < 0.3 or col_norms[j](val) > 0.7 else "black"
+                ax.text(
+                    j + 0.5,
+                    i + 0.5,
+                    f"{val:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=6.5,
+                    color=text_color,
+                    fontweight="bold",
+                )
+
+    # Hyperparameter cells
+    for i in range(n_rows):
+        for jj, hc in enumerate(hp_cols_to_show):
+            j = n_metric + jj
+            cat_idx = data[i, j]
+            if np.isnan(cat_idx):
+                color = "white"
+            else:
+                n_cats = len(hp_cat_maps[hc])
+                color = hp_cmap(int(cat_idx) % 10) if n_cats > 1 else (0.9, 0.9, 0.9, 1.0)
+            rect = plt.Rectangle((j, i), 1, 1, facecolor=color, edgecolor="white", linewidth=0.5)
+            ax.add_patch(rect)
+            # Print value text
+            val_str = plot_df[hc].fillna("—").astype(str).values[i]
+            ax.text(
+                j + 0.5,
+                i + 0.5,
+                val_str,
+                ha="center",
+                va="center",
+                fontsize=6,
+                color="white" if n_cats > 1 else "black",
+                fontweight="bold",
+            )
+
+    # ── 9. Column header color bar ──
+    for j, c in enumerate(all_display_cols):
+        group = _classify_metric_col(c) if j < n_metric else "hyperparam"
+        rect = plt.Rectangle(
+            (j, -0.6), 1, 0.5, facecolor=_GROUP_COLORS[group], edgecolor="white", linewidth=0.5, clip_on=False
+        )
+        ax.add_patch(rect)
+
+    # ── 10. Axes formatting ──
+    ax.set_xlim(0, n_cols)
+    ax.set_ylim(n_rows, -0.6)
+    ax.set_xticks([j + 0.5 for j in range(n_cols)])
+    ax.set_xticklabels(all_display_cols, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks([i + 0.5 for i in range(n_rows)])
+    ax.set_yticklabels(plot_df.index, fontsize=8)
+    ax.tick_params(axis="both", length=0)
+    ax.set_frame_on(False)
+
+    # Group labels at top
+    group_positions = {"summary": [], "bio": [], "batch": [], "hyperparam": []}
+    for j, c in enumerate(all_display_cols):
+        g = _classify_metric_col(c) if j < n_metric else "hyperparam"
+        group_positions[g].append(j)
+    group_labels = {
+        "summary": "Summary",
+        "bio": "Bio conservation",
+        "batch": "Batch correction",
+        "hyperparam": "Hyperparameters",
+    }
+    for g, positions in group_positions.items():
+        if positions:
+            mid = (positions[0] + positions[-1]) / 2 + 0.5
+            ax.text(
+                mid,
+                -1.0,
+                group_labels[g],
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+                color=_GROUP_COLORS[g],
+                clip_on=False,
+            )
+
+    ax.set_title("Integration Benchmark", fontsize=12, pad=30)
+    plt.tight_layout()
+
+    # ── 11. Save ──
+    if save_path is not None:
+        for ext in ["svg", "png"]:
+            fig.savefig(f"{save_path}.{ext}", dpi=dpi, bbox_inches="tight")
+        print(f"Saved heatmap to {save_path}.{{svg,png}}")
+
+    return fig
