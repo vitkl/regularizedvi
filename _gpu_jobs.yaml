@@ -555,3 +555,185 @@
   overrides: "-r regularise_background 0 -r library_log_means_centering_sensitivity 1.0 -r library_log_vars_weight 0.5 -r stratify_validation_key l1_cell_type+batch -r early_stopping_min_delta_per_feature 0.0002 -r atac_min_fragments 2000 -r decoder_weight_l2 0.1 -r init_decoder_bias mean -r bg_init_gene_fraction 0.2 -r results_folder results/rna_es_libvar05_dwl2_01_bias_mean_bg02_repeat2/"
   description: >-
     RNA: dwl2=1e-1 + mean bias + bg=0.2, repeat2 (different random init).
+
+# ── V2 factorial sweep: dispersion prior × decoder L2 × ATAC sensitivity (2026-03-22) ──
+
+- job_name: mm_v2_disp3_dwl2_01_atacsens02
+  job_id: 71252
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp3_dwl2_01_atacsens02_out.ipynb
+  gmem: 30000
+  overrides: ""
+  description: >-
+    MM V2: baseline (template defaults).
+
+- job_name: mm_v2_disp3_dwl2_01_atacsens10
+  job_id: 71253
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp3_dwl2_01_atacsens10_out.ipynb
+  gmem: 30000
+  overrides: "-r atac_sens 1.0"
+  description: >-
+    MM V2: atac_sens=1.0.
+
+- job_name: mm_v2_disp3_dwl2_1_atacsens02
+  job_id: 71254
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp3_dwl2_1_atacsens02_out.ipynb
+  gmem: 30000
+  overrides: "-r dwl2 1.0"
+  description: >-
+    MM V2: dwl2=1.0.
+
+- job_name: mm_v2_disp3_dwl2_1_atacsens10
+  job_id: 71255
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp3_dwl2_1_atacsens10_out.ipynb
+  gmem: 30000
+  overrides: "-r dwl2 1.0 -r atac_sens 1.0"
+  description: >-
+    MM V2: dwl2=1.0, atac_sens=1.0.
+
+- job_name: mm_v2_disp2_dwl2_01_atacsens02
+  job_id: 71256
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp2_dwl2_01_atacsens02_out.ipynb
+  gmem: 30000
+  overrides: "-r disp 2.0"
+  description: >-
+    MM V2: disp=2.0.
+
+- job_name: mm_v2_disp2_dwl2_01_atacsens10
+  job_id: 71257
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp2_dwl2_01_atacsens10_out.ipynb
+  gmem: 30000
+  overrides: "-r disp 2.0 -r atac_sens 1.0"
+  description: >-
+    MM V2: disp=2.0, atac_sens=1.0.
+
+- job_name: mm_v2_disp2_dwl2_1_atacsens02
+  job_id: 71258
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp2_dwl2_1_atacsens02_out.ipynb
+  gmem: 30000
+  overrides: "-r disp 2.0 -r dwl2 1.0"
+  description: >-
+    MM V2: disp=2.0, dwl2=1.0.
+
+- job_name: mm_v2_disp2_dwl2_1_atacsens10
+  job_id: 71259
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp2_dwl2_1_atacsens10_out.ipynb
+  gmem: 30000
+  overrides: "-r disp 2.0 -r dwl2 1.0 -r atac_sens 1.0"
+  description: >-
+    MM V2: disp=2.0, dwl2=1.0, atac_sens=1.0.
+
+- job_name: mm_v2_disp1_dwl2_01_atacsens02
+  job_id: 71260
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp1_dwl2_01_atacsens02_out.ipynb
+  gmem: 30000
+  overrides: "-r disp 1.0"
+  description: >-
+    MM V2: disp=1.0.
+
+- job_name: mm_v2_disp1_dwl2_01_atacsens10
+  job_id: 71261
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp1_dwl2_01_atacsens10_out.ipynb
+  gmem: 30000
+  overrides: "-r disp 1.0 -r atac_sens 1.0"
+  description: >-
+    MM V2: disp=1.0, atac_sens=1.0.
+
+- job_name: mm_v2_disp1_dwl2_1_atacsens02
+  job_id: 71262
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp1_dwl2_1_atacsens02_out.ipynb
+  gmem: 30000
+  overrides: "-r disp 1.0 -r dwl2 1.0"
+  description: >-
+    MM V2: disp=1.0, dwl2=1.0.
+
+- job_name: mm_v2_disp1_dwl2_1_atacsens10
+  job_id: 71263
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp1_dwl2_1_atacsens10_out.ipynb
+  gmem: 30000
+  overrides: "-r disp 1.0 -r dwl2 1.0 -r atac_sens 1.0"
+  description: >-
+    MM V2: disp=1.0, dwl2=1.0, atac_sens=1.0.
+
+- job_name: mm_v2_disp3_dwl2_01_atacsens02_noreslib
+  job_id: 71264
+  notebook: docs/notebooks/model_comparisons/bone_marrow_multimodal_tutorial_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_mm_v2_disp3_dwl2_01_atacsens02_noreslib_out.ipynb
+  gmem: 30000
+  overrides: "-r residual_library_encoder 0"
+  description: >-
+    MM V2: residual_library_encoder=0.
+
+- job_name: rna_v2_disp3_dwl2_01
+  job_id: 71266
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_rna_v2_disp3_dwl2_01_out.ipynb
+  gmem: 16000
+  overrides: ""
+  description: >-
+    RNA V2: baseline.
+
+- job_name: rna_v2_disp3_dwl2_1
+  job_id: 71267
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_rna_v2_disp3_dwl2_1_out.ipynb
+  gmem: 16000
+  overrides: "-r dwl2 1.0"
+  description: >-
+    RNA V2: dwl2=1.0.
+
+- job_name: rna_v2_disp2_dwl2_01
+  job_id: 71268
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_rna_v2_disp2_dwl2_01_out.ipynb
+  gmem: 16000
+  overrides: "-r disp 2.0"
+  description: >-
+    RNA V2: disp=2.0.
+
+- job_name: rna_v2_disp2_dwl2_1
+  job_id: 71269
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_rna_v2_disp2_dwl2_1_out.ipynb
+  gmem: 16000
+  overrides: "-r disp 2.0 -r dwl2 1.0"
+  description: >-
+    RNA V2: disp=2.0, dwl2=1.0.
+
+- job_name: rna_v2_disp1_dwl2_01
+  job_id: 71270
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_rna_v2_disp1_dwl2_01_out.ipynb
+  gmem: 16000
+  overrides: "-r disp 1.0"
+  description: >-
+    RNA V2: disp=1.0.
+
+- job_name: rna_v2_disp1_dwl2_1
+  job_id: 71271
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_rna_v2_disp1_dwl2_1_out.ipynb
+  gmem: 16000
+  overrides: "-r disp 1.0 -r dwl2 1.0"
+  description: >-
+    RNA V2: disp=1.0, dwl2=1.0.
+
+- job_name: rna_v2_disp3_dwl2_01_noreslib
+  job_id: 71272
+  notebook: docs/notebooks/model_comparisons/bone_marrow_gamma_poisson_early_stopping.ipynb
+  output: docs/notebooks/model_comparisons/bone_marrow_rna_v2_disp3_dwl2_01_noreslib_out.ipynb
+  gmem: 16000
+  overrides: "-r residual_library_encoder 0"
+  description: >-
+    RNA V2: residual_library_encoder=0.

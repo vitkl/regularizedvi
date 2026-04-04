@@ -33,6 +33,7 @@ __pycache__/
 
 # Notebook outputs (papermill)
 *_out.ipynb
+*_out_lite.ipynb
 
 # Generated experiment report
 experiment_report.html

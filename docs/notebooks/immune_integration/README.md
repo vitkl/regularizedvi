@@ -18,6 +18,28 @@ Multi-dataset integration of human immune cells using `AmbientRegularizedSCVI` (
 **After library QC filter** (drop batches with <10% cells above 1500 counts): 7 COB samples from GSE319044 removed (failed GEX libraries, median counts 11-285).
 **Total saved**: 706,322 cells x 25,629 genes, 92 batches, 92 donors, 49 cell types.
 
+### ARIA Innate Immunity Relevance
+
+Several datasets in this integration are directly relevant to the ARIA Sculpting Innate Immunity programme. See `cell2state_embryo/data/multiome_discovery/invitro_differentiation_search/ARIA_promising_datasets.md` for the full assessment.
+
+| Dataset | ARIA Value | ARIA Categories |
+|---------|-----------|-----------------|
+| COVID infant PBMC (GSE239799) | Longitudinal IFN-STAT response arc, pDC/NK/monocyte activation | innate_engineering, trained_immunity |
+| Lung/Spleen (GSE319044) | Tissue-resident vs circulating immune, asthma risk genes | innate_engineering, tissue_resident |
+| Infant/Adult Spleen (GSE311423) | Developmental bridge embryo→postnatal immune maturation | innate_engineering, tissue_resident |
+| Crohn's PBMC (GSE244831) | Immune disease case-control, TGF-beta TF binding mutation | disease_target_discovery |
+| TEA-seq PBMC (GSE158013) | Healthy immune reference with ATAC+RNA+protein | immune_reference |
+| NeurIPS BM | HSPC differentiation trajectory, myeloid/NK progenitors | immune_reference |
+
+Additional ARIA-relevant multiome datasets identified but **not yet integrated** (fragments confirmed, ready to add):
+- GSE295277+308 (BCG trained immunity, 59K, 21 patients) — Tier 1 ARIA
+- GSE278576 (hippocampus aging microglia, 295K, 40 donors) — Tier 1 ARIA
+- GSE299348 (BACH2 gut T cells DOGMA-seq, 101K, 15 donors) — Tier 1 ARIA
+- GSE241468 (lung smoking, 118K, 16 donors) — Tier 1 ARIA
+- GSE297529 (COVID monocytes, 48K, 17 donors) — Tier 2 ARIA
+- GSE247692 (RORγt+ DC/ILC3 tonsil, 51K, 3 donors) — Tier 2 ARIA
+- GSE239903 (HIV DOGMA-seq, 83K, 16 donors) — Tier 2 ARIA
+
 ### NB1 loading times
 
 | Step | Time |
