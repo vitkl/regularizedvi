@@ -99,3 +99,10 @@ Subagents (Plan, Explore, etc.) that lack Write/Edit tools must NEVER use Bash h
 
 ## GPU Job Submission
 bsub -q gpu-normal -n 8 -M 40000 -R"select[mem>40000] rusage[mem=40000] span[hosts=1]" -gpu "mode=shared:j_exclusive=yes:gmem=80000:num=1" -e ./%J.gpu.err -o ./%J.gpu.out -J <job_name> 'PYTHONNOUSERSITE=TRUE module load ISG/conda && conda activate regularizedvi && papermill <input.ipynb> <output.ipynb>'
+
+### GPU Memory Requirements (measured 2026-04-03)
+| Dataset | Cells | Features | Modalities | MAX MEM | Request | Queue |
+|---------|-------|----------|------------|---------|---------|-------|
+| Immune RNA | 416k | 20k genes | 1 | 30 GB | 60 GB | gpu-normal |
+| Bone marrow | 35k | 13k + 116k | 2 (RNA+ATAC) | ~25 GB | 40 GB | gpu-normal |
+| Embryo | 424k | 28k + 20k + 23k + 342k | 4 (RNA+spliced+unspliced+ATAC) | 187 GB | 300 GB | gpu-huge, -sp 99 |

@@ -75,3 +75,4 @@ scripts/claude_helper_scripts/
 # Claude Code local settings (user-specific permissions)
 .claude/settings.local.json
 .claude/tasks.lock
+.claude/scheduled_tasks.lock
