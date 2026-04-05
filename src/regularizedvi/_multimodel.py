@@ -149,7 +149,7 @@ class RegularizedMultimodalVI(
         modality_weights: Literal["equal", "universal", "cell"] = "equal",
         dispersion: dict[str, str] | str = "gene-batch",
         library_log_vars_weight: float | dict[str, float] = DEFAULT_LIBRARY_LOG_VARS_WEIGHT,
-        library_log_means_centering_sensitivity: dict[str, float] | None = None,
+        library_log_means_centering_sensitivity: dict[str, float] | float | None = None,
         library_n_hidden: int = DEFAULT_LIBRARY_N_HIDDEN,
         scale_activation: str = DEFAULT_SCALE_ACTIVATION,
         use_batch_in_decoder: bool = DEFAULT_USE_BATCH_IN_DECODER,
@@ -442,7 +442,12 @@ class RegularizedMultimodalVI(
                 lib_sizes = np.array(data_mod.sum(axis=1)).flatten()
                 lib_sizes = np.maximum(lib_sizes, 1.0)
                 _centering = self._module_kwargs.get("library_log_means_centering_sensitivity")
-                sensitivity = _centering.get(name, 1.0) if _centering is not None else 1.0
+                if _centering is None:
+                    sensitivity = 1.0
+                elif isinstance(_centering, dict):
+                    sensitivity = _centering.get(name, 1.0)
+                else:
+                    sensitivity = float(_centering)
                 norm_target = lib_sizes.mean() / sensitivity
                 norm_data = (
                     data_mod.multiply(norm_target / lib_sizes[:, None])
