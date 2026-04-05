@@ -242,6 +242,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         decoder_hidden_l1: float = 0.0,
         hidden_activation_sparsity: bool = False,
         n_active_hidden_per_cell: float = 40.0,
+        use_kl_z: bool = True,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -274,6 +275,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.decoder_hidden_l1 = decoder_hidden_l1
         self.hidden_activation_sparsity = hidden_activation_sparsity
         self.n_active_hidden_per_cell = n_active_hidden_per_cell
+        self.use_kl_z = use_kl_z
 
         # Resolve decoder_type early (needed for hyper-prior defaults)
         decoder_type_dict = _resolve_per_modality(decoder_type, self.modality_names)
@@ -1202,7 +1204,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         # ---- KL divergence on Z ----
         qz_per_modality = inference_outputs["qz_per_modality"]
-        if self.latent_mode == "single_encoder":
+        if not self.use_kl_z:
+            kl_z = torch.zeros_like(recon_loss)
+        elif self.latent_mode == "single_encoder":
             qz = qz_per_modality["_joint"]
             kl_z = kld(qz, pz).sum(dim=-1)
         elif self.latent_mode == "concatenation":

@@ -2511,3 +2511,28 @@ class TestSparsityFeatures:
         assert "decoder_l1_penalty_train" in model.history_
         assert "hidden_sparsity_rna_train" in model.history_
         assert "hidden_sparsity_atac_train" in model.history_
+
+    def test_use_kl_z_false_single_modal(self, adata):
+        """use_kl_z=False disables Normal(0,1) KL on z, trains without error."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, use_kl_z=False)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "elbo_train" in model.history_
+
+    def test_use_kl_z_false_multimodal(self, mdata):
+        """use_kl_z=False disables Normal(0,1) KL on z (multimodal), trains without error."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, use_kl_z=False)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "elbo_train" in model.history_
+
+    def test_use_kl_z_false_with_gamma_sparsity(self, adata):
+        """use_kl_z=False + z_sparsity_prior='gamma': no z KL but gamma penalty active."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata, n_hidden=16, n_latent=4, use_kl_z=False, z_sparsity_prior="gamma"
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "z_sparsity_penalty_train" in model.history_
+        sp_vals = model.history_["z_sparsity_penalty_train"].values
+        assert all(v > 0 for v in sp_vals.flatten() if not np.isnan(v))

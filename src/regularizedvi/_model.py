@@ -249,6 +249,7 @@ class AmbientRegularizedSCVI(
         decoder_hidden_l1: float = 0.0,
         hidden_activation_sparsity: bool = False,
         n_active_hidden_per_cell: float = 40.0,
+        use_kl_z: bool = True,
         **kwargs,
     ):
         self._validate_bool_params(
@@ -315,6 +316,7 @@ class AmbientRegularizedSCVI(
             "decoder_hidden_l1": decoder_hidden_l1,
             "hidden_activation_sparsity": hidden_activation_sparsity,
             "n_active_hidden_per_cell": n_active_hidden_per_cell,
+            "use_kl_z": use_kl_z,
             **kwargs,
         }
         self._decoder_bias_multiplier = decoder_bias_multiplier
@@ -596,6 +598,7 @@ class AmbientRegularizedSCVI(
                 decoder_hidden_l1=decoder_hidden_l1,
                 hidden_activation_sparsity=hidden_activation_sparsity,
                 n_active_hidden_per_cell=n_active_hidden_per_cell,
+                use_kl_z=use_kl_z,
                 **kwargs,
             )
             self.module.minified_data_type = self.minified_data_type

@@ -282,6 +282,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         decoder_hidden_l1: float = 0.0,
         hidden_activation_sparsity: bool = False,
         n_active_hidden_per_cell: float = 40.0,
+        use_kl_z: bool = True,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -317,6 +318,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.decoder_hidden_l1 = decoder_hidden_l1
         self.hidden_activation_sparsity = hidden_activation_sparsity
         self.n_active_hidden_per_cell = n_active_hidden_per_cell
+        self.use_kl_z = use_kl_z
 
         # Dispersion covariate (decoupled from batch_key, fallback to n_batch)
         self.n_dispersion_cats = n_dispersion_cats if n_dispersion_cats is not None else n_batch
@@ -975,9 +977,12 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         from torch.distributions import kl_divergence
 
         x = tensors[REGISTRY_KEYS.X_KEY]
-        kl_divergence_z = kl_divergence(
-            inference_outputs[MODULE_KEYS.QZ_KEY], generative_outputs[MODULE_KEYS.PZ_KEY]
-        ).sum(dim=-1)
+        if self.use_kl_z:
+            kl_divergence_z = kl_divergence(
+                inference_outputs[MODULE_KEYS.QZ_KEY], generative_outputs[MODULE_KEYS.PZ_KEY]
+            ).sum(dim=-1)
+        else:
+            kl_divergence_z = torch.zeros(x.shape[0], device=x.device)
         if not self.use_observed_lib_size:
             kl_divergence_l = kl_divergence(
                 inference_outputs[MODULE_KEYS.QL_KEY], generative_outputs[MODULE_KEYS.PL_KEY]
