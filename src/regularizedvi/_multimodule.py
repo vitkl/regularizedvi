@@ -184,7 +184,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         library_log_means: dict[str, np.ndarray] | None = None,
         library_log_vars: dict[str, np.ndarray] | None = None,
         library_log_vars_weight: float | dict[str, float] | None = None,
-        library_log_means_centering_sensitivity: dict[str, float] | None = None,
+        library_log_means_centering_sensitivity: dict[str, float] | float | None = None,
         library_n_hidden: int = 16,
         scale_activation: str = "softplus",
         use_batch_in_decoder: bool = False,
@@ -509,7 +509,12 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # ---- Per-modality library priors ----
         library_log_means = library_log_means or {}
         library_log_vars = library_log_vars or {}
-        _sensitivity = library_log_means_centering_sensitivity or {}
+        if isinstance(library_log_means_centering_sensitivity, dict):
+            _sensitivity = library_log_means_centering_sensitivity
+        elif library_log_means_centering_sensitivity is not None:
+            _sensitivity = dict.fromkeys(self.modality_names, float(library_log_means_centering_sensitivity))
+        else:
+            _sensitivity = {}
         # Normalize library_log_vars_weight to dict
         if isinstance(library_log_vars_weight, dict):
             _vars_weight = library_log_vars_weight
@@ -663,9 +668,14 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.modality_scale_raw = nn.ParameterDict()
         self.modality_scale_init = {}
         if learnable_modality_scaling:
-            _sensitivity = library_log_means_centering_sensitivity or {}
+            if isinstance(library_log_means_centering_sensitivity, dict):
+                _sensitivity2 = library_log_means_centering_sensitivity
+            elif library_log_means_centering_sensitivity is not None:
+                _sensitivity2 = dict.fromkeys(self.modality_names, float(library_log_means_centering_sensitivity))
+            else:
+                _sensitivity2 = {}
             for name in self.modality_names:
-                init_val = _sensitivity.get(name, 1.0)
+                init_val = _sensitivity2.get(name, 1.0)
                 self.modality_scale_init[name] = init_val
                 # softplus(raw)/0.7 = init_val → raw = inverse_softplus(init_val * 0.7)
                 target = init_val * 0.7
