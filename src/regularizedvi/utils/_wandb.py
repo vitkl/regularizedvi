@@ -35,6 +35,59 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def wandb_config_from_locals(
+    local_vars: dict,
+    *,
+    skip: tuple[str, ...] = (),
+    include_dicts: bool = True,
+) -> dict:
+    """Build a wandb config dict from ``locals()`` automatically.
+
+    Replaces hand-maintained ``config={...}`` dicts in notebook templates
+    that drift as new papermill params are added. Keeps only scalar-ish
+    values (``str``, ``int``, ``float``, ``bool``, ``None``) and, if
+    ``include_dicts`` is True, shallow dicts-of-scalars (per-modality
+    param dicts). Large objects (arrays, AnnData, models, figures, modules,
+    callables) and dunder names are skipped.
+
+    Parameters
+    ----------
+    local_vars
+        The ``locals()`` call-site dict from the notebook cell.
+    skip
+        Extra names to exclude from the config.
+    include_dicts
+        Whether to include shallow dicts of scalars (e.g. per-modality
+        hyperparameter dicts).
+
+    Returns
+    -------
+    dict
+        A flat ``{name: value}`` config safe to pass to ``setup_wandb_logger``.
+    """
+    _SCALAR = (str, int, float, bool)
+    skip_set = set(skip)
+    out: dict = {}
+
+    def _is_scalar(v):
+        return v is None or isinstance(v, _SCALAR)
+
+    for k, v in local_vars.items():
+        if k.startswith("_") or k in skip_set:
+            continue
+        if callable(v):
+            continue
+        # Drop modules and things that look like they won't serialize nicely.
+        if type(v).__module__ not in {"builtins"} and not isinstance(v, dict):
+            continue
+        if _is_scalar(v):
+            out[k] = v
+        elif include_dicts and isinstance(v, dict):
+            if all(_is_scalar(x) for x in v.values()):
+                out[k] = v
+    return out
+
+
 def setup_wandb_logger(
     wandb_project: str | None = None,
     wandb_name: str | None = None,

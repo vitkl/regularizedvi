@@ -8,7 +8,7 @@ from regularizedvi.utils._distributions import (
 )
 from regularizedvi.utils._filtering import compound_qc_filter, filter_genes, plot_qc_histograms, print_qc_summary
 from regularizedvi.utils._papermill import coerce_papermill_params
-from regularizedvi.utils._wandb import finish_wandb, log_figure_to_wandb, setup_wandb_logger
+from regularizedvi.utils._wandb import finish_wandb, log_figure_to_wandb, setup_wandb_logger, wandb_config_from_locals
 
 __all__ = [
     "coerce_papermill_params",
@@ -25,4 +25,5 @@ __all__ = [
     "plot_qc_histograms",
     "print_qc_summary",
     "setup_wandb_logger",
+    "wandb_config_from_locals",
 ]
