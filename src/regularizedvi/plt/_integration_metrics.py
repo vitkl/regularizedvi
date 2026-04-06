@@ -314,6 +314,12 @@ _BIO_METRICS = {
     # Alternative names from scib-metrics
     "NMI cluster/label",
     "ARI cluster/label",
+    # Custom sklearn-based metrics
+    "silhouette_label",
+    "ARI_leiden_vs_label",
+    "NMI_leiden_vs_label",
+    "cLISI_median",
+    "cLISI_mean",
 }
 _BATCH_METRICS = {
     "iLISI",
@@ -321,7 +327,14 @@ _BATCH_METRICS = {
     "Graph connectivity",
     "PCR comparison",
     "kBET",  # alternative capitalization
+    # Custom sklearn-based metrics
+    "silhouette_batch",
+    "iLISI_median",
+    "iLISI_mean",
 }
+# Prefixes for per-study/organ metrics (matched by startswith)
+_BIO_PREFIXES = ("silhouette_label_",)
+_BATCH_PREFIXES = ("silhouette_batch_",)
 
 # Colors for column header groups
 _GROUP_COLORS = {
@@ -339,6 +352,11 @@ def _classify_metric_col(col_name: str) -> str:
     if col_name in _BIO_METRICS:
         return "bio"
     if col_name in _BATCH_METRICS:
+        return "batch"
+    # Prefix matching for per-study/organ metrics
+    if col_name.startswith(_BIO_PREFIXES):
+        return "bio"
+    if col_name.startswith(_BATCH_PREFIXES):
         return "batch"
     return "hyperparam"
 

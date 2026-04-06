@@ -44,6 +44,8 @@ from scvi.utils import setup_anndata_dsp
 
 from regularizedvi._constants import (
     AMBIENT_COVS_KEY,
+    AUTO_HYPER_PRIOR_LAMBDA_MAX,
+    AUTO_HYPER_PRIOR_LAMBDA_MIN,
     DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
     DEFAULT_ADDITIVE_BG_PRIOR_BETA,
     DEFAULT_COMPUTE_PEARSON,
@@ -265,6 +267,7 @@ class AmbientRegularizedSCVI(
         # Apply decoder-type defaults for dispersion priors (None → from DECODER_TYPE_DEFAULTS)
         from regularizedvi._constants import DECODER_TYPE_DEFAULTS
 
+        _user_set_hyper_beta = dispersion_hyper_prior_beta is not None
         _dt_defaults = DECODER_TYPE_DEFAULTS.get(decoder_type, DECODER_TYPE_DEFAULTS["expected_RNA"])
         if regularise_dispersion_prior is None:
             regularise_dispersion_prior = _dt_defaults["regularise_dispersion_prior"]
@@ -519,18 +522,53 @@ class AmbientRegularizedSCVI(
 
                 _x_reg = self.adata_manager.data_registry[REGISTRY_KEYS.X_KEY]
                 _disp_layer = None if _x_reg.attr_name == "X" else _x_reg.attr_key
+                _sens = (
+                    library_log_means_centering_sensitivity
+                    if library_log_means_centering_sensitivity is not None
+                    else 1.0
+                )
                 logger.info("Computing bursting model init (variance decomposition)...")
                 _bursting_init_values, _diag = compute_bursting_init(
                     self.adata,
                     layer=_disp_layer,
                     biological_variance_fraction=dispersion_init_bio_frac,
                     burst_size_intercept=burst_size_intercept,
+                    sensitivity=_sens,
+                    dispersion_hyper_prior_alpha=dispersion_hyper_prior_alpha,
                     theta_min=dispersion_init_theta_min,
                     theta_max=dispersion_init_theta_max,
                     verbose=True,
                 )
                 # Use log_theta for px_r_init_mean (backward compatible with dispersion path)
                 px_r_init_mean = _bursting_init_values["log_theta"]
+
+                # Auto-derive hyper-prior beta from MoM if user didn't explicitly set it
+                _suggested = _bursting_init_values["suggested_hyper_beta"]
+                # Clamp so E[lambda] = alpha/beta stays within reasonable range
+                _suggested = float(
+                    np.clip(
+                        _suggested,
+                        dispersion_hyper_prior_alpha / AUTO_HYPER_PRIOR_LAMBDA_MAX,
+                        dispersion_hyper_prior_alpha / AUTO_HYPER_PRIOR_LAMBDA_MIN,
+                    )
+                )
+                if not _user_set_hyper_beta:
+                    dispersion_hyper_prior_beta = _suggested
+                    regularise_dispersion_prior = dispersion_hyper_prior_alpha / dispersion_hyper_prior_beta
+                    logger.info(
+                        f"Auto hyper-prior: beta={dispersion_hyper_prior_beta:.4f}, "
+                        f"lambda_init={regularise_dispersion_prior:.1f}"
+                    )
+                else:
+                    _ratio = max(dispersion_hyper_prior_beta, _suggested) / max(
+                        min(dispersion_hyper_prior_beta, _suggested), 1e-8
+                    )
+                    if _ratio > 10:
+                        logger.warning(
+                            f"Explicit dispersion_hyper_prior_beta={dispersion_hyper_prior_beta:.4f} "
+                            f"differs >10x from MoM-suggested {_suggested:.4f}"
+                        )
+
                 logger.info(
                     f"Bursting init: median burst_freq={np.median(_bursting_init_values['burst_freq']):.3f}, "
                     f"median stochastic_v={np.median(_bursting_init_values['stochastic_v_scale']):.4f}"
@@ -618,8 +656,12 @@ class AmbientRegularizedSCVI(
                 else:
                     self.module.px_r_mu.data.copy_(sv_log_init.unsqueeze(1).expand_as(self.module.px_r_mu))
 
-                # Initialize burst_freq decoder bias
+                # Initialize burst_freq decoder bias (apply multiplier if set)
                 bf_bias = torch.tensor(_bursting_init_values["burst_freq_bias"], dtype=torch.float32)
+                if self._decoder_bias_multiplier is not None and self._decoder_bias_multiplier != 1.0:
+                    # Additive in pre-softplus space: softplus(bias + log(m)) ≈ m * softplus(bias)
+                    bf_bias = bf_bias + float(np.log(self._decoder_bias_multiplier))
+                    logger.info(f"Applied decoder_bias_multiplier={self._decoder_bias_multiplier} to burst_freq bias")
                 self.module.decoder.px_scale_decoder[0].bias.data.copy_(bf_bias)
 
                 # Initialize burst_size decoder bias

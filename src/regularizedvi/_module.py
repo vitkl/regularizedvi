@@ -1150,6 +1150,17 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         z = inference_outputs[MODULE_KEYS.Z_KEY]
         extra_metrics_payload["z_var"] = z.var(dim=0).mean().detach()
 
+        # Active dimensions tracking (per-dim KL, binarized)
+        from regularizedvi._constants import DEFAULT_ACTIVE_DIM_KL_THRESHOLD
+
+        if self.use_kl_z:
+            qz = inference_outputs[MODULE_KEYS.QZ_KEY]
+            pz = generative_outputs[MODULE_KEYS.PZ_KEY]
+            kl_per_dim = kl_divergence(qz, pz)  # (batch, n_latent)
+            kl_active = (kl_per_dim > DEFAULT_ACTIVE_DIM_KL_THRESHOLD).float()
+            extra_metrics_payload["n_active_dims"] = kl_active.sum(dim=-1).mean().detach()
+            extra_metrics_payload["n_dims_any_active"] = (kl_active.sum(dim=0) > 0).float().sum().detach()
+
         if self.z_sparsity_prior == "gamma":
             extra_metrics_payload["z_sparsity_penalty"] = z_sparsity_penalty.mean().detach()
 

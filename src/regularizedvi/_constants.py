@@ -84,10 +84,23 @@ DECODER_TYPE_DEFAULTS = {
     },
 }
 
+# --- Auto-derived hyper-prior lambda bounds (sanity filter only) ---
+# When auto-deriving dispersion_hyper_prior_beta from MoM stochastic_v,
+# clamp E[lambda] = alpha/beta to reject only ridiculous values. Lambda is the
+# Exponential rate for sqrt(stochastic_v), so target sqrt(v) scale = 1/lambda.
+# LAMBDA_MIN=1e-4  → rejects scale > 10000 (ridiculously large technical variance)
+# LAMBDA_MAX=100   → rejects scale < 0.01   (ridiculously small technical variance)
+AUTO_HYPER_PRIOR_LAMBDA_MIN = 1e-4
+AUTO_HYPER_PRIOR_LAMBDA_MAX = 100.0
+
 # --- Network architecture ---
 DEFAULT_USE_BATCH_NORM = "none"
 DEFAULT_USE_LAYER_NORM = "both"
 DEFAULT_DROPOUT_ON_INPUT = True
+
+# --- Active dimensions tracking ---
+DEFAULT_ACTIVE_DIM_KL_THRESHOLD = 0.01
+DEFAULT_ACTIVE_DIM_Z_GAMMA_THRESHOLD = 0.1
 
 # --- Training metrics ---
 DEFAULT_COMPUTE_PEARSON = False

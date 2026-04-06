@@ -93,6 +93,8 @@ def compute_dispersion_init(
     theta_max: float = 10.0,
     chunk_size: int = 5000,
     feature_type: str | None = None,
+    label_key: str | None = None,
+    min_cells_per_group: int = 50,
     verbose: bool = True,
 ) -> tuple[np.ndarray, dict]:
     """Compute per-gene NB dispersion init from method of moments on raw counts.
@@ -129,6 +131,12 @@ def compute_dispersion_init(
         Number of cells per chunk for Welford computation.
     feature_type
         Filter by var['feature_types'] (e.g. 'GEX' for RNA, 'Peaks' for ATAC).
+    label_key
+        obs column for cell type labels. When provided, also computes per-group
+        mean/variance/theta for within-cell-type analysis. Groups with NaN/empty
+        labels or fewer than ``min_cells_per_group`` cells are excluded.
+    min_cells_per_group
+        Minimum cells required per group when ``label_key`` is set.
     verbose
         Print progress.
 
@@ -138,9 +146,15 @@ def compute_dispersion_init(
         log(clipped theta) array of shape (n_genes,), suitable for px_r_init_mean.
     diagnostics : dict
         Unclipped theta arrays and intermediate quantities for inspection.
+        When ``label_key`` is set, also contains per-group arrays:
+        ``mean_g_per_group``, ``var_g_per_group``, ``theta_per_group``, ``group_sizes``.
     """
-    # Resolve input
+    # Resolve input — only AnnData path supports label_key for now
     if isinstance(adata_or_path, (str, Path)):
+        if label_key is not None:
+            raise ValueError(
+                "label_key is only supported for in-memory AnnData, not h5ad paths. Load the AnnData first."
+            )
         path = str(adata_or_path)
         return _compute_from_h5ad(
             path,
@@ -167,6 +181,8 @@ def compute_dispersion_init(
             theta_min,
             theta_max,
             chunk_size,
+            label_key,
+            min_cells_per_group,
             verbose,
         )
 
@@ -296,6 +312,8 @@ def _compute_from_anndata(
     theta_min,
     theta_max,
     chunk_size,
+    label_key,
+    min_cells_per_group,
     verbose,
 ):
     """Compute dispersion init from in-memory AnnData."""
@@ -370,7 +388,7 @@ def _compute_from_anndata(
 
     var_g = m2_g / count
 
-    return _compute_theta(
+    log_theta, diagnostics = _compute_theta(
         mean_g,
         var_g,
         cv2_L,
@@ -381,6 +399,70 @@ def _compute_from_anndata(
         theta_max,
         verbose,
     )
+
+    # Per-group (cell type) statistics when label_key is provided
+    if label_key is not None and label_key in adata.obs.columns:
+        import pandas as pd
+
+        labels = adata.obs[label_key].values
+        # Filter out NaN/None/empty labels
+        valid_mask = pd.notna(labels)
+        if hasattr(labels, "astype"):
+            str_labels = pd.Series(labels).astype(str)
+            valid_mask = valid_mask & (str_labels != "") & (str_labels != "nan") & (str_labels != "None")
+            labels_clean = str_labels.values
+        else:
+            labels_clean = np.array([str(x) for x in labels])
+
+        unique_groups = [g for g in np.unique(labels_clean[valid_mask]) if g not in ("", "nan", "None")]
+
+        mean_g_per_group = {}
+        var_g_per_group = {}
+        theta_per_group = {}
+        group_sizes = {}
+        eps_theta = 1e-10
+
+        for g_name in unique_groups:
+            g_mask = (labels_clean == g_name) & valid_mask
+            n_g = int(g_mask.sum())
+            if n_g < min_cells_per_group:
+                continue
+
+            X_g = X[g_mask]
+            if sp.issparse(X_g):
+                X_g = X_g.toarray()
+            X_g = np.asarray(X_g, dtype=np.float64)
+
+            mean_gk = X_g.mean(axis=0)
+            var_gk = X_g.var(axis=0)  # population variance (ddof=0)
+
+            # Within-group excess and theta
+            excess_gk = var_gk - mean_gk  # Poisson-subtracted
+            theta_gk = mean_gk**2 / np.maximum(excess_gk, eps_theta)
+            theta_gk = np.clip(theta_gk, theta_min, theta_max)
+
+            mean_g_per_group[g_name] = mean_gk.astype(np.float32)
+            var_g_per_group[g_name] = var_gk.astype(np.float32)
+            theta_per_group[g_name] = theta_gk.astype(np.float32)
+            group_sizes[g_name] = n_g
+
+        diagnostics["mean_g_per_group"] = mean_g_per_group
+        diagnostics["var_g_per_group"] = var_g_per_group
+        diagnostics["theta_per_group"] = theta_per_group
+        diagnostics["group_sizes"] = group_sizes
+
+        if verbose:
+            n_valid = len(group_sizes)
+            n_total = len(unique_groups)
+            print(f"\n  Per-group stats ({label_key}): {n_valid}/{n_total} groups with >={min_cells_per_group} cells")
+            for g_name in sorted(group_sizes, key=lambda k: -group_sizes[k])[:5]:
+                print(
+                    f"    {g_name}: {group_sizes[g_name]} cells, theta median={np.median(theta_per_group[g_name]):.3f}"
+                )
+            if n_valid > 5:
+                print(f"    ... and {n_valid - 5} more groups")
+
+    return log_theta, diagnostics
 
 
 def _compute_theta(
@@ -476,6 +558,8 @@ def compute_bursting_init(
     dispersion_key: str | None = None,
     biological_variance_fraction: float = 0.9,
     burst_size_intercept: float = 1.0,
+    sensitivity: float = 1.0,
+    dispersion_hyper_prior_alpha: float = 2.0,
     theta_min: float = 0.01,
     theta_max: float = 10.0,
     chunk_size: int = 5000,
@@ -485,9 +569,9 @@ def compute_bursting_init(
     """Compute init values for burst_frequency_size decoder.
 
     Returns per-gene initial values for:
-    - stochastic_v_raw: pre-softplus scale of technical variance
-    - burst_freq bias: log(burst_frequency) for decoder bias init
-    - burst_size bias: pre-softplus(burst_size - intercept) for decoder bias init
+    - stochastic_v_scale: std of technical variance (count-space)
+    - burst_freq bias: inv_softplus(burst_frequency) for decoder bias init
+    - burst_size bias: inv_softplus(burst_size - intercept) for decoder bias init
 
     Uses the same MoM variance decomposition as compute_dispersion_init,
     then splits excess into biological (burst_freq) and technical (stochastic_v).
@@ -504,6 +588,12 @@ def compute_bursting_init(
         Fraction of excess variance attributed to biology (default 0.9).
     burst_size_intercept
         The intercept added to softplus(burst_size_decoder_output).
+    sensitivity
+        Library centering sensitivity (e.g. 1.0 for RNA, 0.2 for ATAC).
+        Used to normalize burst_size to rate-space.
+    dispersion_hyper_prior_alpha
+        Alpha of the Gamma hyper-prior on stochastic_v rate. Used to compute
+        suggested_hyper_beta from MoM estimates.
     theta_min, theta_max
         Clamp range for burst_freq (same as theta).
     chunk_size
@@ -516,8 +606,9 @@ def compute_bursting_init(
     Returns
     -------
     init_values : dict
-        Keys: 'stochastic_v_raw', 'burst_freq_bias', 'burst_size_bias', 'log_theta'
-        All np.ndarray of shape (n_genes,).
+        Keys: 'stochastic_v_scale', 'burst_freq_bias', 'burst_size_bias',
+        'log_theta', 'burst_freq', 'burst_size', 'suggested_hyper_beta'.
+        All arrays are shape (n_genes,) except suggested_hyper_beta (scalar).
     diagnostics : dict
         Intermediate quantities for inspection.
     """
@@ -546,38 +637,49 @@ def compute_bursting_init(
     # stochastic_v: scale param (std-like), then .pow(2) gives variance in the model
     sv_scale = np.sqrt(excess_technical)
 
+    # Auto-derive hyper-prior beta from MoM: E[lambda] = 1/median(sv_scale)
+    _median_sv = float(np.median(sv_scale))
+    suggested_hyper_beta = dispersion_hyper_prior_alpha * max(_median_sv, eps)
+
     # burst_freq: biological concentration = mean^2 / excess_biological
     burst_freq = np.clip(mean_g**2 / excess_biological, theta_min, theta_max)
 
-    # burst_size: mean / burst_freq - intercept, then inverse_softplus
+    # burst_size: rate-space (divide by sensitivity), then subtract intercept, then inv_softplus
     valid = burst_freq > eps
-    burst_size_values = np.where(valid, mean_g / burst_freq, 0.0)
-    default_burst_size = np.min(burst_size_values[valid]) if np.any(valid) else 1.0
-    burst_size_raw_val = np.where(valid, burst_size_values, default_burst_size) - burst_size_intercept
+    burst_size_total = np.where(valid, mean_g / (burst_freq * sensitivity), 0.0)
+    default_burst_size = np.min(burst_size_total[valid]) if np.any(valid) else 1.0
+    burst_size_raw_val = np.where(valid, burst_size_total, default_burst_size) - burst_size_intercept
     burst_size_raw_val = np.maximum(burst_size_raw_val, eps)
-    burst_size_bias = np.log(np.expm1(burst_size_raw_val)).astype(np.float32)
+    burst_size_bias = np.log(np.expm1(burst_size_raw_val)).astype(np.float32)  # inv_softplus
 
-    # burst_freq bias: log(burst_freq) for decoder bias init (pre-softplus)
+    # burst_freq bias: inv_softplus(burst_freq) for decoder bias init
     burst_freq_clamped = np.maximum(burst_freq, eps)
-    burst_freq_bias = np.log(np.expm1(burst_freq_clamped)).astype(np.float32)
+    burst_freq_bias = np.log(np.expm1(burst_freq_clamped)).astype(np.float32)  # inv_softplus
 
     if verbose:
         print("\n  Bursting model init:")
         print(f"    stochastic_v scale: median={np.median(sv_scale):.4f}, mean={np.mean(sv_scale):.4f}")
         print(f"    burst_freq: median={np.median(burst_freq):.4f}, mean={np.mean(burst_freq):.4f}")
         print(
-            f"    burst_size: median={np.median(burst_size_values[valid]):.4f}, "
-            f"mean={np.mean(burst_size_values[valid]):.4f}"
+            f"    burst_size (rate-space, sens={sensitivity}): "
+            f"median={np.median(burst_size_total[valid]):.4f}, "
+            f"mean={np.mean(burst_size_total[valid]):.4f}"
         )
         print(f"    genes with valid burst_size: {np.sum(valid)}/{len(mean_g)}")
+        _suggested_lambda = dispersion_hyper_prior_alpha / suggested_hyper_beta
+        print(
+            f"    suggested hyper-prior: Gamma({dispersion_hyper_prior_alpha}, {suggested_hyper_beta:.4f})"
+            f" → E[λ]={_suggested_lambda:.1f}"
+        )
 
     init_values = {
         "burst_freq_bias": burst_freq_bias,
         "burst_size_bias": burst_size_bias,
         "log_theta": log_theta,
         "burst_freq": burst_freq.astype(np.float32),
-        "burst_size": burst_size_values.astype(np.float32),
+        "burst_size": burst_size_total.astype(np.float32),
         "stochastic_v_scale": sv_scale.astype(np.float32),
+        "suggested_hyper_beta": suggested_hyper_beta,
     }
 
     return init_values, diagnostics

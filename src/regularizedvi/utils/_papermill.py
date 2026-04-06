@@ -58,15 +58,15 @@ def _coerce_single(value: object, target_type: type | str, name: str) -> object:
     if value is None:
         return None
 
-    # str_or_none: "None"/"none" → None, None → None, else str
+    # str_or_none: "None"/"none"/"-" → None, None → None, else str
     if target_type == "str_or_none":
-        if isinstance(value, str) and value.lower() == "none":
+        if isinstance(value, str) and value.lower() in ("none", "-"):
             return None
         return value
 
-    # float_or_none: "None"/"none" → None, None → None, else float
+    # float_or_none: "None"/"none"/"-" → None, None → None, else float
     if target_type == "float_or_none":
-        if isinstance(value, str) and value.lower() == "none":
+        if isinstance(value, str) and value.lower() in ("none", "-"):
             return None
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)

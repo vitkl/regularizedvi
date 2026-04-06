@@ -243,6 +243,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         hidden_activation_sparsity: bool = False,
         n_active_hidden_per_cell: float = 40.0,
         use_kl_z: bool = True,
+        # Horseshoe latent Z prior (multiplicative shrinkage on Z)
+        horseshoe_latent_z_prior_type: str | None = None,
+        horseshoe_latent_z_encoder_fraction: float = 1.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -276,6 +279,22 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.hidden_activation_sparsity = hidden_activation_sparsity
         self.n_active_hidden_per_cell = n_active_hidden_per_cell
         self.use_kl_z = use_kl_z
+        self.horseshoe_latent_z_prior_type = horseshoe_latent_z_prior_type
+        self.horseshoe_latent_z_encoder_fraction = horseshoe_latent_z_encoder_fraction
+        if self.horseshoe_latent_z_prior_type is not None and self.horseshoe_latent_z_prior_type not in (
+            "lognormal",
+            "gamma",
+        ):
+            raise ValueError(
+                f"horseshoe_latent_z_prior_type must be None, 'lognormal', or 'gamma', "
+                f"got {self.horseshoe_latent_z_prior_type!r}"
+            )
+        if self.horseshoe_latent_z_prior_type is not None and latent_mode == "single_encoder":
+            raise ValueError(
+                "horseshoe_latent_z_prior_type is not supported with latent_mode='single_encoder'. "
+                "The horseshoe multiplicative shrinkage is applied per-modality in concatenation "
+                "or weighted_mean modes. Use latent_mode='concatenation' (default) instead."
+            )
 
         # Resolve decoder_type early (needed for hyper-prior defaults)
         decoder_type_dict = _resolve_per_modality(decoder_type, self.modality_names)
@@ -418,6 +437,26 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 return_dist=True,
                 **_extra_encoder_kwargs,
             )
+
+        # ---- Horseshoe latent Z encoders (per-modality, multiplicative shrinkage) ----
+        if self.horseshoe_latent_z_prior_type is not None:
+            self.horseshoe_encoders = nn.ModuleDict()
+            for name in self.modality_names:
+                _hs_n_hidden = max(16, int(n_hidden_dict[name] * self.horseshoe_latent_z_encoder_fraction))
+                self.horseshoe_encoders[name] = RegularizedEncoder(
+                    n_input=n_input_per_modality[name] + n_continuous_cov,
+                    n_output=n_latent_dict[name],
+                    n_cat_list=encoder_cat_list,
+                    n_layers=n_layers_dict[name],
+                    n_hidden=_hs_n_hidden,
+                    dropout_rate=dropout_rate,
+                    distribution="normal",
+                    inject_covariates=deeply_inject_covariates,
+                    use_batch_norm=use_batch_norm_encoder,
+                    use_layer_norm=use_layer_norm_encoder,
+                    return_dist=True,
+                    **_extra_encoder_kwargs,
+                )
 
         # ---- Single encoder (for single_encoder mode) ----
         if latent_mode == "single_encoder":
@@ -806,6 +845,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # Per-modality encoding
         qz_per_modality = {}
         z_per_modality = {}
+        horseshoe_per_modality = {}
+        z_gamma_per_modality = {}
 
         if self.latent_mode == "single_encoder":
             # Concatenate all modality inputs
@@ -837,6 +878,14 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 if cont_covs is not None:
                     x_ = torch.cat([x_, cont_covs], dim=-1)
                 qz, z = self.encoders[name](x_, *encoder_categorical_input)
+                # Horseshoe multiplicative shrinkage on Z (per modality)
+                if self.horseshoe_latent_z_prior_type is not None and name in self.horseshoe_encoders:
+                    hs_normal_dist, _ = self.horseshoe_encoders[name](x_, *encoder_categorical_input)
+                    hs_lognormal = LogNormal(hs_normal_dist.loc, hs_normal_dist.scale)
+                    z_gamma = hs_lognormal.rsample()
+                    z = z * z_gamma
+                    horseshoe_per_modality[name] = hs_lognormal
+                    z_gamma_per_modality[name] = z_gamma
                 qz_per_modality[name] = qz
                 z_per_modality[name] = z
 
@@ -909,6 +958,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             "library": library,
             "ql_per_modality": ql_per_modality,
             "masks": masks,
+            "horseshoe_per_modality": horseshoe_per_modality,
+            "z_gamma_per_modality": z_gamma_per_modality,
         }
 
     def _mix_modalities(
@@ -1249,6 +1300,37 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 z_mod = z_per_modality[name]
                 extra_metrics[f"z_var_{name}"] = z_mod.var(dim=0).mean().detach()
 
+        # ---- Active dimensions tracking (per-dim KL, binarized) ----
+        from regularizedvi._constants import (
+            DEFAULT_ACTIVE_DIM_KL_THRESHOLD,
+            DEFAULT_ACTIVE_DIM_Z_GAMMA_THRESHOLD,
+        )
+
+        z_gamma_per_modality = inference_outputs.get("z_gamma_per_modality", {})
+        for name in self.modality_names:
+            if name not in qz_per_modality:
+                continue
+            qz = qz_per_modality[name]
+            n_lat = self.n_latent_dict[name]
+            prior_ad = Normal(
+                torch.zeros(n_lat, device=recon_loss.device),
+                torch.ones(n_lat, device=recon_loss.device),
+            )
+            kl_per_dim = kld(qz, prior_ad)  # (batch, n_latent)
+            kl_active = (kl_per_dim > DEFAULT_ACTIVE_DIM_KL_THRESHOLD).float()
+
+            if self.horseshoe_latent_z_prior_type is not None and name in z_gamma_per_modality:
+                z_gamma = z_gamma_per_modality[name]
+                gamma_active = (z_gamma > DEFAULT_ACTIVE_DIM_Z_GAMMA_THRESHOLD).float()
+                active_mask = kl_active * gamma_active
+                extra_metrics[f"n_active_dims_kl_only_{name}"] = kl_active.sum(dim=-1).mean().detach()
+                extra_metrics[f"n_active_dims_zgamma_only_{name}"] = gamma_active.sum(dim=-1).mean().detach()
+            else:
+                active_mask = kl_active
+
+            extra_metrics[f"n_active_dims_{name}"] = active_mask.sum(dim=-1).mean().detach()
+            extra_metrics[f"n_dims_any_active_{name}"] = (active_mask.sum(dim=0) > 0).float().sum().detach()
+
         # ---- KL divergence on library (always learned) ----
         kl_l = torch.zeros_like(recon_loss)
         ql_per_modality = inference_outputs.get("ql_per_modality", {})
@@ -1291,6 +1373,46 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             z_sparsity_penalty = -_gamma_z.log_prob(z.abs() + 1e-8).sum(dim=-1)
             extra_metrics["z_sparsity_penalty"] = z_sparsity_penalty.mean().detach()
             kl_z = kl_z + z_sparsity_penalty
+
+        # ---- Horseshoe latent Z prior: multiplicative shrinkage KL ----
+        if self.horseshoe_latent_z_prior_type is not None:
+            horseshoe_per_modality = inference_outputs.get("horseshoe_per_modality", {})
+            z_gamma_per_modality = inference_outputs.get("z_gamma_per_modality", {})
+            horseshoe_kl = torch.zeros_like(recon_loss)
+            _hs_shape = torch.tensor(
+                self.n_active_latent_per_cell / self.total_latent_dim,
+                device=recon_loss.device,
+                dtype=recon_loss.dtype,
+            )
+
+            for name in self.modality_names:
+                if name not in horseshoe_per_modality:
+                    continue
+                hs_dist = horseshoe_per_modality[name]
+                z_gamma = z_gamma_per_modality[name]
+
+                if self.horseshoe_latent_z_prior_type == "lognormal":
+                    _sigma_0_sq = torch.log(1 + 1 / _hs_shape)
+                    _mu_0 = torch.log(_hs_shape) - _sigma_0_sq / 2
+                    _sigma_0 = torch.sqrt(_sigma_0_sq)
+                    prior = LogNormal(_mu_0, _sigma_0)
+                    hs_kl_mod = kld(hs_dist, prior).sum(dim=-1)
+                else:  # "gamma"
+                    gamma_prior = Gamma(
+                        concentration=_hs_shape,
+                        rate=torch.tensor(1.0, device=recon_loss.device, dtype=recon_loss.dtype),
+                    )
+                    log_q = hs_dist.log_prob(z_gamma + 1e-8).sum(dim=-1)
+                    log_p = gamma_prior.log_prob(z_gamma + 1e-8).sum(dim=-1)
+                    hs_kl_mod = log_q - log_p
+
+                if name in masks:
+                    hs_kl_mod = hs_kl_mod * masks[name].float()
+                horseshoe_kl = horseshoe_kl + hs_kl_mod
+                extra_metrics[f"horseshoe_kl_{name}"] = hs_kl_mod.mean().detach()
+                extra_metrics[f"z_gamma_mean_{name}"] = z_gamma.mean().detach()
+
+            kl_z = kl_z + horseshoe_kl
 
         # ---- Hidden activation sparsity: Gamma prior on decoder hidden activations (per-cell) ----
         if self.hidden_activation_sparsity:
@@ -1479,6 +1601,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
     _PER_MODALITY_CONTAINERS = [
         "encoders",
+        "horseshoe_encoders",
         "l_encoders",
         "decoders",
         "px_r_mu",

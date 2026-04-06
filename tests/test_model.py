@@ -2337,6 +2337,8 @@ class TestBurstFrequencySizeDecoder:
             decoder_type="burst_frequency_size",
             dispersion_init="variance_burst_size",
             dispersion_init_bio_frac=0.9,
+            # Explicit hyper-prior to avoid auto-derive from tiny synthetic data
+            dispersion_hyper_prior_beta=0.04,
         )
         # Verify px_r_mu was initialized from data (not default prior init)
         px_r_mu = model.module.px_r_mu.data
@@ -2421,6 +2423,107 @@ class TestSingleModalityMultimodal:
         model.train(max_epochs=2, train_size=1.0, batch_size=64)
         latent = model.get_latent_representation()
         assert latent.shape == (100, 4)
+
+
+class TestBurstInitFixes:
+    """Tests for burst decoder init: sensitivity normalization, hyper-prior auto-derive, label_key."""
+
+    def test_burst_sensitivity_normalizes_burst_size(self, adata):
+        """burst_size should be divided by sensitivity in compute_bursting_init."""
+        from regularizedvi._dispersion_init import compute_bursting_init
+
+        vals_s1, _ = compute_bursting_init(adata, sensitivity=1.0, verbose=False)
+        vals_s02, _ = compute_bursting_init(adata, sensitivity=0.2, verbose=False)
+        # burst_size at sensitivity=0.2 should be ~5x larger (rate-space = count/sensitivity)
+        ratio = np.median(vals_s02["burst_size"]) / np.median(vals_s1["burst_size"])
+        assert 3.0 < ratio < 7.0, f"Expected burst_size ratio ~5x, got {ratio:.2f}"
+        # burst_freq should be the same (dimensionless)
+        np.testing.assert_allclose(vals_s1["burst_freq"], vals_s02["burst_freq"], rtol=1e-5)
+        # stochastic_v should be the same (count-space)
+        np.testing.assert_allclose(vals_s1["stochastic_v_scale"], vals_s02["stochastic_v_scale"], rtol=1e-5)
+
+    def test_suggested_hyper_beta_in_init_values(self, adata):
+        """compute_bursting_init returns suggested_hyper_beta consistent with sv_scale."""
+        from regularizedvi._dispersion_init import compute_bursting_init
+
+        vals, _ = compute_bursting_init(adata, dispersion_hyper_prior_alpha=2.0, verbose=False)
+        expected_beta = 2.0 * float(np.median(vals["stochastic_v_scale"]))
+        assert abs(vals["suggested_hyper_beta"] - expected_beta) < 1e-6
+
+    def test_label_key_returns_per_group_stats(self, adata):
+        """compute_dispersion_init with label_key returns per-group diagnostics."""
+        from regularizedvi._dispersion_init import compute_dispersion_init
+
+        # Add a mock label column
+        adata.obs["test_label"] = ["A"] * 50 + ["B"] * 50
+        _, diag = compute_dispersion_init(adata, label_key="test_label", min_cells_per_group=10, verbose=False)
+        assert "mean_g_per_group" in diag
+        assert "A" in diag["mean_g_per_group"]
+        assert "B" in diag["mean_g_per_group"]
+        assert diag["group_sizes"]["A"] == 50
+        assert diag["group_sizes"]["B"] == 50
+        # Per-group arrays should have correct gene dimension
+        assert diag["mean_g_per_group"]["A"].shape[0] == adata.n_vars
+
+    def test_label_key_none_unchanged(self, adata):
+        """label_key=None should not add per-group keys to diagnostics."""
+        from regularizedvi._dispersion_init import compute_dispersion_init
+
+        _, diag = compute_dispersion_init(adata, label_key=None, verbose=False)
+        assert "mean_g_per_group" not in diag
+
+    def test_label_key_filters_nan(self, adata):
+        """NaN/nan labels should be excluded from per-group stats."""
+        from regularizedvi._dispersion_init import compute_dispersion_init
+
+        adata.obs["test_label"] = ["A"] * 40 + [np.nan] * 10 + ["B"] * 50
+        _, diag = compute_dispersion_init(adata, label_key="test_label", min_cells_per_group=10, verbose=False)
+        assert "nan" not in diag["group_sizes"]
+        assert diag["group_sizes"]["A"] == 40
+
+    def test_auto_hyper_prior_applied_in_model(self, adata):
+        """variance_burst_size init should auto-derive hyper-prior beta."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=32,
+            n_latent=8,
+            decoder_type="burst_frequency_size",
+            dispersion_init="variance_burst_size",
+            regularise_dispersion=True,
+        )
+        # The learned rate should be initialized at E[lambda] = alpha/beta
+        import torch
+
+        learned_rate = torch.nn.functional.softplus(model.module.dispersion_prior_rate_raw)
+        # Should NOT be the default 50 (from Gamma(2, 0.04))
+        assert not torch.allclose(learned_rate, torch.tensor(50.0), atol=5.0), (
+            "Lambda init should be auto-derived from MoM, not the default 50"
+        )
+
+    def test_decoder_bias_multiplier_burst_freq(self, adata):
+        """decoder_bias_multiplier should scale burst_freq init."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch")
+        model_1x = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=32,
+            n_latent=8,
+            decoder_type="burst_frequency_size",
+            dispersion_init="variance_burst_size",
+        )
+        model_2x = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=32,
+            n_latent=8,
+            decoder_type="burst_frequency_size",
+            dispersion_init="variance_burst_size",
+            decoder_bias_multiplier=2.0,
+        )
+        bias_1x = model_1x.module.decoder.px_scale_decoder[0].bias.data.clone()
+        bias_2x = model_2x.module.decoder.px_scale_decoder[0].bias.data.clone()
+        # 2x multiplier should add log(2) ≈ 0.693 to bias
+        diff = (bias_2x - bias_1x).mean().item()
+        assert abs(diff - np.log(2.0)) < 0.01, f"Expected diff ≈ {np.log(2.0):.3f}, got {diff:.3f}"
 
 
 class TestSparsityFeatures:
@@ -2536,3 +2639,60 @@ class TestSparsityFeatures:
         assert "z_sparsity_penalty_train" in model.history_
         sp_vals = model.history_["z_sparsity_penalty_train"].values
         assert all(v > 0 for v in sp_vals.flatten() if not np.isnan(v))
+
+    def test_horseshoe_latent_z_prior_lognormal(self, mdata):
+        """horseshoe_latent_z_prior_type='lognormal' trains and logs horseshoe_kl."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            horseshoe_latent_z_prior_type="lognormal",
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "elbo_train" in model.history_
+        # At least one modality should have horseshoe_kl logged
+        hs_keys = [k for k in model.history_ if k.startswith("horseshoe_kl_")]
+        assert len(hs_keys) > 0, f"No horseshoe_kl metric found in history. Keys: {list(model.history_.keys())[:20]}"
+
+    def test_horseshoe_latent_z_prior_gamma(self, mdata):
+        """horseshoe_latent_z_prior_type='gamma' trains with MC KL estimate."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            horseshoe_latent_z_prior_type="gamma",
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "elbo_train" in model.history_
+        hs_keys = [k for k in model.history_ if k.startswith("horseshoe_kl_")]
+        assert len(hs_keys) > 0
+
+    def test_horseshoe_latent_z_prior_none(self, mdata):
+        """horseshoe_latent_z_prior_type=None (default) disables horseshoe, no horseshoe_kl logged."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            horseshoe_latent_z_prior_type=None,
+        )
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        hs_keys = [k for k in model.history_ if k.startswith("horseshoe_kl_")]
+        assert len(hs_keys) == 0
+
+    def test_active_dims_tracking_multimodal(self, mdata):
+        """Active dims metrics logged during training (multimodal)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        active_keys = [k for k in model.history_ if k.startswith("n_active_dims_")]
+        assert len(active_keys) > 0, f"No n_active_dims metric found. Keys: {list(model.history_.keys())[:20]}"
+
+    def test_active_dims_tracking_single_modal(self, adata):
+        """Active dims metrics logged during training (unimodal)."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=3, train_size=1.0, batch_size=32)
+        assert "n_active_dims_train" in model.history_
