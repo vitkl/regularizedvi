@@ -667,8 +667,8 @@ class AmbientRegularizedSCVI(
                 # stochastic_v_raw contains inverse_softplus values, but px_r_mu is log-space
                 # for the LogNormal posterior. Convert: px_r_mu = log(stochastic_v_scale^2)
                 # since px_r = exp(px_r_mu) during sampling, and we want px_r ≈ v_scale^2
-                sv_scale = torch.tensor(_bursting_init_values["stochastic_v_scale"], dtype=torch.float32)
-                sv_log_init = torch.log(torch.clamp(sv_scale.pow(2), min=1e-8))
+                stochastic_v_scale = torch.tensor(_bursting_init_values["stochastic_v_scale"], dtype=torch.float32)
+                sv_log_init = torch.log(torch.clamp(stochastic_v_scale.pow(2), min=1e-8))
                 if self.module.px_r_mu.dim() == 1:
                     self.module.px_r_mu.data.copy_(sv_log_init)
                 else:

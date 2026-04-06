@@ -635,10 +635,10 @@ def compute_bursting_init(
     excess_biological = np.maximum(excess_adjusted * biological_variance_fraction, eps**2)
 
     # stochastic_v: scale param (std-like), then .pow(2) gives variance in the model
-    sv_scale = np.sqrt(excess_technical)
+    stochastic_v_scale = np.sqrt(excess_technical)
 
-    # Auto-derive hyper-prior beta from MoM: E[lambda] = 1/median(sv_scale)
-    _median_sv = float(np.median(sv_scale))
+    # Auto-derive hyper-prior beta from MoM: E[lambda] = 1/median(stochastic_v_scale)
+    _median_sv = float(np.median(stochastic_v_scale))
     suggested_hyper_beta = dispersion_hyper_prior_alpha * max(_median_sv, eps)
 
     # burst_freq: biological concentration = mean^2 / excess_biological
@@ -658,7 +658,9 @@ def compute_bursting_init(
 
     if verbose:
         print("\n  Bursting model init:")
-        print(f"    stochastic_v scale: median={np.median(sv_scale):.4f}, mean={np.mean(sv_scale):.4f}")
+        print(
+            f"    stochastic_v scale: median={np.median(stochastic_v_scale):.4f}, mean={np.mean(stochastic_v_scale):.4f}"
+        )
         print(f"    burst_freq: median={np.median(burst_freq):.4f}, mean={np.mean(burst_freq):.4f}")
         print(
             f"    burst_size (rate-space, sens={sensitivity}): "
@@ -678,7 +680,7 @@ def compute_bursting_init(
         "log_theta": log_theta,
         "burst_freq": burst_freq.astype(np.float32),
         "burst_size": burst_size_total.astype(np.float32),
-        "stochastic_v_scale": sv_scale.astype(np.float32),
+        "stochastic_v_scale": stochastic_v_scale.astype(np.float32),
         "suggested_hyper_beta": suggested_hyper_beta,
     }
 

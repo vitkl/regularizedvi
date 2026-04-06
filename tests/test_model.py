@@ -2444,7 +2444,7 @@ class TestBurstInitFixes:
         np.testing.assert_allclose(vals_s1["stochastic_v_scale"], vals_s02["stochastic_v_scale"], rtol=1e-5)
 
     def test_suggested_hyper_beta_in_init_values(self, adata):
-        """compute_bursting_init returns suggested_hyper_beta consistent with sv_scale."""
+        """compute_bursting_init returns suggested_hyper_beta consistent with stochastic_v_scale."""
         from regularizedvi._dispersion_init import compute_bursting_init
 
         vals, _ = compute_bursting_init(adata, dispersion_hyper_prior_alpha=2.0, verbose=False)

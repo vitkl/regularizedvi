@@ -763,8 +763,8 @@ class RegularizedMultimodalVI(
             for mod_name, _init_vals in _bursting_init_per_modality.items():
                 # px_r_mu stores stochastic_v init: px_r = exp(px_r_mu) ≈ v_scale^2
                 if mod_name in self.module.px_r_mu:
-                    sv_scale = torch.tensor(_init_vals["stochastic_v_scale"], dtype=torch.float32)
-                    sv_log_init = torch.log(torch.clamp(sv_scale.pow(2), min=1e-8))
+                    stochastic_v_scale = torch.tensor(_init_vals["stochastic_v_scale"], dtype=torch.float32)
+                    sv_log_init = torch.log(torch.clamp(stochastic_v_scale.pow(2), min=1e-8))
                     _px_r_param = self.module.px_r_mu[mod_name]
                     if _px_r_param.dim() == 1:
                         _px_r_param.data.copy_(sv_log_init)
