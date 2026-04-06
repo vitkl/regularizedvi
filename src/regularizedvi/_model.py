@@ -265,9 +265,23 @@ class AmbientRegularizedSCVI(
         super().__init__(adata)
 
         # Apply decoder-type defaults for dispersion priors (None → from DECODER_TYPE_DEFAULTS)
-        from regularizedvi._constants import DECODER_TYPE_DEFAULTS
+        from regularizedvi._constants import (
+            DATA_DRIVEN_DISPERSION_INIT,
+            DATA_INIT_DECODER_TYPES,
+            DECODER_TYPE_DEFAULTS,
+        )
 
-        _user_set_hyper_beta = dispersion_hyper_prior_beta is not None
+        # B4 validation: "data" dispersion_init is MoM on marginal variance and is
+        # incompatible with burst_frequency_size (which needs variance_burst_size).
+        if dispersion_init == "data" and decoder_type == "burst_frequency_size":
+            raise ValueError(
+                "dispersion_init='data' is incompatible with decoder_type='burst_frequency_size'. "
+                "Use dispersion_init='variance_burst_size' for burst decoders."
+            )
+
+        # B4 routing: for data-init decoders on a data-driven init path, user hyper-prior
+        # overrides are ignored and replaced with MoM-derived values (warned below, post-init).
+        _is_data_init_path = decoder_type in DATA_INIT_DECODER_TYPES and dispersion_init in DATA_DRIVEN_DISPERSION_INIT
         _dt_defaults = DECODER_TYPE_DEFAULTS.get(decoder_type, DECODER_TYPE_DEFAULTS["expected_RNA"])
         if regularise_dispersion_prior is None:
             regularise_dispersion_prior = _dt_defaults["regularise_dispersion_prior"]
@@ -454,9 +468,11 @@ class AmbientRegularizedSCVI(
                         top_vals = np.partition(col, -n_top)[-n_top:]
                         decoder_bias_init[g] = top_vals.mean()
                 decoder_bias_init = np.nan_to_num(decoder_bias_init, nan=0.01, posinf=0.01, neginf=0.01)
-                # Change 2: optional decoder bias multiplier
+                # Change 2: optional decoder bias multiplier — exact in softplus space
                 if self._decoder_bias_multiplier is not None and self._decoder_bias_multiplier != 1.0:
-                    decoder_bias_init = decoder_bias_init * self._decoder_bias_multiplier
+                    from regularizedvi._components import _scale_softplus_bias_np
+
+                    decoder_bias_init = _scale_softplus_bias_np(decoder_bias_init, float(self._decoder_bias_multiplier))
 
             if bg_init_gene_fraction is not None and norm_data is not None:
                 # Compute per-gene, per-ambient-category background init.
@@ -542,9 +558,9 @@ class AmbientRegularizedSCVI(
                 # Use log_theta for px_r_init_mean (backward compatible with dispersion path)
                 px_r_init_mean = _bursting_init_values["log_theta"]
 
-                # Auto-derive hyper-prior beta from MoM if user didn't explicitly set it
+                # B4: data-init path — always use MoM-derived hyper-prior. User overrides
+                # on dispersion_hyper_prior_beta / regularise_dispersion_prior are ignored.
                 _suggested = _bursting_init_values["suggested_hyper_beta"]
-                # Clamp so E[lambda] = alpha/beta stays within reasonable range
                 _suggested = float(
                     np.clip(
                         _suggested,
@@ -552,22 +568,24 @@ class AmbientRegularizedSCVI(
                         dispersion_hyper_prior_alpha / AUTO_HYPER_PRIOR_LAMBDA_MIN,
                     )
                 )
-                if not _user_set_hyper_beta:
-                    dispersion_hyper_prior_beta = _suggested
-                    regularise_dispersion_prior = dispersion_hyper_prior_alpha / dispersion_hyper_prior_beta
-                    logger.info(
-                        f"Auto hyper-prior: beta={dispersion_hyper_prior_beta:.4f}, "
-                        f"lambda_init={regularise_dispersion_prior:.1f}"
+                _prev_beta = dispersion_hyper_prior_beta
+                _prev_prior = regularise_dispersion_prior
+                dispersion_hyper_prior_beta = _suggested
+                regularise_dispersion_prior = dispersion_hyper_prior_alpha / dispersion_hyper_prior_beta
+                import warnings as _warnings
+
+                if _prev_beta != _suggested or _prev_prior != regularise_dispersion_prior:
+                    _warnings.warn(
+                        f"[data-init decoder '{decoder_type}'] Overriding user dispersion hyper-prior "
+                        f"with MoM-derived values: "
+                        f"dispersion_hyper_prior_beta: {_prev_beta} -> {dispersion_hyper_prior_beta:.4f}, "
+                        f"regularise_dispersion_prior: {_prev_prior} -> {regularise_dispersion_prior:.1f}",
+                        stacklevel=2,
                     )
-                else:
-                    _ratio = max(dispersion_hyper_prior_beta, _suggested) / max(
-                        min(dispersion_hyper_prior_beta, _suggested), 1e-8
-                    )
-                    if _ratio > 10:
-                        logger.warning(
-                            f"Explicit dispersion_hyper_prior_beta={dispersion_hyper_prior_beta:.4f} "
-                            f"differs >10x from MoM-suggested {_suggested:.4f}"
-                        )
+                logger.info(
+                    f"Auto hyper-prior: beta={dispersion_hyper_prior_beta:.4f}, "
+                    f"lambda_init={regularise_dispersion_prior:.1f}"
+                )
 
                 logger.info(
                     f"Bursting init: median burst_freq={np.median(_bursting_init_values['burst_freq']):.3f}, "
@@ -659,8 +677,10 @@ class AmbientRegularizedSCVI(
                 # Initialize burst_freq decoder bias (apply multiplier if set)
                 bf_bias = torch.tensor(_bursting_init_values["burst_freq_bias"], dtype=torch.float32)
                 if self._decoder_bias_multiplier is not None and self._decoder_bias_multiplier != 1.0:
-                    # Additive in pre-softplus space: softplus(bias + log(m)) ≈ m * softplus(bias)
-                    bf_bias = bf_bias + float(np.log(self._decoder_bias_multiplier))
+                    # Exact: softplus(bf_bias_new) == m * softplus(bf_bias)
+                    from regularizedvi._components import _scale_softplus_bias
+
+                    bf_bias = _scale_softplus_bias(bf_bias, float(self._decoder_bias_multiplier))
                     logger.info(f"Applied decoder_bias_multiplier={self._decoder_bias_multiplier} to burst_freq bias")
                 self.module.decoder.px_scale_decoder[0].bias.data.copy_(bf_bias)
 

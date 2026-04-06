@@ -229,6 +229,17 @@ class RegularizedMultimodalVI(
         self._dispersion_init_theta_min = dispersion_init_theta_min
         self._dispersion_init_theta_max = dispersion_init_theta_max
 
+        # B4 validation: dispersion_init="data" is incompatible with burst_frequency_size
+        # decoders (which require variance_burst_size for proper burst-parameter init).
+        if dispersion_init == "data":
+            _dt_check = decoder_type if isinstance(decoder_type, dict) else {"_default": decoder_type}
+            _bad = [mn for mn, dt in _dt_check.items() if dt == "burst_frequency_size"]
+            if _bad:
+                raise ValueError(
+                    f"dispersion_init='data' is incompatible with decoder_type='burst_frequency_size' "
+                    f"(modalities: {_bad}). Use dispersion_init='variance_burst_size' for burst decoders."
+                )
+
         self._module_kwargs = {
             "n_hidden": n_hidden,
             "n_latent": n_latent,
@@ -483,11 +494,15 @@ class RegularizedMultimodalVI(
                     decoder_bias_init_dict[name] = np.nan_to_num(
                         decoder_bias_init_dict[name], nan=0.01, posinf=0.01, neginf=0.01
                     )
-                    # Change 2: optional per-modality decoder bias multiplier
+                    # Change 2: optional per-modality decoder bias multiplier — exact in softplus space
                     if self._decoder_bias_multiplier is not None:
                         multiplier = self._decoder_bias_multiplier.get(name, 1.0)
                         if multiplier != 1.0:
-                            decoder_bias_init_dict[name] = decoder_bias_init_dict[name] * multiplier
+                            from regularizedvi._components import _scale_softplus_bias_np
+
+                            decoder_bias_init_dict[name] = _scale_softplus_bias_np(
+                                decoder_bias_init_dict[name], float(multiplier)
+                            )
 
                 _bg_modalities = self._module_kwargs.get("additive_background_modalities", [])
                 if self._bg_init_gene_fraction is not None and name in _bg_modalities:
@@ -650,9 +665,18 @@ class RegularizedMultimodalVI(
                     )
                     px_r_init_mean_dict[mod_name] = log_theta_init
 
-        # Auto-derive hyper-prior beta from MoM for burst modalities
+        # B4: per-modality hyper-prior routing.
+        # Rule: if a modality uses a data-init decoder (e.g. burst_frequency_size) AND
+        # dispersion_init is a data-driven mode, user hyper-prior overrides for that
+        # modality are IGNORED and replaced with MoM-derived values (warned).
         if _bursting_init_per_modality:
-            from regularizedvi._constants import DECODER_TYPE_DEFAULTS
+            import warnings as _warnings
+
+            from regularizedvi._constants import (
+                AUTO_HYPER_PRIOR_LAMBDA_MAX,
+                AUTO_HYPER_PRIOR_LAMBDA_MIN,
+                DECODER_TYPE_DEFAULTS,
+            )
 
             _user_hp_beta = self._module_kwargs.get("dispersion_hyper_prior_beta")
             _auto_beta = {}
@@ -660,9 +684,6 @@ class RegularizedMultimodalVI(
             for _mn in modality_names:
                 if _mn in _bursting_init_per_modality:
                     _suggested = _bursting_init_per_modality[_mn]["suggested_hyper_beta"]
-                    # Clamp so E[lambda] stays within reasonable range
-                    from regularizedvi._constants import AUTO_HYPER_PRIOR_LAMBDA_MAX, AUTO_HYPER_PRIOR_LAMBDA_MIN
-
                     _suggested = float(
                         np.clip(
                             _suggested,
@@ -670,28 +691,20 @@ class RegularizedMultimodalVI(
                             _hp_alpha_resolved[_mn] / AUTO_HYPER_PRIOR_LAMBDA_MIN,
                         )
                     )
-                    # Auto-derive if user didn't explicitly set
-                    _dt = _decoder_type_resolved.get(_mn, "expected_RNA")
-                    _default_beta = DECODER_TYPE_DEFAULTS.get(_dt, DECODER_TYPE_DEFAULTS["expected_RNA"])[
-                        "dispersion_hyper_prior_beta"
-                    ]
-                    if _user_hp_beta is None or (isinstance(_user_hp_beta, dict) and _mn not in _user_hp_beta):
-                        _auto_beta[_mn] = _suggested
-                    elif isinstance(_user_hp_beta, dict):
-                        _explicit = _user_hp_beta[_mn]
-                        if _explicit == _default_beta:
-                            _auto_beta[_mn] = _suggested
-                        else:
-                            _auto_beta[_mn] = _explicit
-                            _ratio = max(_explicit, _suggested) / max(min(_explicit, _suggested), 1e-8)
-                            if _ratio > 10:
-                                logger.warning(
-                                    f"  {_mn}: explicit beta={_explicit:.4f} differs >10x from MoM-suggested {_suggested:.4f}"
-                                )
-                    else:
-                        _auto_beta[_mn] = (
-                            float(_user_hp_beta) if float(_user_hp_beta) == _default_beta else float(_user_hp_beta)
+                    # Determine if a user override exists for this modality
+                    _user_val = None
+                    if isinstance(_user_hp_beta, dict):
+                        _user_val = _user_hp_beta.get(_mn)
+                    elif _user_hp_beta is not None:
+                        _user_val = float(_user_hp_beta)
+                    if _user_val is not None:
+                        _warnings.warn(
+                            f"[data-init decoder @ modality '{_mn}'] Ignoring user "
+                            f"dispersion_hyper_prior_beta={_user_val}; using MoM-derived "
+                            f"{_suggested:.4f} instead.",
+                            stacklevel=2,
                         )
+                    _auto_beta[_mn] = _suggested
                     _auto_prior[_mn] = _hp_alpha_resolved[_mn] / _auto_beta[_mn]
                     logger.info(
                         f"  {_mn}: auto hyper-prior beta={_auto_beta[_mn]:.4f}, lambda_init={_auto_prior[_mn]:.1f}"
@@ -767,7 +780,9 @@ class RegularizedMultimodalVI(
                         else float(self._decoder_bias_multiplier)
                     )
                     if _mult != 1.0:
-                        bf_bias = bf_bias + float(np.log(_mult))
+                        from regularizedvi._components import _scale_softplus_bias
+
+                        bf_bias = _scale_softplus_bias(bf_bias, float(_mult))
                         logger.info(f"  Applied decoder_bias_multiplier={_mult} to '{mod_name}' burst_freq bias")
                 self.module.decoders[mod_name].px_scale_decoder[0].bias.data.copy_(bf_bias)
 

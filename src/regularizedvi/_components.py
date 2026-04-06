@@ -20,6 +20,7 @@ import collections
 from collections.abc import Callable, Iterable
 from typing import Literal
 
+import numpy as np
 import torch
 from torch import nn
 from torch.distributions import Normal
@@ -27,6 +28,32 @@ from torch.distributions import Normal
 
 def _identity(x):
     return x
+
+
+def _scale_softplus_bias(bias: torch.Tensor, multiplier: float) -> torch.Tensor:
+    """Return new pre-softplus bias b' such that softplus(b') == multiplier * softplus(bias).
+
+    Exact inverse-softplus of (m * softplus(bias)). Uses ``y`` (linear) for large
+    values to avoid expm1 overflow.
+    """
+    if multiplier == 1.0:
+        return bias
+    sp = torch.nn.functional.softplus(bias)
+    y = (float(multiplier) * sp).clamp_min(1e-8)
+    # For y > 20, log(expm1(y)) ≈ y to machine precision (softplus ≈ identity).
+    return torch.where(y > 20.0, y, torch.log(torch.expm1(y)))
+
+
+def _scale_softplus_bias_np(bias: np.ndarray, multiplier: float) -> np.ndarray:
+    """NumPy equivalent of ``_scale_softplus_bias`` for init-time bias scaling."""
+    if multiplier == 1.0:
+        return bias
+    # Numerically stable softplus: max(b, 0) + log1p(exp(-|b|))
+    sp = np.log1p(np.exp(-np.abs(bias))) + np.maximum(bias, 0.0)
+    y = np.clip(float(multiplier) * sp, 1e-8, None)
+    y_safe = np.minimum(y, 20.0)  # avoid expm1 overflow in unused branch
+    out = np.where(y > 20.0, y, np.log(np.expm1(y_safe)))
+    return out.astype(bias.dtype)
 
 
 class RegularizedFCLayers(nn.Module):

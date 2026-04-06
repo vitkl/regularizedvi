@@ -84,6 +84,16 @@ DECODER_TYPE_DEFAULTS = {
     },
 }
 
+# --- Data-driven init routing ---
+# Decoder types that initialise decoder params from data (MoM / variance decomposition).
+# For modalities using these decoder types, user-supplied dispersion hyper-prior
+# values are IGNORED and replaced with MoM-derived values (with a log warning).
+DATA_INIT_DECODER_TYPES = frozenset({"burst_frequency_size"})
+
+# dispersion_init modes that actually run MoM / variance-decomposition and produce
+# auto-derived hyper-prior suggestions.
+DATA_DRIVEN_DISPERSION_INIT = frozenset({"data", "variance_burst_size"})
+
 # --- Auto-derived hyper-prior lambda bounds (sanity filter only) ---
 # When auto-deriving dispersion_hyper_prior_beta from MoM stochastic_v,
 # clamp E[lambda] = alpha/beta to reject only ridiculous values. Lambda is the
