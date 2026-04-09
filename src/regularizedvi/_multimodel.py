@@ -1241,12 +1241,14 @@ class RegularizedMultimodalVI(
         """Compute decoder Jacobian attribution per modality.
 
         For each modality's decoder, computes the mean absolute Jacobian
-        ``|d(px_rate)/d(z)|`` per latent dimension via finite differences,
-        revealing which Z dimensions each decoder actually uses. This allows
-        creating modality-specific views of the shared latent space.
+        ``|d(px_rate)/d(z)|`` per latent dimension, revealing which Z
+        dimensions each decoder actually uses. This allows creating
+        modality-specific views of the shared latent space.
 
-        Uses forward finite differences with ``n_latent`` decoder forward passes
-        per modality (e.g. 192 passes for 192 latent dims).
+        Uses ``torch.func.vmap(jacfwd(...))`` to compute exact per-cell
+        Jacobians, vectorized across the cell batch dimension. Forward-mode
+        autodiff is preferred because n_genes >> n_latent. ``eps`` is retained
+        for backward compatibility but is no longer used (Jacobian is exact).
 
         Parameters
         ----------
@@ -1289,7 +1291,6 @@ class RegularizedMultimodalVI(
 
         self.module.eval()
         device = next(self.module.parameters()).device
-        n_latent = self.module.total_latent_dim
 
         # --- Validate and parse remove_covariates ---
         if remove_covariates is True:
@@ -1525,30 +1526,88 @@ class RegularizedMultimodalVI(
                     )
                     bg = torch.matmul(concat_ambient, torch.exp(self.module.additive_background[name]).T)
 
-                decode_rate = _make_decode_rate_fn(
-                    self.module,
-                    name,
-                    disp,
-                    lib,
-                    batch_index,
-                    categorical_input,
-                    bg,
-                    cont_covs,
-                    feature_scaling_indicator,
-                    skip_feature_scaling=skip_feature_scaling,
+                # Exact per-cell Jacobian via torch.func.vmap(jacfwd(...)).
+                # jacfwd is preferred over jacrev because n_genes >> n_latent
+                # (e.g. 28k vs 192), so forward-mode is ~150x cheaper.
+                from torch.func import jacfwd, vmap
+
+                # Pack per-cell tensors and vmap over them. None-valued inputs
+                # (bg, cont_covs, feature_scaling_indicator) are replaced with
+                # zero-width stand-ins because vmap requires real tensors;
+                # _decode_rate_one rebuilds the original None via Python flags.
+                _module = self.module
+                _name = name
+                _disp = disp
+                _skip_fs = skip_feature_scaling
+                _has_bg = bg is not None
+                _has_cc = cont_covs is not None
+                _has_fs = feature_scaling_indicator is not None
+
+                bs_z = z.shape[0]
+                bg_pack = bg if _has_bg else torch.empty(bs_z, 0, device=z.device)
+                cc_pack = cont_covs if _has_cc else torch.empty(bs_z, 0, device=z.device)
+                fs_pack = feature_scaling_indicator if _has_fs else torch.empty(bs_z, 0, device=z.device)
+                # Pre-one-hot categoricals so FCLayers takes the (bs, n_cat)
+                # branch and skips its data-dependent nn.functional.one_hot
+                # call (which is not vmap-traceable).
+                _dec_n_cat_list = list(self.module.decoders[name].px_decoder.n_cat_list)
+                cat_pack_list = []
+                _ci = 0
+                for n_cat in _dec_n_cat_list:
+                    if n_cat > 1:
+                        c = categorical_input[_ci]
+                        if c.size(1) != n_cat:
+                            c = one_hot(c.squeeze(-1).long(), n_cat).float()
+                        cat_pack_list.append(c)
+                        _ci += 1
+                    else:
+                        if _ci < len(categorical_input):
+                            cat_pack_list.append(categorical_input[_ci])
+                            _ci += 1
+                cat_pack = tuple(cat_pack_list)
+
+                def _decode_rate_one(
+                    z_s,
+                    lib_s,
+                    bi_s,
+                    bg_s,
+                    cc_s,
+                    fs_s,
+                    cat_s,
+                    _module=_module,
+                    _name=_name,
+                    _disp=_disp,
+                    _skip_fs=_skip_fs,
+                    _has_bg=_has_bg,
+                    _has_cc=_has_cc,
+                    _has_fs=_has_fs,
+                ):
+                    lib_i = lib_s.unsqueeze(0)
+                    bi_i = bi_s.unsqueeze(0)
+                    bg_i = bg_s.unsqueeze(0) if _has_bg else None
+                    cc_i = cc_s.unsqueeze(0) if _has_cc else None
+                    fs_i = fs_s.unsqueeze(0) if _has_fs else None
+                    cat_i = tuple(c.unsqueeze(0) for c in cat_s)
+                    one_cell_decode = _make_decode_rate_fn(
+                        _module,
+                        _name,
+                        _disp,
+                        lib_i,
+                        bi_i,
+                        cat_i,
+                        bg_i,
+                        cc_i,
+                        fs_i,
+                        skip_feature_scaling=_skip_fs,
+                    )
+                    return one_cell_decode(z_s.unsqueeze(0)).squeeze(0)
+
+                jac_per_cell = vmap(
+                    jacfwd(_decode_rate_one, argnums=0),
+                    in_dims=(0, 0, 0, 0, 0, 0, tuple(0 for _ in cat_pack)),
                 )
-
-                # Baseline decoder rate
-                base_rate = decode_rate(z)
-
-                # Jacobian column-wise via finite differences
-                importance = torch.zeros(z.shape[0], n_latent, device=z.device)
-                for j in range(n_latent):
-                    z_perturbed = z.clone()
-                    z_perturbed[:, j] += eps
-                    rate_perturbed = decode_rate(z_perturbed)
-                    jac_col = (rate_perturbed - base_rate) / eps
-                    importance[:, j] = jac_col.abs().mean(dim=-1)
+                J = jac_per_cell(z, lib, batch_index, bg_pack, cc_pack, fs_pack, cat_pack)  # (bs, n_genes, n_latent)
+                importance = J.abs().mean(dim=1)  # (bs, n_latent)
 
                 importances[name].append(importance.cpu().numpy())
 
