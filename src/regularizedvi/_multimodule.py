@@ -1324,17 +1324,33 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         inference_outputs: dict[str, torch.Tensor | Distribution | None],
         generative_outputs: dict[str, dict],
         kl_weight: float = 1.0,
+        n_obs: int = 1,
+        skip_n_obs_check: bool = False,
     ) -> LossOutput:
         """Compute multi-modal loss.
 
         Sum of per-modality reconstruction losses + KL divergence + hierarchical
         dispersion priors.
+
+        ``n_obs`` must be the **full training-set size**, not the minibatch size.
+        scvi-tools ``TrainingPlan`` injects it automatically via
+        ``loss_kwargs["n_obs"] = n_obs_training`` (set from
+        ``DataSplitter.n_train``). Global priors are scaled as ``penalty / n_obs``
+        so each prior contributes once per epoch regardless of batch size.
         """
         masks = inference_outputs["masks"]
         px_dict = generative_outputs["px"]
         pz = generative_outputs["pz"]
         pl_dict = generative_outputs.get("pl", {})
         z_per_modality = inference_outputs.get("z_per_modality", {})
+
+        batch_size = tensors[REGISTRY_KEYS.BATCH_KEY].shape[0]
+        if not skip_n_obs_check:
+            assert n_obs >= batch_size, (
+                f"n_obs ({n_obs}) must be >= batch size ({batch_size}). "
+                "Did you forget to pass n_obs=n_obs_training via TrainingPlan, "
+                "or skip_n_obs_check=True for direct test calls?"
+            )
 
         extra_metrics = {}
 
@@ -1560,15 +1576,14 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 extra_metrics[f"hidden_sparsity_{name}"] = _h_penalty.mean().detach()
 
         # ---- Weighted loss ----
-        loss = torch.mean(recon_loss + kl_weight * kl_z + kl_l) + kl_w_total
+        loss = torch.mean(recon_loss + kl_weight * kl_z + kl_l) + kl_w_total / n_obs
 
         # ---- MOFA2-style ARD sigma scale: KL(LogNormal_q ‖ LogNormal_p) ----
-        # Single global α_d per modality (model-level scalar). Normalised exactly like the
-        # dispersion penalty: divided by per-batch n_obs and added directly to `loss` after
-        # the per-cell mean. NOT annealed by kl_weight (matches dispersion behaviour).
+        # Single global α_d per modality (model-level scalar). Divided by n_obs (= N_train,
+        # the loss() argument) and added after the per-cell mean — matches the global-prior
+        # normalization convention. NOT annealed by kl_weight (matches dispersion behaviour).
         if self.use_ard_z_sigma_scale:
             ard_alpha_per_modality = inference_outputs.get("ard_alpha_per_modality", {})
-            n_obs = recon_loss.shape[0]
             ard_kl_total = torch.tensor(0.0, device=recon_loss.device)
             for name in self.modality_names:
                 if name not in ard_alpha_per_modality:
@@ -1588,7 +1603,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         # ---- Variational dispersion regularisation (replaces MAP with proper posterior) ----
         if self.regularise_dispersion:
-            n_obs = recon_loss.shape[0]
             dispersion_penalty = torch.tensor(0.0, device=recon_loss.device)
 
             for name in self.modality_names:
@@ -1643,7 +1657,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         # ---- Feature scaling Gamma prior (cell2location-style) ----
         if self.feature_scaling_modalities:
-            n_obs = recon_loss.shape[0]
             rf_penalty = torch.tensor(0.0, device=recon_loss.device)
             for name in self.feature_scaling_modalities:
                 if name not in self.feature_scaling:
@@ -1662,7 +1675,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         # ---- Additive background Gamma prior (cell2location-style s_g_gene_add) ----
         if self.regularise_background and self.additive_background_modalities:
-            n_obs = recon_loss.shape[0]
             bg_penalty = torch.tensor(0.0, device=recon_loss.device)
             for name in self.additive_background_modalities:
                 if name not in self.additive_background:
@@ -1676,7 +1688,6 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         # ---- Decoder weight L2 penalty (Normal prior on decoder weights, excludes biases) ----
         if self.decoder_weight_l2 > 0.0:
-            n_obs = recon_loss.shape[0]
             decoder_w_penalty = self.decoder_weight_l2 * self._decoder_weight_l2_penalty()
             loss = loss + decoder_w_penalty / n_obs
             extra_metrics["decoder_weight_penalty"] = (decoder_w_penalty / n_obs).detach()
@@ -1689,14 +1700,12 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         # ---- Decoder weight L1 penalty (sparsity-inducing) ----
         if self.decoder_hidden_l1 > 0.0:
-            n_obs = recon_loss.shape[0]
             decoder_l1_penalty = self.decoder_hidden_l1 * self._decoder_hidden_l1_penalty()
             loss = loss + decoder_l1_penalty / n_obs
             extra_metrics["decoder_l1_penalty"] = (decoder_l1_penalty / n_obs).detach()
 
         # ---- Modality scaling Gamma prior ----
         if self.learnable_modality_scaling and self.modality_scale_init:
-            n_obs = recon_loss.shape[0]
             ms_penalty = torch.tensor(0.0, device=recon_loss.device)
             for name, init_val in self.modality_scale_init.items():
                 if name not in self.modality_scale_raw:

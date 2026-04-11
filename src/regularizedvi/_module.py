@@ -1010,11 +1010,26 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         inference_outputs: dict[str, torch.Tensor | Distribution | None],
         generative_outputs: dict[str, Distribution | None],
         kl_weight: float = 1.0,
+        n_obs: int = 1,
+        skip_n_obs_check: bool = False,
     ) -> LossOutput:
-        """Compute the loss with optional dispersion regularisation."""
+        """Compute the loss with optional dispersion regularisation.
+
+        ``n_obs`` must be the **full training-set size**, not the minibatch size.
+        scvi-tools ``TrainingPlan`` injects it automatically via
+        ``loss_kwargs["n_obs"] = n_obs_training`` (set from
+        ``DataSplitter.n_train``). Global priors are scaled as ``penalty / n_obs``
+        so each prior contributes once per epoch regardless of batch size.
+        """
         from torch.distributions import kl_divergence
 
         x = tensors[REGISTRY_KEYS.X_KEY]
+        if not skip_n_obs_check:
+            assert n_obs >= x.shape[0], (
+                f"n_obs ({n_obs}) must be >= batch size ({x.shape[0]}). "
+                "Did you forget to pass n_obs=n_obs_training via TrainingPlan, "
+                "or skip_n_obs_check=True for direct test calls?"
+            )
         if self.use_kl_z:
             kl_divergence_z = kl_divergence(
                 inference_outputs[MODULE_KEYS.QZ_KEY], generative_outputs[MODULE_KEYS.PZ_KEY]
@@ -1074,7 +1089,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             kl_w_total = -q_w.entropy() + exp_rate * q_w.mean - np.log(exp_rate)
             self._library_obs_w_mean = q_w.mean.detach()  # for metric logging below
 
-        loss = torch.mean(reconst_loss + weighted_kl_local) + kl_w_total
+        loss = torch.mean(reconst_loss + weighted_kl_local) + kl_w_total / n_obs
 
         # Variational dispersion regularisation (replaces MAP with proper posterior).
         # Two-level prior:
@@ -1085,8 +1100,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         # Scaled by 1/N (number of observations in mini-batch).
         if self.regularise_dispersion:
             from torch.distributions import Gamma
-
-            n_obs = x.shape[0]
 
             # Use raw parameter tensors for KL (not per-cell resolved)
             px_r_log_sigma = self.px_r_log_sigma
@@ -1135,7 +1148,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         if self.regularise_background and self.use_additive_background and self.n_total_ambient_cats > 0:
             from torch.distributions import Gamma
 
-            n_obs = x.shape[0]
             bg_transformed = torch.exp(self.additive_background)
             bg_penalty = (
                 -Gamma(self.additive_bg_prior_alpha, self.additive_bg_prior_beta).log_prob(bg_transformed).sum()
@@ -1146,7 +1158,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         if self.use_feature_scaling:
             from torch.distributions import Gamma
 
-            n_obs = x.shape[0]
             fs_transformed = torch.nn.functional.softplus(self.feature_scaling) / 0.7
             fs_penalty = (
                 -Gamma(self.feature_scaling_prior_alpha, self.feature_scaling_prior_beta).log_prob(fs_transformed).sum()
@@ -1155,7 +1166,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         # Decoder weight L2 penalty (Normal prior on decoder weights, excludes biases)
         if self.decoder_weight_l2 > 0.0:
-            n_obs = x.shape[0]
             decoder_w_penalty = self.decoder_weight_l2 * self._decoder_weight_l2_penalty()
             loss = loss + decoder_w_penalty / n_obs
 
@@ -1166,7 +1176,6 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         # Decoder weight L1 penalty (sparsity-inducing on decoder weights)
         if self.decoder_hidden_l1 > 0.0:
-            n_obs = x.shape[0]
             decoder_l1_penalty = self.decoder_hidden_l1 * self._decoder_hidden_l1_penalty()
             loss = loss + decoder_l1_penalty / n_obs
 

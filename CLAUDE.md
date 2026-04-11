@@ -6,8 +6,8 @@ Bayesian extension of scVI for single-cell/nucleus RNA-seq and multiome (RNA+ATA
 
 | Model class | Module | File | Purpose |
 |-------------|--------|------|---------|
-| AmbientRegularizedSCVI | RegularizedVAE | `_module.py` (1027L) | Single-modal RNA |
-| RegularizedMultimodalVI | RegularizedMultimodalVAE | `_multimodule.py` (1190L) | Multi-modal RNA+ATAC |
+| AmbientRegularizedSCVI | RegularizedVAE | `_module.py` (1372L) | Single-modal RNA |
+| RegularizedMultimodalVI | RegularizedMultimodalVAE | `_multimodule.py` (1843L) | Multi-modal RNA+ATAC |
 
 Supporting: `_model.py` (942L), `_multimodel.py` (1571L), `_components.py` (472L), `_constants.py` (78L).
 
@@ -67,6 +67,13 @@ Per-modality encoders, concatenated latent space [z_atac; z_rna] (alphabetical s
 6. **Feature scaling penalty**: Gamma(200,200) prior on softplus(gamma)/0.7 — keeps scaling near 1
 7. All penalties logged via `extra_metrics` → `compute_and_log_metrics()` → `model.history_`
 
+### Loss normalization convention (scvi-tools minibatching)
+- `loss()` takes an explicit `n_obs` argument = **full training-set size**, injected automatically by `TrainingPlan.n_obs_training` setter via signature introspection (`signature(module.loss).parameters`). Validation also uses `n_obs_training` (not `n_val`) so train/val losses are on the same scale — scvi-tools convention (`_trainingplans.py:356-358`).
+- **Local (cell-plate) terms** — reconstruction loss, `KL(qz‖pz)`, `KL(ql‖pl)`, z-sparsity, horseshoe KL, hidden-activation sparsity — are summed over non-batch dims and **meaned over the batch axis** inside the main `torch.mean(...)`.
+- **Global (gene-plate / batch-plate / covariate-plate / plate-less) priors** — dispersion variational KL + λ hyperprior, ambient RNA β, feature scaling γ, decoder L1/L2, ARD on z, modality scaling, residual library `w` KL — are added to the loss as `penalty / n_obs` where **`n_obs` is the `loss()` argument (= N_train), NEVER `recon_loss.shape[0]` or `x.shape[0]` (minibatch size)**.
+- `loss()` asserts `n_obs >= batch_size` (overridable via `skip_n_obs_check=True`) to catch missing injection at train time. Unit tests that call `module.loss(...)` directly must pass `skip_n_obs_check=True`.
+- **Historical bug** (fixed 2026-04-11): prior to this fix, all global priors used `n_obs = recon_loss.shape[0]` and `kl_w_total` was added raw, over-weighting every prior by ~B² per epoch (B = n_minibatches). **Sweep results from before this fix cannot be directly compared to post-fix results.**
+
 ### Neural Network Components (`_components.py`)
 - **RegularizedFCLayers**: dropout applied to INPUT (not output), LayerNorm default (not BatchNorm), configurable activation
 - **RegularizedEncoder**: FCLayers → (mean_encoder, var_encoder) linear heads → Normal distribution
@@ -84,6 +91,7 @@ Per-modality encoders, concatenated latent space [z_atac; z_rna] (alphabetical s
 - Papermill cannot parse parameter lines with inline comments — use bare assignments only
 - `batch_representation="one-hot"` required (embedding incompatible with per-batch ambient RNA)
 - `use_feature_scaling=True` (default) creates (1,n_genes) fallback param even without covariates
+- `loss()` requires `n_obs` kwarg (= N_train from TrainingPlan). Direct test calls must pass `skip_n_obs_check=True`; NEVER use `recon_loss.shape[0]` / `x.shape[0]` to normalize global priors.
 
 ## Active Experiments
 GPU experiment specs in `_gpu_jobs.yaml` (~20+ experiments on NeurIPS 2021 adult bone marrow multiome). Testing: library centering, library prior variance, early stopping sensitivity, stratified validation, learnable modality scaling, ATAC filtering thresholds, per-modality learning rates.

@@ -1022,8 +1022,60 @@ class TestGammaPoissonMode:
         inf_outputs = module.inference(**inf_inputs)
         gen_inputs = module._get_generative_input(tensors, inf_outputs)
         gen_outputs = module.generative(**gen_inputs)
-        loss_output = module.loss(tensors, inf_outputs, gen_outputs)
+        loss_output = module.loss(tensors, inf_outputs, gen_outputs, skip_n_obs_check=True)
         assert loss_output.loss.isfinite()
+
+    def test_loss_n_obs_scaling(self, adata):
+        """Global priors must scale as 1/n_obs; doubling n_obs halves penalty contribution."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, decoder_weight_l2=1.0)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        module = model.module
+        module.eval()
+        device = next(module.parameters()).device
+        scdl = model._make_data_loader(adata=adata, batch_size=32)
+        tensors = next(iter(scdl))
+        tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
+        inf_inputs = module._get_inference_input(tensors)
+        inf_outputs = module.inference(**inf_inputs)
+        gen_inputs = module._get_generative_input(tensors, inf_outputs)
+        gen_outputs = module.generative(**gen_inputs)
+
+        lo_n = module.loss(tensors, inf_outputs, gen_outputs, n_obs=1000)
+        lo_2n = module.loss(tensors, inf_outputs, gen_outputs, n_obs=2000)
+
+        penalty_n = lo_n.extra_metrics["decoder_weight_penalty"]
+        penalty_2n = lo_2n.extra_metrics["decoder_weight_penalty"]
+        assert torch.isclose(penalty_2n * 2, penalty_n, rtol=1e-4), (
+            f"Global prior must scale as 1/n_obs: "
+            f"penalty(n=1000)={penalty_n.item()}, penalty(n=2000)={penalty_2n.item()}"
+        )
+
+    def test_loss_n_obs_assert_fires(self, adata):
+        """Assert that loss() raises AssertionError when n_obs < batch size without skip."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(
+            adata,
+            layer="counts",
+            batch_key="batch",
+        )
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        module = model.module
+        module.eval()
+        device = next(module.parameters()).device
+        scdl = model._make_data_loader(adata=adata, batch_size=32)
+        tensors = next(iter(scdl))
+        tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
+        inf_inputs = module._get_inference_input(tensors)
+        inf_outputs = module.inference(**inf_inputs)
+        gen_inputs = module._get_generative_input(tensors, inf_outputs)
+        gen_outputs = module.generative(**gen_inputs)
+        with pytest.raises(AssertionError, match="n_obs"):
+            module.loss(tensors, inf_outputs, gen_outputs)
 
     def test_parameter_shapes_single_modal(self, adata_distinct_covs):
         """Verify every parameter shape matches architecture expectations."""
@@ -1310,7 +1362,7 @@ class TestRegularizedMultimodalVI:
         gen_inputs = module._get_generative_input(tensors, module.inference(**inf_inputs))
         inf_outputs = module.inference(**inf_inputs)
         gen_outputs = module.generative(**gen_inputs)
-        loss_output = module.loss(tensors, inf_outputs, gen_outputs)
+        loss_output = module.loss(tensors, inf_outputs, gen_outputs, skip_n_obs_check=True)
 
         em = loss_output.extra_metrics
         # Check per-modality recon_loss
@@ -1325,6 +1377,50 @@ class TestRegularizedMultimodalVI:
         # All should be 0-d tensors
         for key, val in em.items():
             assert val.dim() == 0, f"{key} should be a scalar tensor"
+
+    def test_multimodal_loss_n_obs_scaling(self, mdata):
+        """Multimodal global priors must scale as 1/n_obs; doubling n_obs halves penalty contribution."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, decoder_weight_l2=1.0)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        module = model.module
+        module.eval()
+        device = next(module.parameters()).device
+        scdl = model._make_data_loader(adata=mdata, batch_size=32)
+        tensors = next(iter(scdl))
+        tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
+        inf_inputs = module._get_inference_input(tensors)
+        inf_outputs = module.inference(**inf_inputs)
+        gen_inputs = module._get_generative_input(tensors, inf_outputs)
+        gen_outputs = module.generative(**gen_inputs)
+
+        lo_n = module.loss(tensors, inf_outputs, gen_outputs, n_obs=1000)
+        lo_2n = module.loss(tensors, inf_outputs, gen_outputs, n_obs=2000)
+
+        penalty_n = lo_n.extra_metrics["decoder_weight_penalty"]
+        penalty_2n = lo_2n.extra_metrics["decoder_weight_penalty"]
+        assert torch.isclose(penalty_2n * 2, penalty_n, rtol=1e-4), (
+            f"Multimodal global prior must scale as 1/n_obs: "
+            f"penalty(n=1000)={penalty_n.item()}, penalty(n=2000)={penalty_2n.item()}"
+        )
+
+    def test_multimodal_loss_n_obs_assert_fires(self, mdata):
+        """Multimodal loss() must raise AssertionError when n_obs < batch size without skip."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        module = model.module
+        module.eval()
+        device = next(module.parameters()).device
+        scdl = model._make_data_loader(adata=mdata, batch_size=32)
+        tensors = next(iter(scdl))
+        tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
+        inf_inputs = module._get_inference_input(tensors)
+        inf_outputs = module.inference(**inf_inputs)
+        gen_inputs = module._get_generative_input(tensors, inf_outputs)
+        gen_outputs = module.generative(**gen_inputs)
+        with pytest.raises(AssertionError, match="n_obs"):
+            module.loss(tensors, inf_outputs, gen_outputs)
 
     def test_extra_metrics_logged_in_history(self, mdata):
         """Test that extra_metrics appear in model.history_ after training."""
@@ -1436,7 +1532,7 @@ class TestRegularizedMultimodalVI:
         inf_outputs = module.inference(**inf_inputs)
         gen_inputs = module._get_generative_input(tensors, inf_outputs)
         gen_outputs = module.generative(**gen_inputs)
-        loss_output = module.loss(tensors, inf_outputs, gen_outputs)
+        loss_output = module.loss(tensors, inf_outputs, gen_outputs, skip_n_obs_check=True)
         assert loss_output.loss.isfinite()
 
     def test_region_factors_with_multiple_scaling_covs(self, mdata):
