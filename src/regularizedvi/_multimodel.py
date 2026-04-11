@@ -63,6 +63,69 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _make_decode_rate_fn(
+    module,
+    name,
+    disp,
+    lib,
+    batch_index,
+    categorical_input,
+    bg,
+    cont_covs,
+    feature_scaling_indicator,
+    skip_feature_scaling=False,
+):
+    """Closure that computes decoder rate for a given z.
+
+    Module-level helper so `get_modality_attribution` can call it from
+    inside a hoisted per-modality wrapper without re-defining it on every
+    dataloader batch.
+    """
+
+    def _decode_rate(z_input):
+        if cont_covs is None:
+            dec_input = z_input
+        elif z_input.dim() != cont_covs.dim():
+            dec_input = torch.cat(
+                [z_input, cont_covs.unsqueeze(0).expand(z_input.size(0), -1, -1)],
+                dim=-1,
+            )
+        else:
+            dec_input = torch.cat([z_input, cont_covs], dim=-1)
+
+        if module.use_batch_in_decoder:
+            _dec_out = module.decoders[name](
+                disp,
+                dec_input,
+                lib,
+                batch_index,
+                *categorical_input,
+                additive_background=bg,
+            )
+        else:
+            _dec_out = module.decoders[name](
+                disp,
+                dec_input,
+                lib,
+                *categorical_input,
+                additive_background=bg,
+            )
+        # px_rate is always the 3rd element (burst_frequency_size returns 6, others 4)
+        px_rate = _dec_out[2]
+
+        if not skip_feature_scaling and name in module.feature_scaling:
+            rf_transformed = torch.nn.functional.softplus(module.feature_scaling[name]) / 0.7
+            if feature_scaling_indicator is not None:
+                scaling = torch.matmul(feature_scaling_indicator, rf_transformed)
+            else:
+                scaling = rf_transformed
+            px_rate = px_rate * scaling
+
+        return px_rate
+
+    return _decode_rate
+
+
 class RegularizedMultimodalVI(
     VAEMixin,
     UnsupervisedTrainingMixin,
@@ -198,6 +261,13 @@ class RegularizedMultimodalVI(
         # Horseshoe latent Z prior (multiplicative shrinkage on Z)
         horseshoe_latent_z_prior_type: str | None = None,
         horseshoe_latent_z_encoder_fraction: float = 1.0,
+        horseshoe_posterior_init_loc: float = 1.0,
+        horseshoe_posterior_init_scale: float = 0.1,
+        # Variational posterior init (low-sigma init for var_encoder bias)
+        var_init_scale: float | None = None,
+        use_softplus_var_activation: bool = False,
+        # MOFA2-style ARD per-dim sigma scale on Z
+        use_ard_z_sigma_scale: bool = False,
         **kwargs,
     ):
         AmbientRegularizedSCVI._validate_bool_params(
@@ -284,6 +354,11 @@ class RegularizedMultimodalVI(
             "use_kl_z": use_kl_z,
             "horseshoe_latent_z_prior_type": horseshoe_latent_z_prior_type,
             "horseshoe_latent_z_encoder_fraction": horseshoe_latent_z_encoder_fraction,
+            "horseshoe_posterior_init_loc": horseshoe_posterior_init_loc,
+            "horseshoe_posterior_init_scale": horseshoe_posterior_init_scale,
+            "var_init_scale": var_init_scale,
+            "use_softplus_var_activation": use_softplus_var_activation,
+            "use_ard_z_sigma_scale": use_ard_z_sigma_scale,
             **kwargs,
         }
 
@@ -1055,6 +1130,184 @@ class RegularizedMultimodalVI(
 
         return np.concatenate(latent, axis=0)
 
+    @torch.inference_mode()
+    def get_per_feature_reconstruction_loss(
+        self,
+        adata=None,
+        indices=None,
+        modality_name: str | list[str] | None = None,
+        batch_size: int | None = None,
+        save_dir: str | None = None,
+    ) -> dict[str, pd.Series]:
+        """Per-feature mean negative log-likelihood under the posterior predictive.
+
+        Mirrors :meth:`get_latent_representation` flow: ``_make_data_loader`` →
+        ``module.eval()`` → iterate batches → ``inference()`` → ``generative()`` →
+        manual ``-px.log_prob(x)`` (without the ``.sum(-1)``) so we expose the
+        per-feature contribution. Aggregated as the mean across cells.
+
+        Parameters
+        ----------
+        adata
+            MuData to use. Defaults to the MuData used to initialise the model.
+        indices
+            Indices of cells to use. If ``None``, all cells are used.
+        modality_name
+            Modality to compute on. ``None`` (default) computes for all modalities;
+            a string or list selects a subset.
+        batch_size
+            Batch size for the data loader.
+        save_dir
+            If set, save each modality's Series to
+            ``<save_dir>/per_feature_nll/<modality>.parquet`` so re-plotting is free.
+
+        Returns
+        -------
+        dict mapping modality name to a ``pandas.Series`` of mean per-feature NLL,
+        indexed by feature name.
+        """
+        import pandas as pd
+
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+
+        if modality_name is None:
+            target_modalities = list(self.module.modality_names)
+        elif isinstance(modality_name, str):
+            target_modalities = [modality_name]
+        else:
+            target_modalities = list(modality_name)
+
+        self.module.eval()
+        device = next(self.module.parameters()).device
+
+        nll_sum: dict[str, torch.Tensor | None] = dict.fromkeys(target_modalities)
+        n_cells_used: dict[str, int] = dict.fromkeys(target_modalities, 0)
+
+        for tensors in scdl:
+            tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
+            inference_inputs = self.module._get_inference_input(tensors)
+            outputs = self.module.inference(**inference_inputs)
+            gen_inputs = self.module._get_generative_input(tensors, outputs)
+            gen_out = self.module.generative(**gen_inputs)
+            masks = outputs.get("masks", {})
+
+            for name in target_modalities:
+                if name not in gen_out["px"]:
+                    continue
+                x = tensors.get(f"X_{name}")
+                if x is None:
+                    continue
+                px = gen_out["px"][name]
+                nll = -px.log_prob(x)  # (n_cells, n_features)
+                if name in masks:
+                    nll = nll * masks[name].float().unsqueeze(-1)
+                    n_cells_used[name] += int(masks[name].sum().item())
+                else:
+                    n_cells_used[name] += nll.shape[0]
+                running = nll.sum(dim=0).detach().cpu()
+                if nll_sum[name] is None:
+                    nll_sum[name] = running
+                else:
+                    nll_sum[name] = nll_sum[name] + running
+
+        result: dict[str, pd.Series] = {}
+        for name in target_modalities:
+            if nll_sum[name] is None or n_cells_used[name] == 0:
+                continue
+            mean_nll = (nll_sum[name] / float(n_cells_used[name])).numpy()
+            mod_adata = adata.mod[name] if hasattr(adata, "mod") else adata
+            feature_names = list(mod_adata.var_names)
+            result[name] = pd.Series(mean_nll, index=feature_names, name=f"per_feature_nll_{name}")
+
+        if save_dir is not None:
+            import os
+
+            out_dir = os.path.join(save_dir, "per_feature_nll")
+            os.makedirs(out_dir, exist_ok=True)
+            for name, series in result.items():
+                series.to_frame().to_parquet(os.path.join(out_dir, f"{name}.parquet"))
+
+        return result
+
+    @torch.inference_mode()
+    def get_per_dim_kl(
+        self,
+        adata=None,
+        indices=None,
+        batch_size: int | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Per-dimension mean ``KL(q(z|x) ‖ N(0, 1))`` for each modality.
+
+        Reuses the same inference flow as :meth:`get_latent_representation` but
+        returns ``kl_divergence(qz, N(0, I))`` averaged over cells, broken down
+        per latent dimension. Useful for diagnosing how many dimensions are
+        actually active (above the ``DEFAULT_ACTIVE_DIM_KL_THRESHOLD``).
+
+        Parameters
+        ----------
+        adata
+            MuData to use. Defaults to the MuData used to initialise the model.
+        indices
+            Indices of cells to use.
+        batch_size
+            Batch size for the data loader.
+
+        Returns
+        -------
+        dict mapping modality name to a 1-D ``np.ndarray`` of shape
+        ``(n_latent_per_modality,)`` containing the mean per-dim KL across cells.
+        """
+        from torch.distributions import Normal as _Normal
+        from torch.distributions import kl_divergence as _kld
+
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+
+        self.module.eval()
+        device = next(self.module.parameters()).device
+
+        kl_sum: dict[str, torch.Tensor | None] = dict.fromkeys(self.module.modality_names)
+        n_cells: dict[str, int] = dict.fromkeys(self.module.modality_names, 0)
+
+        for tensors in scdl:
+            tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
+            inference_inputs = self.module._get_inference_input(tensors)
+            outputs = self.module.inference(**inference_inputs)
+            qz_per_modality = outputs["qz_per_modality"]
+            masks = outputs.get("masks", {})
+
+            for name in self.module.modality_names:
+                if name not in qz_per_modality:
+                    continue
+                qz = qz_per_modality[name]
+                n_lat = self.module.n_latent_dict[name]
+                prior = _Normal(
+                    torch.zeros(n_lat, device=qz.loc.device),
+                    torch.ones(n_lat, device=qz.loc.device),
+                )
+                kl_per_dim = _kld(qz, prior)  # (n_cells, n_latent)
+                if name in masks:
+                    m = masks[name].float().unsqueeze(-1)
+                    kl_per_dim = kl_per_dim * m
+                    n_cells[name] += int(masks[name].sum().item())
+                else:
+                    n_cells[name] += kl_per_dim.shape[0]
+                running = kl_per_dim.sum(dim=0).detach().cpu()
+                if kl_sum[name] is None:
+                    kl_sum[name] = running
+                else:
+                    kl_sum[name] = kl_sum[name] + running
+
+        result: dict[str, np.ndarray] = {}
+        for name in self.module.modality_names:
+            if kl_sum[name] is None or n_cells[name] == 0:
+                continue
+            result[name] = (kl_sum[name] / float(n_cells[name])).numpy()
+        return result
+
     def get_modality_latents(self, **kwargs) -> dict[str, np.ndarray]:
         """Return per-modality latent representations.
 
@@ -1341,7 +1594,125 @@ class RegularizedMultimodalVI(
         all_z = []
         importances = {name: [] for name in self.module.modality_names}
 
-        for tensors in scdl:
+        # ------------------------------------------------------------------
+        # Phase A: build per-modality attribution operators once.
+        #
+        # The vmap(jacfwd(_decode_rate_one, ...)) wrapper depends only on
+        # `self.module` + the call-level options; none of its state varies
+        # across dataloader batches. Hoisting it out of the batch loop cuts
+        # ~200k redundant Python/functorch setups per attribution run on the
+        # embryo dataset. We also (optionally) wrap the hoisted wrapper with
+        # torch.compile(dynamic=True) so Inductor can fuse the decoder path.
+        # ------------------------------------------------------------------
+        from torch.func import jacfwd, vmap
+
+        # Stability flags derived from the data registry + call-level options.
+        # These do not vary across batches within a single attribution run,
+        # so we compute them once here.
+        _has_cc = REGISTRY_KEYS.CONT_COVS_KEY in self.adata_manager.data_registry
+        _has_ambient = AMBIENT_COVS_KEY in self.adata_manager.data_registry
+        _has_fs_registry = FEATURE_SCALING_COVS_KEY in self.adata_manager.data_registry
+
+        if _remove_fs:
+            if covariate_reference == "zero":
+                _has_fs = False
+                _skip_fs = True
+            elif covariate_reference == "mean":
+                _has_fs = self.module.n_total_feature_scaling_cats > 0
+                _skip_fs = False
+            else:  # "reference"
+                _has_fs = self.module.n_total_feature_scaling_cats > 0 and _fs_ref_indices is not None
+                _skip_fs = False
+        else:
+            _has_fs = _has_fs_registry and self.module.n_total_feature_scaling_cats > 0
+            _skip_fs = False
+
+        per_modality_ops: dict[str, dict] = {}
+        for name in self.module.modality_names:
+            _has_bg_for_name = (
+                not (_remove_cat or remove_covariates == "all")
+                and name in self.module.additive_background
+                and _has_ambient
+            )
+            _disp = self.module.dispersion_dict[name]
+            _dec_n_cat_list_name = list(self.module.decoders[name].px_decoder.n_cat_list)
+
+            # Closure captures stable state via default args. `_make_decode_rate_fn`
+            # is a module-level helper; the inner call runs under vmap+jacfwd so
+            # `lib_s, bi_s, ...` arrive as per-cell (vmap-stripped) tensors.
+            def _decode_rate_one(
+                z_s,
+                lib_s,
+                bi_s,
+                bg_s,
+                cc_s,
+                fs_s,
+                cat_s,
+                _module=self.module,
+                _name=name,
+                _disp=_disp,
+                _skip_fs=_skip_fs,
+                _has_bg=_has_bg_for_name,
+                _has_cc=_has_cc,
+                _has_fs=_has_fs,
+            ):
+                lib_i = lib_s.unsqueeze(0)
+                bi_i = bi_s.unsqueeze(0)
+                bg_i = bg_s.unsqueeze(0) if _has_bg else None
+                cc_i = cc_s.unsqueeze(0) if _has_cc else None
+                fs_i = fs_s.unsqueeze(0) if _has_fs else None
+                cat_i = tuple(c.unsqueeze(0) for c in cat_s)
+                one_cell_decode = _make_decode_rate_fn(
+                    _module,
+                    _name,
+                    _disp,
+                    lib_i,
+                    bi_i,
+                    cat_i,
+                    bg_i,
+                    cc_i,
+                    fs_i,
+                    skip_feature_scaling=_skip_fs,
+                )
+                return one_cell_decode(z_s.unsqueeze(0)).squeeze(0)
+
+            _in_dims = (0, 0, 0, 0, 0, 0, tuple(0 for _ in _dec_n_cat_list_name))
+            jac_per_cell = vmap(
+                jacfwd(_decode_rate_one, argnums=0),
+                in_dims=_in_dims,
+            )
+            # Note: we intentionally do NOT wrap `jac_per_cell` with
+            # `torch.compile`. Dynamo + functorch's `vmap(jacfwd(...))` path
+            # fails inside `torch.cat((x, *one_hot_cat_list_layer), dim=-1)` in
+            # `FCLayers.forward` with "Cannot call sizes() on tensor with
+            # symbolic sizes/strides" under dynamic-shape tracing. The
+            # hoisting refactor alone captures the bulk of the speedup
+            # (avoiding ~200k per-batch Python/functorch wrapper allocations
+            # on the embryo dataset).
+
+            per_modality_ops[name] = {
+                "jac": jac_per_cell,
+                "has_bg": _has_bg_for_name,
+                "dec_n_cat_list": _dec_n_cat_list_name,
+            }
+
+        # ------------------------------------------------------------------
+        # Phase B: per-batch loop with progress bar.
+        # ------------------------------------------------------------------
+        try:
+            from tqdm.auto import tqdm
+
+            _n_batches = len(scdl) if hasattr(scdl, "__len__") else None
+            _scdl_iter = tqdm(
+                scdl,
+                total=_n_batches,
+                desc=f"Attribution (bs={batch_size or 'default'})",
+                leave=False,
+            )
+        except ImportError:
+            _scdl_iter = scdl
+
+        for tensors in _scdl_iter:
             # Move all tensors to model device (dataloader returns CPU tensors)
             tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
 
@@ -1409,12 +1780,10 @@ class RegularizedMultimodalVI(
                 categorical_input = ()
 
             # Build scaling covariate indicator (cell2location obs2extra_categoricals)
-            skip_feature_scaling = False
             feature_scaling_covs = tensors.get(FEATURE_SCALING_COVS_KEY)
             if _remove_fs:
                 if covariate_reference == "zero":
                     feature_scaling_indicator = None
-                    skip_feature_scaling = True
                 elif covariate_reference == "mean":
                     if self.module.n_total_feature_scaling_cats > 0:
                         feature_scaling_indicator = torch.cat(
@@ -1447,76 +1816,16 @@ class RegularizedMultimodalVI(
             else:
                 feature_scaling_indicator = None
 
-            def _make_decode_rate_fn(
-                module,
-                name,
-                disp,
-                lib,
-                batch_index,
-                categorical_input,
-                bg,
-                cont_covs,
-                feature_scaling_indicator,
-                skip_feature_scaling=False,
-            ):
-                """Create a closure that computes decoder rate for a given z."""
-
-                def _decode_rate(z_input):
-                    if cont_covs is None:
-                        dec_input = z_input
-                    elif z_input.dim() != cont_covs.dim():
-                        dec_input = torch.cat(
-                            [z_input, cont_covs.unsqueeze(0).expand(z_input.size(0), -1, -1)],
-                            dim=-1,
-                        )
-                    else:
-                        dec_input = torch.cat([z_input, cont_covs], dim=-1)
-
-                    if module.use_batch_in_decoder:
-                        _dec_out = module.decoders[name](
-                            disp,
-                            dec_input,
-                            lib,
-                            batch_index,
-                            *categorical_input,
-                            additive_background=bg,
-                        )
-                    else:
-                        _dec_out = module.decoders[name](
-                            disp,
-                            dec_input,
-                            lib,
-                            *categorical_input,
-                            additive_background=bg,
-                        )
-                    # px_rate is always the 3rd element (burst_frequency_size returns 6, others 4)
-                    px_rate = _dec_out[2]
-
-                    if not skip_feature_scaling and name in module.feature_scaling:
-                        rf_transformed = torch.nn.functional.softplus(module.feature_scaling[name]) / 0.7
-                        if feature_scaling_indicator is not None:
-                            scaling = torch.matmul(feature_scaling_indicator, rf_transformed)
-                        else:
-                            scaling = rf_transformed
-                        px_rate = px_rate * scaling
-
-                    return px_rate
-
-                return _decode_rate
-
             for name in self.module.modality_names:
                 if name not in library:
                     continue
 
-                disp = self.module.dispersion_dict[name]
+                ops = per_modality_ops[name]
                 lib = library[name]
 
                 # Additive background (independent of z, d(bg)/dz=0)
                 bg = None
-                if _remove_cat or remove_covariates == "all":
-                    # bg doesn't affect Jacobian (additive, z-independent), skip
-                    bg = None
-                elif name in self.module.additive_background and ambient_covs is not None:
+                if ops["has_bg"] and ambient_covs is not None:
                     concat_ambient = torch.cat(
                         [
                             one_hot(ambient_covs[:, i].long(), int(n_cats_i)).float()
@@ -1526,34 +1835,23 @@ class RegularizedMultimodalVI(
                     )
                     bg = torch.matmul(concat_ambient, torch.exp(self.module.additive_background[name]).T)
 
-                # Exact per-cell Jacobian via torch.func.vmap(jacfwd(...)).
-                # jacfwd is preferred over jacrev because n_genes >> n_latent
-                # (e.g. 28k vs 192), so forward-mode is ~150x cheaper.
-                from torch.func import jacfwd, vmap
-
-                # Pack per-cell tensors and vmap over them. None-valued inputs
-                # (bg, cont_covs, feature_scaling_indicator) are replaced with
-                # zero-width stand-ins because vmap requires real tensors;
-                # _decode_rate_one rebuilds the original None via Python flags.
-                _module = self.module
-                _name = name
-                _disp = disp
-                _skip_fs = skip_feature_scaling
-                _has_bg = bg is not None
-                _has_cc = cont_covs is not None
-                _has_fs = feature_scaling_indicator is not None
-
+                # Pack per-cell tensors; None-valued inputs become zero-width
+                # stand-ins because vmap requires real tensors.
                 bs_z = z.shape[0]
-                bg_pack = bg if _has_bg else torch.empty(bs_z, 0, device=z.device)
-                cc_pack = cont_covs if _has_cc else torch.empty(bs_z, 0, device=z.device)
-                fs_pack = feature_scaling_indicator if _has_fs else torch.empty(bs_z, 0, device=z.device)
+                bg_pack = bg if (bg is not None) else torch.empty(bs_z, 0, device=z.device)
+                cc_pack = cont_covs if cont_covs is not None else torch.empty(bs_z, 0, device=z.device)
+                fs_pack = (
+                    feature_scaling_indicator
+                    if feature_scaling_indicator is not None
+                    else torch.empty(bs_z, 0, device=z.device)
+                )
+
                 # Pre-one-hot categoricals so FCLayers takes the (bs, n_cat)
                 # branch and skips its data-dependent nn.functional.one_hot
                 # call (which is not vmap-traceable).
-                _dec_n_cat_list = list(self.module.decoders[name].px_decoder.n_cat_list)
                 cat_pack_list = []
                 _ci = 0
-                for n_cat in _dec_n_cat_list:
+                for n_cat in ops["dec_n_cat_list"]:
                     if n_cat > 1:
                         c = categorical_input[_ci]
                         if c.size(1) != n_cat:
@@ -1566,49 +1864,9 @@ class RegularizedMultimodalVI(
                             _ci += 1
                 cat_pack = tuple(cat_pack_list)
 
-                def _decode_rate_one(
-                    z_s,
-                    lib_s,
-                    bi_s,
-                    bg_s,
-                    cc_s,
-                    fs_s,
-                    cat_s,
-                    _module=_module,
-                    _name=_name,
-                    _disp=_disp,
-                    _skip_fs=_skip_fs,
-                    _has_bg=_has_bg,
-                    _has_cc=_has_cc,
-                    _has_fs=_has_fs,
-                ):
-                    lib_i = lib_s.unsqueeze(0)
-                    bi_i = bi_s.unsqueeze(0)
-                    bg_i = bg_s.unsqueeze(0) if _has_bg else None
-                    cc_i = cc_s.unsqueeze(0) if _has_cc else None
-                    fs_i = fs_s.unsqueeze(0) if _has_fs else None
-                    cat_i = tuple(c.unsqueeze(0) for c in cat_s)
-                    one_cell_decode = _make_decode_rate_fn(
-                        _module,
-                        _name,
-                        _disp,
-                        lib_i,
-                        bi_i,
-                        cat_i,
-                        bg_i,
-                        cc_i,
-                        fs_i,
-                        skip_feature_scaling=_skip_fs,
-                    )
-                    return one_cell_decode(z_s.unsqueeze(0)).squeeze(0)
-
-                jac_per_cell = vmap(
-                    jacfwd(_decode_rate_one, argnums=0),
-                    in_dims=(0, 0, 0, 0, 0, 0, tuple(0 for _ in cat_pack)),
-                )
-                J = jac_per_cell(z, lib, batch_index, bg_pack, cc_pack, fs_pack, cat_pack)  # (bs, n_genes, n_latent)
+                # Call the hoisted vmap(jacfwd(...)) wrapper built in Phase A.
+                J = ops["jac"](z, lib, batch_index, bg_pack, cc_pack, fs_pack, cat_pack)
                 importance = J.abs().mean(dim=1)  # (bs, n_latent)
-
                 importances[name].append(importance.cpu().numpy())
 
         z_all = np.concatenate(all_z, axis=0)

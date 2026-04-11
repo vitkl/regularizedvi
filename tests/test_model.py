@@ -2779,3 +2779,209 @@ class TestScaleSoftplusBias:
         sp1 = torch.nn.functional.softplus(b1)
         sp3 = torch.nn.functional.softplus(b3)
         assert torch.allclose(sp3, 3.0 * sp1, rtol=1e-2, atol=1e-2)
+
+
+class TestZPosteriorDiagnostics:
+    """Tests for Z-init / posterior diagnostics features (plan stateless-squishing-lecun)."""
+
+    def test_var_init_scale_encoder_unit(self):
+        """RegularizedEncoder with var_init_scale=0.1 yields qz.scale ≈ 0.1 at init."""
+        from regularizedvi._components import RegularizedEncoder
+
+        torch.manual_seed(0)
+        enc = RegularizedEncoder(
+            n_input=20,
+            n_output=8,
+            n_hidden=16,
+            use_softplus_var_activation=True,
+            var_init_scale=0.1,
+        )
+        enc.eval()
+        x = torch.randn(32, 20)
+        dist, _ = enc(x) if enc.return_dist else (None, None)
+        if dist is None:
+            q_m, q_v, _ = enc(x)
+            scale = q_v.sqrt()
+        else:
+            scale = dist.scale
+        assert torch.all(scale > 0)
+        assert torch.allclose(
+            scale.mean(),
+            torch.tensor(0.1),
+            rtol=2e-2,
+            atol=2e-2,
+        ), f"Expected qz.scale ≈ 0.1, got {scale.mean().item():.4f}"
+
+    def test_var_init_scale_requires_softplus(self):
+        from regularizedvi._components import RegularizedEncoder
+
+        with pytest.raises(ValueError, match="use_softplus_var_activation"):
+            RegularizedEncoder(n_input=4, n_output=2, n_hidden=4, var_init_scale=0.1)
+
+    def test_var_init_scale_multimodal_train(self, mdata):
+        """End-to-end: multimodal model with var_init_scale=0.1 trains and qz.scale stays narrow."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            var_init_scale=0.1,
+            use_softplus_var_activation=True,
+        )
+        # Before training: every Z encoder should give ~constant qz.scale ≈ 0.1
+        for name in model.module.modality_names:
+            enc = model.module.encoders[name]
+            x = torch.randn(8, model.module.n_input_per_modality[name])
+            enc.eval()
+            dist, _ = enc(x)
+            assert torch.allclose(dist.scale.mean(), torch.tensor(0.1), rtol=5e-2, atol=5e-2)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        assert "elbo_train" in model.history_
+
+    def test_lognormal_mc_horseshoe(self, mdata):
+        """horseshoe_latent_z_prior_type='lognormal_mc' trains and logs horseshoe_kl."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            horseshoe_latent_z_prior_type="lognormal_mc",
+            use_softplus_var_activation=True,
+            var_init_scale=0.1,
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        hs_keys = [k for k in model.history_ if k.startswith("horseshoe_kl_")]
+        assert len(hs_keys) > 0
+
+    def test_horseshoe_invalid_prior_type(self, mdata):
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        with pytest.raises(ValueError, match="horseshoe_latent_z_prior_type"):
+            regularizedvi.RegularizedMultimodalVI(
+                mdata,
+                n_hidden=16,
+                n_latent=4,
+                horseshoe_latent_z_prior_type="not_a_valid_choice",
+            )
+
+    def test_horseshoe_posterior_init_loc_scale(self, mdata):
+        """Horseshoe posterior init biases land at log(M) and softplus_inv(S)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            horseshoe_latent_z_prior_type="lognormal",
+            horseshoe_posterior_init_loc=1.0,
+            horseshoe_posterior_init_scale=0.1,
+            use_softplus_var_activation=True,
+            var_init_scale=0.1,
+        )
+        for name in model.module.modality_names:
+            enc = model.module.horseshoe_encoders[name]
+            # mean_encoder.bias = log(M=1) = 0
+            assert torch.allclose(enc.mean_encoder.bias, torch.zeros_like(enc.mean_encoder.bias))
+            # var_encoder.bias is set so softplus(bias) = S² = 0.01 (post-activation variance);
+            # the resulting std (LogNormal scale parameter) is sqrt(softplus(bias)) ≈ S = 0.1
+            sp = torch.nn.functional.softplus(enc.var_encoder.bias)
+            assert torch.allclose(sp, torch.full_like(sp, 0.01), rtol=5e-2, atol=5e-2)
+
+    def test_ard_z_sigma_scale_train(self, mdata):
+        """use_ard_z_sigma_scale=True trains and logs ard_z_alpha_kl."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            use_ard_z_sigma_scale=True,
+            use_softplus_var_activation=True,
+            var_init_scale=0.1,
+        )
+        # Per-modality params exist with correct shape
+        for name in model.module.modality_names:
+            assert name in model.module.ard_z_alpha_loc
+            assert model.module.ard_z_alpha_loc[name].shape == (4,)
+            assert model.module.ard_z_alpha_log_scale[name].shape == (4,)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        ard_keys = [k for k in model.history_ if k.startswith("ard_z_alpha_kl_")]
+        assert len(ard_keys) > 0, f"No ard_z_alpha_kl metric found. Keys: {list(model.history_.keys())[:30]}"
+
+    def test_get_per_dim_kl(self, mdata):
+        """get_per_dim_kl returns one (n_latent,) array per modality and matches active dim count."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        kl_per_dim = model.get_per_dim_kl(batch_size=32)
+        for name in model.module.modality_names:
+            assert name in kl_per_dim
+            assert kl_per_dim[name].shape == (4,)
+            assert np.all(np.isfinite(kl_per_dim[name]))
+
+    def test_get_per_feature_reconstruction_loss(self, mdata, tmp_path):
+        """get_per_feature_reconstruction_loss returns per-modality Series indexed by feature names."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+        nll_dict = model.get_per_feature_reconstruction_loss(batch_size=32, save_dir=str(tmp_path))
+        assert "rna" in nll_dict
+        assert "atac" in nll_dict
+        assert nll_dict["rna"].shape == (50,)
+        assert nll_dict["atac"].shape == (30,)
+        assert list(nll_dict["rna"].index)[:3] == ["gene_0", "gene_1", "gene_2"]
+        assert list(nll_dict["atac"].index)[:3] == ["peak_0", "peak_1", "peak_2"]
+
+        # Saved parquet files exist
+        assert (tmp_path / "per_feature_nll" / "rna.parquet").exists()
+        assert (tmp_path / "per_feature_nll" / "atac.parquet").exists()
+
+    def test_get_per_feature_reconstruction_loss_modality_subset(self, mdata):
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        nll = model.get_per_feature_reconstruction_loss(modality_name="rna", batch_size=32)
+        assert set(nll.keys()) == {"rna"}
+
+    def test_get_per_feature_reconstruction_loss_matches_recon_loss(self, mdata):
+        """Sum of per-feature NLL across features equals the standard recon loss (per cell, summed).
+
+        Both passes are seeded so the residual library w sample and z sample are identical.
+        """
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+        torch.manual_seed(123)
+        per_feat = model.get_per_feature_reconstruction_loss(batch_size=32)
+
+        # Re-run the same path manually with the same seed.
+        module = model.module
+        module.eval()
+        device = next(module.parameters()).device
+        scdl = model._make_data_loader(adata=mdata, batch_size=32)
+
+        manual_mean_total = dict.fromkeys(module.modality_names, 0.0)
+        n_cells_total = dict.fromkeys(module.modality_names, 0)
+        torch.manual_seed(123)
+        with torch.inference_mode():
+            for tensors in scdl:
+                tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
+                inf_inputs = module._get_inference_input(tensors)
+                outputs = module.inference(**inf_inputs)
+                gen_inputs = module._get_generative_input(tensors, outputs)
+                gen_out = module.generative(**gen_inputs)
+                for name in module.modality_names:
+                    if name not in gen_out["px"]:
+                        continue
+                    x = tensors.get(f"X_{name}")
+                    if x is None:
+                        continue
+                    nll = -gen_out["px"][name].log_prob(x)  # (n_cells, n_features)
+                    manual_mean_total[name] += nll.sum().item()
+                    n_cells_total[name] += nll.shape[0]
+
+        for name in module.modality_names:
+            expected_mean = manual_mean_total[name] / n_cells_total[name]
+            actual_mean = per_feat[name].sum()
+            assert np.isclose(expected_mean, actual_mean, rtol=1e-3, atol=1e-3), (
+                f"{name}: expected {expected_mean:.6f}, got {actual_mean:.6f}"
+            )

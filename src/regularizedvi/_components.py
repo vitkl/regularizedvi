@@ -306,6 +306,8 @@ class RegularizedEncoder(nn.Module):
         var_eps: float = 1e-4,
         var_activation: Callable | None = None,
         return_dist: bool = False,
+        use_softplus_var_activation: bool = False,
+        var_init_scale: float | None = None,
         **kwargs,
     ):
         super().__init__()
@@ -331,7 +333,30 @@ class RegularizedEncoder(nn.Module):
             self.z_transformation = nn.Softplus()
         else:
             self.z_transformation = _identity
-        self.var_activation = torch.exp if var_activation is None else var_activation
+
+        if use_softplus_var_activation:
+            self.var_activation = nn.functional.softplus
+        else:
+            self.var_activation = torch.exp if var_activation is None else var_activation
+
+        # Pre-initialise the var head bias so the initial qz.scale (std) ≈ var_init_scale.
+        # var_activation produces variance q_v; std = sqrt(q_v + var_eps). Target q_v = s² so
+        # std ≈ s. With softplus: softplus(bias) = s² ⇒ bias = softplus_inv(s²).
+        # We also zero the var_encoder weight so the init scale is uniform across cells.
+        if var_init_scale is not None:
+            if not use_softplus_var_activation:
+                raise ValueError(
+                    "var_init_scale requires use_softplus_var_activation=True so the "
+                    "post-activation variance is bounded and the bias init is well-defined."
+                )
+            with torch.no_grad():
+                s_sq = float(var_init_scale) ** 2
+                if s_sq > 20.0:
+                    bias_val = s_sq
+                else:
+                    bias_val = float(np.log(np.expm1(s_sq)))
+                self.var_encoder.bias.fill_(bias_val)
+                self.var_encoder.weight.zero_()
 
     def forward(self, x: torch.Tensor, *cat_list: int):
         r"""The forward computation for a single sample.

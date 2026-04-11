@@ -246,6 +246,13 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # Horseshoe latent Z prior (multiplicative shrinkage on Z)
         horseshoe_latent_z_prior_type: str | None = None,
         horseshoe_latent_z_encoder_fraction: float = 1.0,
+        horseshoe_posterior_init_loc: float = 1.0,
+        horseshoe_posterior_init_scale: float = 0.1,
+        # Variational posterior init (low-sigma init for var_encoder bias)
+        var_init_scale: float | None = None,
+        use_softplus_var_activation: bool = False,
+        # MOFA2-style ARD per-dim sigma scale on Z
+        use_ard_z_sigma_scale: bool = False,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -281,12 +288,18 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.use_kl_z = use_kl_z
         self.horseshoe_latent_z_prior_type = horseshoe_latent_z_prior_type
         self.horseshoe_latent_z_encoder_fraction = horseshoe_latent_z_encoder_fraction
+        self.horseshoe_posterior_init_loc = horseshoe_posterior_init_loc
+        self.horseshoe_posterior_init_scale = horseshoe_posterior_init_scale
+        self.var_init_scale = var_init_scale
+        self.use_softplus_var_activation = use_softplus_var_activation
+        self.use_ard_z_sigma_scale = use_ard_z_sigma_scale
         if self.horseshoe_latent_z_prior_type is not None and self.horseshoe_latent_z_prior_type not in (
             "lognormal",
+            "lognormal_mc",
             "gamma",
         ):
             raise ValueError(
-                f"horseshoe_latent_z_prior_type must be None, 'lognormal', or 'gamma', "
+                f"horseshoe_latent_z_prior_type must be None, 'lognormal', 'lognormal_mc', or 'gamma', "
                 f"got {self.horseshoe_latent_z_prior_type!r}"
             )
         if self.horseshoe_latent_z_prior_type is not None and latent_mode == "single_encoder":
@@ -419,6 +432,13 @@ class RegularizedMultimodalVAE(BaseModuleClass):
 
         n_input_decoder = self.total_latent_dim + n_continuous_cov
 
+        # Single shared knob "how narrow is every variational posterior at init":
+        # applied to the Z encoder, library encoder, and horseshoe q(λ) encoder.
+        _enc_init_kwargs = {
+            "use_softplus_var_activation": self.use_softplus_var_activation,
+            "var_init_scale": self.var_init_scale,
+        }
+
         # ---- Per-modality encoders ----
         self.encoders = nn.ModuleDict()
         for name in self.modality_names:
@@ -435,6 +455,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 use_batch_norm=use_batch_norm_encoder,
                 use_layer_norm=use_layer_norm_encoder,
                 return_dist=True,
+                **_enc_init_kwargs,
                 **_extra_encoder_kwargs,
             )
 
@@ -455,8 +476,27 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     use_batch_norm=use_batch_norm_encoder,
                     use_layer_norm=use_layer_norm_encoder,
                     return_dist=True,
+                    **_enc_init_kwargs,
                     **_extra_encoder_kwargs,
                 )
+
+            # Pre-init horseshoe q(λ) posterior so LogNormal(loc=log(M), scale=S):
+            #   - mean_encoder.bias = log(M) ⇒ underlying Normal loc = log(M) ⇒ LogNormal median = M
+            #   - var_encoder.bias  = softplus_inv(S²) so post-activation variance = S² ⇒ std = S.
+            # Requires use_softplus_var_activation=True (enforced by RegularizedEncoder).
+            if self.use_softplus_var_activation:
+                _M = float(self.horseshoe_posterior_init_loc)
+                _S = float(self.horseshoe_posterior_init_scale)
+                _log_M = math.log(_M)
+                _S_sq = _S * _S
+                _spinv_S_sq = _S_sq if _S_sq > 20.0 else float(np.log(np.expm1(_S_sq)))
+                with torch.no_grad():
+                    for name in self.modality_names:
+                        enc = self.horseshoe_encoders[name]
+                        enc.mean_encoder.bias.fill_(_log_M)
+                        enc.mean_encoder.weight.zero_()
+                        enc.var_encoder.bias.fill_(_spinv_S_sq)
+                        enc.var_encoder.weight.zero_()
 
         # ---- Single encoder (for single_encoder mode) ----
         if latent_mode == "single_encoder":
@@ -476,6 +516,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 use_batch_norm=use_batch_norm_encoder,
                 use_layer_norm=use_layer_norm_encoder,
                 return_dist=True,
+                **_enc_init_kwargs,
                 **_extra_encoder_kwargs,
             )
 
@@ -544,6 +585,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 use_batch_norm=use_batch_norm_encoder,
                 use_layer_norm=use_layer_norm_encoder,
                 return_dist=True,
+                **_enc_init_kwargs,
                 **_extra_encoder_kwargs,
             )
 
@@ -703,6 +745,28 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             n_feat = n_input_per_modality[name]
             self.feature_scaling[name] = nn.Parameter(torch.zeros(n_feature_scaling_rows, n_feat))
 
+        # ---- ARD per-dim sigma scale on Z (MOFA2-style, separate latent variable) ----
+        # α_d ~ LogNormal(loc=0, scale=var_init_scale or 0.1) at init.
+        # Underlying Normal: loc=0 ⇒ LogNormal median 1; scale=S ⇒ CV ≈ S for small S.
+        # Prior: LogNormal moment-matched to Exp(1): mean=1, var=1.
+        # Generative: z_used = z_sample * α_d_sample.
+        if self.use_ard_z_sigma_scale:
+            self.ard_z_alpha_loc = nn.ParameterDict()
+            self.ard_z_alpha_log_scale = nn.ParameterDict()
+            _ard_init_scale = float(self.var_init_scale) if self.var_init_scale is not None else 0.1
+            _ard_log_scale = math.log(_ard_init_scale)
+            for name in self.modality_names:
+                _n_lat = n_latent_dict[name]
+                self.ard_z_alpha_loc[name] = nn.Parameter(torch.zeros(_n_lat))
+                self.ard_z_alpha_log_scale[name] = nn.Parameter(torch.full((_n_lat,), _ard_log_scale))
+
+            # LogNormal prior parameters that moment-match Exp(1) (mean=1, var=1):
+            #   σ_p² = log(1 + var/mean²) = log(2)
+            #   μ_p  = log(mean) − σ_p²/2 = −log(2)/2
+            _sigma_p_sq = math.log(2.0)
+            self._ard_prior_mu = -0.5 * _sigma_p_sq
+            self._ard_prior_sigma = math.sqrt(_sigma_p_sq)
+
         # ---- Learnable per-modality scaling on size factors ----
         self.learnable_modality_scaling = learnable_modality_scaling
         self.modality_scale_prior_concentration = modality_scale_prior_concentration
@@ -847,6 +911,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         z_per_modality = {}
         horseshoe_per_modality = {}
         z_gamma_per_modality = {}
+        ard_alpha_per_modality = {}
 
         if self.latent_mode == "single_encoder":
             # Concatenate all modality inputs
@@ -886,6 +951,15 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     z = z * z_gamma
                     horseshoe_per_modality[name] = hs_lognormal
                     z_gamma_per_modality[name] = z_gamma
+                # MOFA2-style ARD per-dim sigma scale (separate latent variable, NOT inside Z KL)
+                if self.use_ard_z_sigma_scale and name in self.ard_z_alpha_loc:
+                    ard_q = LogNormal(
+                        self.ard_z_alpha_loc[name],
+                        torch.exp(self.ard_z_alpha_log_scale[name]),
+                    )
+                    ard_alpha = ard_q.rsample()  # (n_latent,)
+                    z = z * ard_alpha  # broadcast across cells
+                    ard_alpha_per_modality[name] = ard_q
                 qz_per_modality[name] = qz
                 z_per_modality[name] = z
 
@@ -960,6 +1034,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             "masks": masks,
             "horseshoe_per_modality": horseshoe_per_modality,
             "z_gamma_per_modality": z_gamma_per_modality,
+            "ard_alpha_per_modality": ard_alpha_per_modality,
         }
 
     def _mix_modalities(
@@ -1397,6 +1472,17 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     _sigma_0 = torch.sqrt(_sigma_0_sq)
                     prior = LogNormal(_mu_0, _sigma_0)
                     hs_kl_mod = kld(hs_dist, prior).sum(dim=-1)
+                elif self.horseshoe_latent_z_prior_type == "lognormal_mc":
+                    # Same LogNormal prior as the analytical branch, but KL computed by MC
+                    # using the existing z_gamma sample. Lets us isolate "MC vs analytical
+                    # KL" from "Gamma vs LogNormal prior" in the Block 3 ablation.
+                    _sigma_0_sq = torch.log(1 + 1 / _hs_shape)
+                    _mu_0 = torch.log(_hs_shape) - _sigma_0_sq / 2
+                    _sigma_0 = torch.sqrt(_sigma_0_sq)
+                    prior = LogNormal(_mu_0, _sigma_0)
+                    log_q = hs_dist.log_prob(z_gamma + 1e-8).sum(dim=-1)
+                    log_p = prior.log_prob(z_gamma + 1e-8).sum(dim=-1)
+                    hs_kl_mod = log_q - log_p
                 else:  # "gamma"
                     gamma_prior = Gamma(
                         concentration=_hs_shape,
@@ -1413,6 +1499,30 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 extra_metrics[f"z_gamma_mean_{name}"] = z_gamma.mean().detach()
 
             kl_z = kl_z + horseshoe_kl
+
+        # ---- MOFA2-style ARD sigma scale: KL(q_LogNormal(loc, scale) ‖ p_LogNormal(μ_p, σ_p)) ----
+        # Prior moment-matched to Exp(1). KL is analytical via underlying Normal-Normal closed form.
+        # Single global α_d per modality (no per-cell dim) → KL is a model-level scalar, divided
+        # by n_obs to be on the same per-cell scale as the other KL terms before kl_weight.
+        if self.use_ard_z_sigma_scale:
+            ard_alpha_per_modality = inference_outputs.get("ard_alpha_per_modality", {})
+            n_obs = recon_loss.shape[0]
+            ard_kl_total = torch.tensor(0.0, device=recon_loss.device)
+            for name in self.modality_names:
+                if name not in ard_alpha_per_modality:
+                    continue
+                ard_q = ard_alpha_per_modality[name]
+                # KL(LogNormal(μ_q, σ_q) ‖ LogNormal(μ_p, σ_p)) == KL(Normal(μ_q, σ_q) ‖ Normal(μ_p, σ_p))
+                _q_normal = Normal(ard_q.loc, ard_q.scale)
+                _p_normal = Normal(
+                    torch.full_like(ard_q.loc, self._ard_prior_mu),
+                    torch.full_like(ard_q.scale, self._ard_prior_sigma),
+                )
+                _ard_kl_mod = kld(_q_normal, _p_normal).sum()
+                ard_kl_total = ard_kl_total + _ard_kl_mod
+                extra_metrics[f"ard_z_alpha_kl_{name}"] = _ard_kl_mod.detach()
+                extra_metrics[f"ard_z_alpha_mean_{name}"] = ard_q.mean.mean().detach()
+            kl_z = kl_z + ard_kl_total / n_obs
 
         # ---- Hidden activation sparsity: Gamma prior on decoder hidden activations (per-cell) ----
         if self.hidden_activation_sparsity:
@@ -1610,6 +1720,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         "additive_background",
         "feature_scaling",
         "modality_scale_raw",
+        "ard_z_alpha_loc",
+        "ard_z_alpha_log_scale",
     ]
 
     def get_parameter_groups(
