@@ -2784,8 +2784,12 @@ class TestScaleSoftplusBias:
 class TestZPosteriorDiagnostics:
     """Tests for Z-init / posterior diagnostics features (plan stateless-squishing-lecun)."""
 
-    def test_var_init_scale_encoder_unit(self):
-        """RegularizedEncoder with var_init_scale=0.1 yields qz.scale ≈ 0.1 at init."""
+    def test_var_init_scale_encoder_unit_softplus(self):
+        """RegularizedEncoder(softplus) with var_init_scale=0.1 yields mean qz.scale on the order of 0.1.
+
+        Weights are initialised to N(0, 0.1) (not zero) so cells start with small but
+        non-zero spread; mean across cells is allowed ~30% drift from the literal target.
+        """
         from regularizedvi._components import RegularizedEncoder
 
         torch.manual_seed(0)
@@ -2795,31 +2799,47 @@ class TestZPosteriorDiagnostics:
             n_hidden=16,
             use_softplus_var_activation=True,
             var_init_scale=0.1,
+            return_dist=True,
         )
         enc.eval()
-        x = torch.randn(32, 20)
-        dist, _ = enc(x) if enc.return_dist else (None, None)
-        if dist is None:
-            q_m, q_v, _ = enc(x)
-            scale = q_v.sqrt()
-        else:
-            scale = dist.scale
+        x = torch.randn(64, 20)
+        dist, _ = enc(x)
+        scale = dist.scale
         assert torch.all(scale > 0)
-        assert torch.allclose(
-            scale.mean(),
-            torch.tensor(0.1),
-            rtol=2e-2,
-            atol=2e-2,
-        ), f"Expected qz.scale ≈ 0.1, got {scale.mean().item():.4f}"
+        # mean across cells × dims should sit near 0.1 (allow generous tolerance for the
+        # randn weight noise — convex Jensen inflation is well below 50%).
+        m = scale.mean().item()
+        assert 0.05 < m < 0.20, f"Expected mean qz.scale near 0.1, got {m:.4f}"
 
-    def test_var_init_scale_requires_softplus(self):
+    def test_var_init_scale_encoder_unit_exp(self):
+        """RegularizedEncoder(exp activation) with var_init_scale=0.1 also produces mean qz.scale near 0.1."""
         from regularizedvi._components import RegularizedEncoder
 
-        with pytest.raises(ValueError, match="use_softplus_var_activation"):
-            RegularizedEncoder(n_input=4, n_output=2, n_hidden=4, var_init_scale=0.1)
+        torch.manual_seed(0)
+        enc = RegularizedEncoder(
+            n_input=20,
+            n_output=8,
+            n_hidden=16,
+            use_softplus_var_activation=False,  # default exp activation
+            var_init_scale=0.1,
+            return_dist=True,
+        )
+        enc.eval()
+        x = torch.randn(64, 20)
+        dist, _ = enc(x)
+        scale = dist.scale
+        assert torch.all(scale > 0)
+        m = scale.mean().item()
+        assert 0.05 < m < 0.20, f"Expected mean qz.scale near 0.1 with exp activation, got {m:.4f}"
+
+    def test_var_init_scale_zero_raises(self):
+        from regularizedvi._components import RegularizedEncoder
+
+        with pytest.raises(ValueError, match="var_init_scale must be > 0"):
+            RegularizedEncoder(n_input=4, n_output=2, n_hidden=4, var_init_scale=0.0)
 
     def test_var_init_scale_multimodal_train(self, mdata):
-        """End-to-end: multimodal model with var_init_scale=0.1 trains and qz.scale stays narrow."""
+        """End-to-end: multimodal model with var_init_scale=0.1 trains."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(
             mdata,
@@ -2828,13 +2848,13 @@ class TestZPosteriorDiagnostics:
             var_init_scale=0.1,
             use_softplus_var_activation=True,
         )
-        # Before training: every Z encoder should give ~constant qz.scale ≈ 0.1
+        # Pre-training: every Z encoder gives mean qz.scale near 0.1 (with randn-weight noise)
         for name in model.module.modality_names:
             enc = model.module.encoders[name]
-            x = torch.randn(8, model.module.n_input_per_modality[name])
+            x = torch.randn(16, model.module.n_input_per_modality[name])
             enc.eval()
             dist, _ = enc(x)
-            assert torch.allclose(dist.scale.mean(), torch.tensor(0.1), rtol=5e-2, atol=5e-2)
+            assert 0.05 < dist.scale.mean().item() < 0.20
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
         assert "elbo_train" in model.history_
 
@@ -2864,7 +2884,7 @@ class TestZPosteriorDiagnostics:
             )
 
     def test_horseshoe_posterior_init_loc_scale(self, mdata):
-        """Horseshoe posterior init biases land at log(M) and softplus_inv(S)."""
+        """Horseshoe posterior init biases land at log(M) and softplus_inv(S²); weights are randn-init."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(
             mdata,
@@ -2880,10 +2900,36 @@ class TestZPosteriorDiagnostics:
             enc = model.module.horseshoe_encoders[name]
             # mean_encoder.bias = log(M=1) = 0
             assert torch.allclose(enc.mean_encoder.bias, torch.zeros_like(enc.mean_encoder.bias))
-            # var_encoder.bias is set so softplus(bias) = S² = 0.01 (post-activation variance);
-            # the resulting std (LogNormal scale parameter) is sqrt(softplus(bias)) ≈ S = 0.1
+            # var_encoder.bias is set so softplus(bias) = S² = 0.01.
             sp = torch.nn.functional.softplus(enc.var_encoder.bias)
             assert torch.allclose(sp, torch.full_like(sp, 0.01), rtol=5e-2, atol=5e-2)
+            # weights are NOT zero (randn-init at small std for non-trivial cell-dependence)
+            assert enc.mean_encoder.weight.abs().mean().item() > 0
+            assert enc.var_encoder.weight.abs().mean().item() > 0
+            assert enc.mean_encoder.weight.std().item() < 0.5
+            assert enc.var_encoder.weight.std().item() < 0.5
+
+    def test_horseshoe_posterior_init_loc_zero_raises(self, mdata):
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        with pytest.raises(ValueError, match="horseshoe_posterior_init_loc"):
+            regularizedvi.RegularizedMultimodalVI(
+                mdata,
+                n_hidden=16,
+                n_latent=4,
+                horseshoe_latent_z_prior_type="lognormal",
+                horseshoe_posterior_init_loc=0.0,
+            )
+
+    def test_ard_horseshoe_incompatible(self, mdata):
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        with pytest.raises(ValueError, match="incompatible with horseshoe"):
+            regularizedvi.RegularizedMultimodalVI(
+                mdata,
+                n_hidden=16,
+                n_latent=4,
+                use_ard_z_sigma_scale=True,
+                horseshoe_latent_z_prior_type="lognormal",
+            )
 
     def test_ard_z_sigma_scale_train(self, mdata):
         """use_ard_z_sigma_scale=True trains and logs ard_z_alpha_kl."""
@@ -2906,13 +2952,55 @@ class TestZPosteriorDiagnostics:
         assert len(ard_keys) > 0, f"No ard_z_alpha_kl metric found. Keys: {list(model.history_.keys())[:30]}"
 
     def test_get_per_dim_kl(self, mdata):
-        """get_per_dim_kl returns one (n_latent,) array per modality and matches active dim count."""
+        """get_per_dim_kl returns one (n_latent,) array per modality."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
         model.train(max_epochs=2, train_size=1.0, batch_size=32)
         kl_per_dim = model.get_per_dim_kl(batch_size=32)
         for name in model.module.modality_names:
             assert name in kl_per_dim
+            assert kl_per_dim[name].shape == (4,)
+            assert np.all(np.isfinite(kl_per_dim[name]))
+
+    def test_get_per_dim_kl_single_encoder_raises(self, mdata):
+        """single_encoder mode has no per-modality qz; method raises NotImplementedError."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, latent_mode="single_encoder")
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        with pytest.raises(NotImplementedError, match="single_encoder"):
+            model.get_per_dim_kl(batch_size=32)
+
+    def test_get_per_dim_kl_with_horseshoe(self, mdata):
+        """With horseshoe enabled, per-dim KL adds the horseshoe component on top of base N(0,1)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            horseshoe_latent_z_prior_type="lognormal",
+            use_softplus_var_activation=True,
+            var_init_scale=0.1,
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        kl_per_dim = model.get_per_dim_kl(batch_size=32)
+        for name in model.module.modality_names:
+            assert kl_per_dim[name].shape == (4,)
+            assert np.all(np.isfinite(kl_per_dim[name]))
+
+    def test_get_per_dim_kl_with_ard(self, mdata):
+        """With ARD enabled, per-dim KL adds the ARD component on top of base N(0,1)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            use_ard_z_sigma_scale=True,
+            use_softplus_var_activation=True,
+            var_init_scale=0.1,
+        )
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+        kl_per_dim = model.get_per_dim_kl(batch_size=32)
+        for name in model.module.modality_names:
             assert kl_per_dim[name].shape == (4,)
             assert np.all(np.isfinite(kl_per_dim[name]))
 

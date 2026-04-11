@@ -1201,11 +1201,10 @@ class RegularizedMultimodalVI(
                     continue
                 px = gen_out["px"][name]
                 nll = -px.log_prob(x)  # (n_cells, n_features)
-                if name in masks:
-                    nll = nll * masks[name].float().unsqueeze(-1)
-                    n_cells_used[name] += int(masks[name].sum().item())
-                else:
-                    n_cells_used[name] += nll.shape[0]
+                # inference() always populates masks for every modality (all-False if missing).
+                assert name in masks, f"inference() must populate masks[{name!r}]"
+                nll = nll * masks[name].float().unsqueeze(-1)
+                n_cells_used[name] += int(masks[name].sum().item())
                 running = nll.sum(dim=0).detach().cpu()
                 if nll_sum[name] is None:
                     nll_sum[name] = running
@@ -1238,12 +1237,23 @@ class RegularizedMultimodalVI(
         indices=None,
         batch_size: int | None = None,
     ) -> dict[str, np.ndarray]:
-        """Per-dimension mean ``KL(q(z|x) ‖ N(0, 1))`` for each modality.
+        """Per-dimension mean total KL on Z for each modality.
 
-        Reuses the same inference flow as :meth:`get_latent_representation` but
-        returns ``kl_divergence(qz, N(0, I))`` averaged over cells, broken down
-        per latent dimension. Useful for diagnosing how many dimensions are
-        actually active (above the ``DEFAULT_ACTIVE_DIM_KL_THRESHOLD``).
+        Sums the per-dimension KL contributions of every prior component active in
+        the model:
+
+        - **Base**: ``KL(q(z|x) ‖ N(0, 1))`` averaged over cells, per Z dim.
+        - **Horseshoe** (when ``horseshoe_latent_z_prior_type`` is set): per-dim
+          ``KL(q(λ|x) ‖ p(λ))`` averaged over cells, computed analytically for
+          ``"lognormal"`` and via MC for ``"lognormal_mc"`` / ``"gamma"``.
+        - **ARD** (when ``use_ard_z_sigma_scale`` is True): per-dim
+          ``KL(q(α_d) ‖ p(α_d))`` (analytical Normal-Normal of the underlying
+          log-space). Since α_d is global, this term has no per-cell dependence
+          and is reported as-is per dim.
+
+        Reuses the same inference flow as :meth:`get_latent_representation`.
+        Useful for diagnosing how many dimensions are actually active above
+        ``DEFAULT_ACTIVE_DIM_KL_THRESHOLD``.
 
         Parameters
         ----------
@@ -1257,10 +1267,25 @@ class RegularizedMultimodalVI(
         Returns
         -------
         dict mapping modality name to a 1-D ``np.ndarray`` of shape
-        ``(n_latent_per_modality,)`` containing the mean per-dim KL across cells.
+        ``(n_latent_per_modality,)`` containing the total per-dim KL.
+
+        Raises
+        ------
+        NotImplementedError
+            If the model uses ``latent_mode='single_encoder'`` (no per-modality
+            qz to break down).
         """
+        from torch.distributions import Gamma as _Gamma
+        from torch.distributions import LogNormal as _LogNormal
         from torch.distributions import Normal as _Normal
         from torch.distributions import kl_divergence as _kld
+
+        if self.module.latent_mode == "single_encoder":
+            raise NotImplementedError(
+                "get_per_dim_kl is not supported for latent_mode='single_encoder' "
+                "(the joint encoder produces a single qz over the concatenated latent, "
+                "not per-modality qz dicts)."
+            )
 
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
@@ -1269,43 +1294,93 @@ class RegularizedMultimodalVI(
         self.module.eval()
         device = next(self.module.parameters()).device
 
-        kl_sum: dict[str, torch.Tensor | None] = dict.fromkeys(self.module.modality_names)
-        n_cells: dict[str, int] = dict.fromkeys(self.module.modality_names, 0)
+        modality_names = list(self.module.modality_names)
+        base_kl_sum: dict[str, torch.Tensor | None] = dict.fromkeys(modality_names)
+        hs_kl_sum: dict[str, torch.Tensor | None] = dict.fromkeys(modality_names)
+        n_cells: dict[str, int] = dict.fromkeys(modality_names, 0)
+
+        has_horseshoe = self.module.horseshoe_latent_z_prior_type is not None
+        has_ard = self.module.use_ard_z_sigma_scale
 
         for tensors in scdl:
             tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
             inference_inputs = self.module._get_inference_input(tensors)
             outputs = self.module.inference(**inference_inputs)
             qz_per_modality = outputs["qz_per_modality"]
+            horseshoe_per_modality = outputs.get("horseshoe_per_modality", {})
+            z_gamma_per_modality = outputs.get("z_gamma_per_modality", {})
             masks = outputs.get("masks", {})
 
-            for name in self.module.modality_names:
+            for name in modality_names:
                 if name not in qz_per_modality:
                     continue
                 qz = qz_per_modality[name]
                 n_lat = self.module.n_latent_dict[name]
-                prior = _Normal(
+                base_prior = _Normal(
                     torch.zeros(n_lat, device=qz.loc.device),
                     torch.ones(n_lat, device=qz.loc.device),
                 )
-                kl_per_dim = _kld(qz, prior)  # (n_cells, n_latent)
-                if name in masks:
-                    m = masks[name].float().unsqueeze(-1)
-                    kl_per_dim = kl_per_dim * m
-                    n_cells[name] += int(masks[name].sum().item())
-                else:
-                    n_cells[name] += kl_per_dim.shape[0]
+                kl_per_dim = _kld(qz, base_prior)  # (n_cells, n_latent)
+                assert name in masks, f"inference() must populate masks[{name!r}]"
+                m = masks[name].float().unsqueeze(-1)
+                kl_per_dim = kl_per_dim * m
+                n_cells[name] += int(masks[name].sum().item())
                 running = kl_per_dim.sum(dim=0).detach().cpu()
-                if kl_sum[name] is None:
-                    kl_sum[name] = running
-                else:
-                    kl_sum[name] = kl_sum[name] + running
+                base_kl_sum[name] = running if base_kl_sum[name] is None else base_kl_sum[name] + running
+
+                if has_horseshoe and name in horseshoe_per_modality:
+                    hs_dist = horseshoe_per_modality[name]
+                    n_active = self.module.n_active_latent_per_cell
+                    total_lat = self.module.total_latent_dim
+                    _hs_shape = torch.tensor(
+                        n_active / total_lat,
+                        device=qz.loc.device,
+                        dtype=qz.loc.dtype,
+                    )
+                    if self.module.horseshoe_latent_z_prior_type == "lognormal":
+                        _sigma_0_sq = torch.log(1 + 1 / _hs_shape)
+                        _mu_0 = torch.log(_hs_shape) - _sigma_0_sq / 2
+                        _sigma_0 = torch.sqrt(_sigma_0_sq)
+                        prior = _LogNormal(_mu_0, _sigma_0)
+                        hs_kl_per_dim = _kld(hs_dist, prior)  # (n_cells, n_latent)
+                    else:  # lognormal_mc / gamma — MC estimator using current sample
+                        z_gamma = z_gamma_per_modality[name].clamp_min(1e-6)
+                        log_q = hs_dist.log_prob(z_gamma)
+                        if self.module.horseshoe_latent_z_prior_type == "lognormal_mc":
+                            _sigma_0_sq = torch.log(1 + 1 / _hs_shape)
+                            _mu_0 = torch.log(_hs_shape) - _sigma_0_sq / 2
+                            _sigma_0 = torch.sqrt(_sigma_0_sq)
+                            prior = _LogNormal(_mu_0, _sigma_0)
+                        else:
+                            prior = _Gamma(
+                                concentration=_hs_shape,
+                                rate=torch.tensor(1.0, device=qz.loc.device, dtype=qz.loc.dtype),
+                            )
+                        log_p = prior.log_prob(z_gamma)
+                        hs_kl_per_dim = log_q - log_p
+                    hs_kl_per_dim = hs_kl_per_dim * m
+                    hs_running = hs_kl_per_dim.sum(dim=0).detach().cpu()
+                    hs_kl_sum[name] = hs_running if hs_kl_sum[name] is None else hs_kl_sum[name] + hs_running
 
         result: dict[str, np.ndarray] = {}
-        for name in self.module.modality_names:
-            if kl_sum[name] is None or n_cells[name] == 0:
+        for name in modality_names:
+            if base_kl_sum[name] is None or n_cells[name] == 0:
                 continue
-            result[name] = (kl_sum[name] / float(n_cells[name])).numpy()
+            kl = base_kl_sum[name] / float(n_cells[name])
+            if has_horseshoe and hs_kl_sum[name] is not None:
+                kl = kl + hs_kl_sum[name] / float(n_cells[name])
+            if has_ard and name in self.module.ard_z_alpha_loc:
+                # Analytical Normal-Normal KL on the underlying log-space, per dim.
+                ard_loc = self.module.ard_z_alpha_loc[name].detach().cpu()
+                ard_scale = torch.exp(self.module.ard_z_alpha_log_scale[name].detach()).cpu()
+                _q = _Normal(ard_loc, ard_scale)
+                _p = _Normal(
+                    torch.full_like(ard_loc, float(self.module.ard_prior_mu.item())),
+                    torch.full_like(ard_scale, float(self.module.ard_prior_sigma.item())),
+                )
+                ard_kl_per_dim = _kld(_q, _p)  # (n_latent,) — global, no per-cell average needed
+                kl = kl + ard_kl_per_dim
+            result[name] = kl.numpy()
         return result
 
     def get_modality_latents(self, **kwargs) -> dict[str, np.ndarray]:

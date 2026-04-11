@@ -340,23 +340,28 @@ class RegularizedEncoder(nn.Module):
             self.var_activation = torch.exp if var_activation is None else var_activation
 
         # Pre-initialise the var head bias so the initial qz.scale (std) ≈ var_init_scale.
-        # var_activation produces variance q_v; std = sqrt(q_v + var_eps). Target q_v = s² so
-        # std ≈ s. With softplus: softplus(bias) = s² ⇒ bias = softplus_inv(s²).
-        # We also zero the var_encoder weight so the init scale is uniform across cells.
+        # var_activation produces the variance q_v; std = sqrt(q_v + var_eps). Target q_v = s²
+        # so std ≈ s. The bias formula depends on the activation:
+        #   * softplus: softplus(bias) = s² ⇒ bias = softplus_inv(s²) = log(expm1(s²))
+        #   * exp:      exp(bias)      = s² ⇒ bias = 2 * log(s)
+        # We rescale the var head weights to a small N(0, 0.1) gaussian so cells start with
+        # tiny but non-zero spread around the target std (Pyro AutoNormal-style narrow init,
+        # not a hard-pinned constant). Same treatment is applied to the loc head when explicit
+        # init is requested elsewhere (horseshoe posterior init in _multimodule.py).
         if var_init_scale is not None:
-            if not use_softplus_var_activation:
-                raise ValueError(
-                    "var_init_scale requires use_softplus_var_activation=True so the "
-                    "post-activation variance is bounded and the bias init is well-defined."
-                )
+            if float(var_init_scale) <= 0.0:
+                raise ValueError(f"var_init_scale must be > 0 if set, got {var_init_scale!r}")
             with torch.no_grad():
                 s_sq = float(var_init_scale) ** 2
-                if s_sq > 20.0:
-                    bias_val = s_sq
+                if use_softplus_var_activation:
+                    # bias = softplus_inv(s²) = log(expm1(s²)); switch to identity for large s²
+                    bias_val = s_sq if s_sq > 20.0 else float(np.log(np.expm1(s_sq)))
                 else:
-                    bias_val = float(np.log(np.expm1(s_sq)))
+                    # exp activation: bias = log(s²) = 2 * log(s)
+                    bias_val = float(np.log(s_sq))
                 self.var_encoder.bias.fill_(bias_val)
-                self.var_encoder.weight.zero_()
+                # Small but non-zero cell-dependence at init: weight ~ N(0, 0.1).
+                self.var_encoder.weight.normal_(mean=0.0, std=0.1)
 
     def forward(self, x: torch.Tensor, *cat_list: int):
         r"""The forward computation for a single sample.
