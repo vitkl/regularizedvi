@@ -273,11 +273,7 @@ class AmbientRegularizedSCVI(
         super().__init__(adata)
 
         # Apply decoder-type defaults for dispersion priors (None → from DECODER_TYPE_DEFAULTS)
-        from regularizedvi._constants import (
-            DATA_DRIVEN_DISPERSION_INIT,
-            DATA_INIT_DECODER_TYPES,
-            DECODER_TYPE_DEFAULTS,
-        )
+        from regularizedvi._constants import DECODER_TYPE_DEFAULTS
 
         # B4 validation: "data" dispersion_init is MoM on marginal variance and is
         # incompatible with burst_frequency_size (which needs variance_burst_size).
@@ -287,9 +283,6 @@ class AmbientRegularizedSCVI(
                 "Use dispersion_init='variance_burst_size' for burst decoders."
             )
 
-        # B4 routing: for data-init decoders on a data-driven init path, user hyper-prior
-        # overrides are ignored and replaced with MoM-derived values (warned below, post-init).
-        _is_data_init_path = decoder_type in DATA_INIT_DECODER_TYPES and dispersion_init in DATA_DRIVEN_DISPERSION_INIT
         _dt_defaults = DECODER_TYPE_DEFAULTS.get(decoder_type, DECODER_TYPE_DEFAULTS["expected_RNA"])
         if dispersion_hyper_prior_mean is None:
             dispersion_hyper_prior_mean = _dt_defaults["dispersion_hyper_prior_mean"]

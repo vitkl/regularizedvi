@@ -2538,6 +2538,22 @@ class TestBurstInitFixes:
         sp2 = torch.nn.functional.softplus(bias_2x)
         assert torch.allclose(sp2, 2.0 * sp1, rtol=1e-4, atol=1e-4), f"sp1={sp1[:5]}, sp2={sp2[:5]}"
 
+    def test_dispersion_init_bio_frac_as_dict(self, mdata):
+        """Item 3a: per-modality dispersion_init_bio_frac dict routes values correctly."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            decoder_type="expected_RNA",
+            dispersion_init="data",
+            dispersion_init_bio_frac={"rna": 0.95, "atac": 0.5},
+        )
+        stored_bf = model._dispersion_init_bio_frac
+        assert isinstance(stored_bf, dict), f"expected dict, got {type(stored_bf)}"
+        assert stored_bf["rna"] == 0.95
+        assert stored_bf["atac"] == 0.5
+
 
 class TestBurstInitPerFeatureBounds:
     """Item 1/2/3/3a: per-feature stochastic_v bounds + scalar burst_size/burst_freq bounds."""
