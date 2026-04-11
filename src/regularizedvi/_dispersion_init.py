@@ -10,11 +10,116 @@ on large datasets (100k–1M+ cells).
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
+from typing import Literal, NamedTuple
 
 import h5py
 import numpy as np
 import scipy.sparse as sp
+
+
+class DispersionHyperPriorParams(NamedTuple):
+    """Resolved hyper-prior parameters for the 2-level dispersion containment prior."""
+
+    alpha: float
+    beta: float
+    lambda_init: float
+    px_r_mu_init: float  # scale-space → log-variance; overridden by data-driven init
+
+
+def resolve_dispersion_hyper_prior_params(
+    mean: float,
+    alpha: float,
+    direction: Literal["inverse_sqrt", "sqrt"],
+    init_mode: Literal["variance", "dispersion"],
+) -> DispersionHyperPriorParams:
+    """Resolve dispersion hyper-prior parameters from user-facing mean.
+
+    SINGLE SOURCE OF TRUTH for (mean, alpha, direction, init_mode) →
+    (alpha, beta, lambda_init, px_r_mu_init).
+
+    Semantics (READ CAREFULLY — the conversion β = α · mean is unusual)
+    --------------------------------------------------------------------
+    The two-level prior is:
+        MoM ~ Exp(λ)                [containment prior, λ is the RATE]
+        λ   ~ Gamma(α, β)           [hyper-prior, PyTorch rate form]
+
+    `mean` here is the **prior mean of the MoM estimate itself**, i.e.
+    `mean = E[MoM] = 1/λ`. It is NOT the mean of the Gamma (which would be
+    `E[λ] = α/β`). Under this semantics:
+
+        E[MoM]  = 1/λ           →  λ_init = 1/mean
+        E[λ]    = α/β = 1/mean   →  β = α · mean     (NOT α/mean)
+
+    If you ever find yourself writing β = α/mean, you are treating `mean` as
+    E[λ] instead of E[MoM] — wrong under this plan's semantics, and
+    inconsistent with the existing code at _dispersion_init.py:641 and
+    _model.py:574, which already use α · mean.
+
+    Parameters
+    ----------
+    mean : float
+        Prior mean of the MoM estimate. In **scale space** (sqrt of variance),
+        not variance-space. For example, setting mean=3 means "typical
+        sqrt(theta) ≈ 3" (under direction='sqrt'), NOT "typical theta ≈ 3".
+    alpha : float
+        Gamma hyper-prior concentration. Controls how tight the hyper-prior is
+        around λ_init = 1/mean.
+    direction : {"inverse_sqrt", "sqrt"}
+        Only used for init_mode="dispersion". Ignored for init_mode="variance".
+    init_mode : {"variance", "dispersion"}
+        "variance"   — called from compute_bursting_init. MoM = sqrt(v).
+                       (Formerly called "burst" but renamed since the init just
+                       computes variance from excess_technical.)
+        "dispersion" — called from compute_dispersion_init. MoM depends on direction.
+
+    Returns
+    -------
+    DispersionHyperPriorParams with α, β, λ_init, px_r_mu_init.
+
+    Note: `px_r_mu_init` is the scalar fallback used when `dispersion_init != "data"`.
+    When data-driven init is active, the caller overrides px_r_mu with a per-feature
+    tensor from compute_dispersion_init / compute_bursting_init, and only α, β, λ_init
+    from this function are used.
+    """
+    if mean <= 0:
+        raise ValueError(f"dispersion_hyper_prior_mean must be > 0, got {mean}")
+    if alpha <= 0:
+        raise ValueError(f"dispersion_hyper_prior_alpha must be > 0, got {alpha}")
+
+    # Step 1: Exponential containment prior — E[MoM] = 1/λ ≈ mean  →  λ_init = 1/mean
+    lambda_init = 1.0 / mean
+
+    # Step 2: Gamma hyper-prior — E[λ] = α/β = 1/mean  →  β = α · mean
+    #         (Product, not quotient — see docstring Semantics section.)
+    beta = alpha * mean
+
+    # Step 3: px_r_mu_init — log(theta) or log(v), at containment-prior equilibrium.
+    #         `px_r_mu` stores log(VARIANCE) (verified at _module.py:918,929 + _model.py:668-671).
+    #         `mean` is in scale space, so log(variance) = log(mean²).
+    log_mean_sq = 2.0 * math.log(mean)
+    if init_mode == "variance":
+        # sqrt(v) = mean  →  v = mean²  →  px_r_mu_init = log(mean²)
+        px_r_mu_init = log_mean_sq
+    elif init_mode == "dispersion":
+        if direction == "sqrt":
+            # sqrt(theta) = mean  →  theta = mean²  →  px_r_mu_init = log(mean²)
+            px_r_mu_init = log_mean_sq
+        elif direction == "inverse_sqrt":
+            # 1/sqrt(theta) = mean  →  theta = 1/mean²  →  px_r_mu_init = -log(mean²)
+            px_r_mu_init = -log_mean_sq
+        else:
+            raise ValueError(f"direction must be 'sqrt' or 'inverse_sqrt', got {direction!r}")
+    else:
+        raise ValueError(f"init_mode must be 'variance' or 'dispersion', got {init_mode!r}")
+
+    return DispersionHyperPriorParams(
+        alpha=float(alpha),
+        beta=float(beta),
+        lambda_init=float(lambda_init),
+        px_r_mu_init=float(px_r_mu_init),
+    )
 
 
 def _decode(v):
@@ -90,11 +195,12 @@ def compute_dispersion_init(
     dispersion_key: str | None = None,
     biological_variance_fraction: float = 0.9,
     theta_min: float = 0.01,
-    theta_max: float = 10.0,
+    theta_max: float = 20.0,
     chunk_size: int = 5000,
     feature_type: str | None = None,
     label_key: str | None = None,
     min_cells_per_group: int = 50,
+    dispersion_prior_direction: Literal["inverse_sqrt", "sqrt"] = "inverse_sqrt",
     verbose: bool = True,
 ) -> tuple[np.ndarray, dict]:
     """Compute per-gene NB dispersion init from method of moments on raw counts.
@@ -137,6 +243,11 @@ def compute_dispersion_init(
         labels or fewer than ``min_cells_per_group`` cells are excluded.
     min_cells_per_group
         Minimum cells required per group when ``label_key`` is set.
+    dispersion_prior_direction
+        Direction of the MoM transform used to compute the suggested hyper-prior
+        mean returned in diagnostics. "inverse_sqrt" (default) computes
+        mean(1/sqrt(theta_clamped)); "sqrt" computes mean(sqrt(theta_clamped)).
+        Does not affect the returned log_theta array.
     verbose
         Print progress.
 
@@ -165,6 +276,7 @@ def compute_dispersion_init(
             theta_max,
             chunk_size,
             feature_type,
+            dispersion_prior_direction,
             verbose,
         )
     else:
@@ -183,6 +295,7 @@ def compute_dispersion_init(
             chunk_size,
             label_key,
             min_cells_per_group,
+            dispersion_prior_direction,
             verbose,
         )
 
@@ -196,6 +309,7 @@ def _compute_from_h5ad(
     theta_max,
     chunk_size,
     feature_type,
+    dispersion_prior_direction,
     verbose,
 ):
     """Compute dispersion init from h5ad file using chunked h5py."""
@@ -300,6 +414,7 @@ def _compute_from_h5ad(
         biological_variance_fraction,
         theta_min,
         theta_max,
+        dispersion_prior_direction,
         verbose,
     )
 
@@ -314,6 +429,7 @@ def _compute_from_anndata(
     chunk_size,
     label_key,
     min_cells_per_group,
+    dispersion_prior_direction,
     verbose,
 ):
     """Compute dispersion init from in-memory AnnData."""
@@ -397,6 +513,7 @@ def _compute_from_anndata(
         biological_variance_fraction,
         theta_min,
         theta_max,
+        dispersion_prior_direction,
         verbose,
     )
 
@@ -474,6 +591,7 @@ def _compute_theta(
     biological_variance_fraction,
     theta_min,
     theta_max,
+    dispersion_prior_direction,
     verbose,
 ):
     """Compute theta from per-gene mean/variance and library stats.
@@ -514,6 +632,16 @@ def _compute_theta(
     theta_clamped = np.clip(theta_option1, _effective_min, theta_max)
     log_theta = np.log(theta_clamped).astype(np.float32)
 
+    # Item 4: direction-aware suggested hyper-prior mean from clipped theta.
+    # MoM = 1/sqrt(theta) or sqrt(theta) depending on dispersion_prior_direction.
+    if dispersion_prior_direction == "sqrt":
+        _mom = np.sqrt(theta_clamped)
+    elif dispersion_prior_direction == "inverse_sqrt":
+        _mom = 1.0 / np.sqrt(theta_clamped)
+    else:
+        raise ValueError(f"direction must be 'sqrt' or 'inverse_sqrt', got {dispersion_prior_direction!r}")
+    suggested_hyper_mean = float(np.mean(_mom))
+
     n_sub_poisson = int((excess_raw <= 0).sum())
 
     if verbose:
@@ -547,6 +675,8 @@ def _compute_theta(
         "theta_min": theta_min,
         "theta_max": theta_max,
         "biological_variance_fraction": biological_variance_fraction,
+        "suggested_hyper_mean": suggested_hyper_mean,
+        "dispersion_prior_direction": dispersion_prior_direction,
     }
 
     return log_theta, diagnostics
@@ -559,9 +689,11 @@ def compute_bursting_init(
     biological_variance_fraction: float = 0.9,
     burst_size_intercept: float = 1.0,
     sensitivity: float = 1.0,
-    dispersion_hyper_prior_alpha: float = 2.0,
-    theta_min: float = 0.01,
-    theta_max: float = 10.0,
+    theta_min: float = 0.01,  # SHARED with compute_dispersion_init (Item 1)
+    theta_max: float = 20.0,  # SHARED with compute_dispersion_init (Items 1 & 3)
+    burst_size_min: float = 0.01,  # Item 2 — scalar (no theta derivation)
+    burst_size_max: float = 20.0,  # Item 2 — scalar (no theta derivation)
+    dispersion_prior_direction: Literal["inverse_sqrt", "sqrt"] = "inverse_sqrt",
     chunk_size: int = 5000,
     feature_type: str | None = None,
     verbose: bool = True,
@@ -591,11 +723,19 @@ def compute_bursting_init(
     sensitivity
         Library centering sensitivity (e.g. 1.0 for RNA, 0.2 for ATAC).
         Used to normalize burst_size to rate-space.
-    dispersion_hyper_prior_alpha
-        Alpha of the Gamma hyper-prior on stochastic_v rate. Used to compute
-        suggested_hyper_beta from MoM estimates.
     theta_min, theta_max
-        Clamp range for burst_freq (same as theta).
+        Clamp range for burst_freq AND for deriving the per-feature
+        stochastic_v_scale bounds (Item 1): ``sv_min_g = mean_g / sqrt(theta_max)``
+        and ``sv_max_g = mean_g / sqrt(theta_min)``. Defaults are shared with
+        ``compute_dispersion_init`` to keep the ``excess_technical`` invariant
+        consistent across both init paths.
+    burst_size_min, burst_size_max
+        Scalar bounds on ``burst_size_total`` (Item 2). Unlike
+        ``stochastic_v_scale``, ``burst_size`` is a biological burst amplitude
+        in rate-space and has no natural theta-based bound.
+    dispersion_prior_direction
+        API-symmetric flag with ``compute_dispersion_init``. Silently ignored
+        for burst init because the MoM transform is always ``sqrt(v)``.
     chunk_size
         Cells per chunk for Welford computation.
     feature_type
@@ -607,11 +747,13 @@ def compute_bursting_init(
     -------
     init_values : dict
         Keys: 'stochastic_v_scale', 'burst_freq_bias', 'burst_size_bias',
-        'log_theta', 'burst_freq', 'burst_size', 'suggested_hyper_beta'.
-        All arrays are shape (n_genes,) except suggested_hyper_beta (scalar).
+        'log_theta', 'burst_freq', 'burst_size', 'suggested_hyper_mean'.
+        All arrays are shape (n_genes,) except suggested_hyper_mean (scalar).
     diagnostics : dict
         Intermediate quantities for inspection.
     """
+    del dispersion_prior_direction  # API-symmetric only — burst always uses sqrt(v) MoM.
+
     # First compute theta via existing MoM (reuse all the machinery)
     log_theta, diagnostics = compute_dispersion_init(
         adata_or_path,
@@ -631,25 +773,31 @@ def compute_bursting_init(
 
     # Split excess into biological and technical components
     technical_fraction = 1 - biological_variance_fraction
-    excess_technical = np.maximum(excess_adjusted * technical_fraction, eps**2)
     excess_biological = np.maximum(excess_adjusted * biological_variance_fraction, eps**2)
 
-    # stochastic_v: scale param (std-like), then .pow(2) gives variance in the model
-    stochastic_v_scale = np.sqrt(excess_technical)
+    # stochastic_v: scale param (std-like), then .pow(2) gives variance in the model.
+    # Item 1: per-feature bounds derived from theta_min/theta_max (not scalar).
+    # From excess_technical = mean_g² / theta  ⇒  sqrt(excess_technical) = mean_g / sqrt(theta).
+    raw_sv = np.sqrt(np.maximum(excess_adjusted * technical_fraction, 0.0))
+    sv_min_g = mean_g / np.sqrt(theta_max)
+    sv_max_g = mean_g / np.sqrt(theta_min)
+    stochastic_v_scale = np.clip(raw_sv, sv_min_g, sv_max_g)
 
-    # Auto-derive hyper-prior beta from MoM: E[lambda] = 1/median(stochastic_v_scale)
-    _median_sv = float(np.median(stochastic_v_scale))
-    suggested_hyper_beta = dispersion_hyper_prior_alpha * max(_median_sv, eps)
+    # Item 4: use MEAN (not median); rename suggested_hyper_beta -> suggested_hyper_mean.
+    # Floor by the global min of the per-feature lower bound (no scalar floor exists).
+    _mean_sv = float(np.mean(stochastic_v_scale))
+    suggested_hyper_mean = max(_mean_sv, float(np.min(sv_min_g)))
 
-    # burst_freq: biological concentration = mean^2 / excess_biological
+    # burst_freq: biological concentration = mean^2 / excess_biological.
+    # Item 3: clamped to [theta_min, theta_max] (now defaulting to 20).
     burst_freq = np.clip(mean_g**2 / excess_biological, theta_min, theta_max)
 
-    # burst_size: rate-space (divide by sensitivity), then subtract intercept, then inv_softplus
+    # burst_size: rate-space (divide by sensitivity), then subtract intercept, then inv_softplus.
+    # Item 2: scalar bounds [burst_size_min, burst_size_max].
     valid = burst_freq > eps
-    burst_size_total = np.where(valid, mean_g / (burst_freq * sensitivity), 0.0)
-    default_burst_size = np.min(burst_size_total[valid]) if np.any(valid) else 1.0
-    burst_size_raw_val = np.where(valid, burst_size_total, default_burst_size) - burst_size_intercept
-    burst_size_raw_val = np.maximum(burst_size_raw_val, eps)
+    burst_size_raw = np.where(valid, mean_g / (burst_freq * sensitivity), burst_size_min)
+    burst_size_total = np.clip(burst_size_raw, burst_size_min, burst_size_max)
+    burst_size_raw_val = np.maximum(burst_size_total - burst_size_intercept, 1e-4)
     burst_size_bias = np.log(np.expm1(burst_size_raw_val)).astype(np.float32)  # inv_softplus
 
     # burst_freq bias: inv_softplus(burst_freq) for decoder bias init
@@ -664,15 +812,11 @@ def compute_bursting_init(
         print(f"    burst_freq: median={np.median(burst_freq):.4f}, mean={np.mean(burst_freq):.4f}")
         print(
             f"    burst_size (rate-space, sens={sensitivity}): "
-            f"median={np.median(burst_size_total[valid]):.4f}, "
-            f"mean={np.mean(burst_size_total[valid]):.4f}"
+            f"median={float(np.median(burst_size_total)):.4f}, "
+            f"mean={float(np.mean(burst_size_total)):.4f}"
         )
-        print(f"    genes with valid burst_size: {np.sum(valid)}/{len(mean_g)}")
-        _suggested_lambda = dispersion_hyper_prior_alpha / suggested_hyper_beta
-        print(
-            f"    suggested hyper-prior: Gamma({dispersion_hyper_prior_alpha}, {suggested_hyper_beta:.4f})"
-            f" → E[λ]={_suggested_lambda:.1f}"
-        )
+        print(f"    genes with valid burst_size: {int(np.sum(valid))}/{len(mean_g)}")
+        print(f"    suggested_hyper_mean (MoM = sqrt(v)): {suggested_hyper_mean:.4f}")
 
     init_values = {
         "burst_freq_bias": burst_freq_bias,
@@ -681,7 +825,7 @@ def compute_bursting_init(
         "burst_freq": burst_freq.astype(np.float32),
         "burst_size": burst_size_total.astype(np.float32),
         "stochastic_v_scale": stochastic_v_scale.astype(np.float32),
-        "suggested_hyper_beta": suggested_hyper_beta,
+        "suggested_hyper_mean": suggested_hyper_mean,
     }
 
     return init_values, diagnostics

@@ -22,13 +22,17 @@ DEFAULT_DECODER_WEIGHT_L2 = 0.0
 
 # --- Dispersion regularisation (containment prior) ---
 DEFAULT_REGULARISE_DISPERSION = True
-DEFAULT_REGULARISE_DISPERSION_PRIOR = 3.0
 
 # --- Hierarchical dispersion hyper-prior (cell2location-style) ---
-# Gamma(alpha, beta) hyper-prior on the Exponential rate parameter.
-# Mean = alpha/beta = 9/3 = 3.0, concentrated around the default rate.
+# Two-level prior: MoM ~ Exp(lambda); lambda ~ Gamma(alpha, beta).
+# Parameterised by (alpha, mean) where `mean` is the prior mean of the MoM
+# estimate itself (= 1/lambda), NOT the mean of the Gamma on lambda.
+# Conversion: beta = alpha * mean (NOT alpha / mean) — see the docstring of
+# resolve_dispersion_hyper_prior_params in _dispersion_init.py for the full
+# Semantics block. Default mean = 1/3 encodes E[1/sqrt(theta)] ≈ 0.333 →
+# theta ≈ 9 at unit mu, preserving the old Gamma(9, 3) behaviour numerically.
 DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA = 9.0
-DEFAULT_DISPERSION_HYPER_PRIOR_BETA = 3.0
+DEFAULT_DISPERSION_HYPER_PRIOR_MEAN = 1.0 / 3.0
 
 # --- Additive background prior (cell2location-style s_g_gene_add) ---
 # Gamma(alpha, beta) prior on exp(additive_background); mean = alpha/beta = 0.01.
@@ -69,18 +73,29 @@ DEFAULT_BURST_SIZE_INTERCEPT = 1.0
 
 # --- Per-decoder-type default hyperparameters ---
 # Auto-applied when user doesn't override. Different decoder types need different priors.
+# Preserves old numerical behaviour for inverse_sqrt expected_RNA; burst default
+# updated to match expected_RNA's encoding of theta=9 at unit mu (see plan Item 4
+# for derivation).
 DECODER_TYPE_DEFAULTS = {
     "expected_RNA": {
-        "dispersion_hyper_prior_alpha": DEFAULT_DISPERSION_HYPER_PRIOR_ALPHA,  # 9.0
-        "dispersion_hyper_prior_beta": DEFAULT_DISPERSION_HYPER_PRIOR_BETA,  # 3.0
-        "regularise_dispersion_prior": DEFAULT_REGULARISE_DISPERSION_PRIOR,  # 3.0
+        # inverse_sqrt path; preserves old Gamma(9,3) → E[lambda]=3 behaviour:
+        # mean=1/3 → β=9·(1/3)=3, λ_init=3, px_r_mu_init=log(9)=+2.197
+        "dispersion_hyper_prior_alpha": 9.0,
+        "dispersion_hyper_prior_mean": 1.0 / 3.0,
     },
     "burst_frequency_size": {
-        # Gamma(2, 0.04) hyper-prior: E[lambda]=50, marginal median(v_std)=0.017
-        # Wider than expected_RNA because technical variance spans ~3 orders of magnitude.
+        # Matches expected_RNA's encoding of theta=9 at reference mu=1.
+        # Both decoders share the SAME excess_technical decomposition in
+        # _dispersion_init.py:108-111 and 634-638:
+        #   NB:    theta_g = mu² / excess_technical
+        #   burst: stochastic_v² = excess_technical, stochastic_v_scale = sqrt(excess_technical)
+        # So at mu=1: theta=9 ⟺ excess_technical = 1/9 ⟺ stochastic_v_scale = 1/3.
+        # Setting mean = 1/3 here gives β = α · mean = 2/3 ≈ 0.667 (NOT the old
+        # 0.04). The old default 0.04 corresponded to mean=0.02 which encoded
+        # ~280× tighter variance — a latent bug, since the burst path was always
+        # used with data-driven init in practice and the fallback was rarely hit.
         "dispersion_hyper_prior_alpha": 2.0,
-        "dispersion_hyper_prior_beta": 0.04,
-        "regularise_dispersion_prior": 3.0,
+        "dispersion_hyper_prior_mean": 1.0 / 3.0,
     },
 }
 
@@ -93,15 +108,6 @@ DATA_INIT_DECODER_TYPES = frozenset({"burst_frequency_size"})
 # dispersion_init modes that actually run MoM / variance-decomposition and produce
 # auto-derived hyper-prior suggestions.
 DATA_DRIVEN_DISPERSION_INIT = frozenset({"data", "variance_burst_size"})
-
-# --- Auto-derived hyper-prior lambda bounds (sanity filter only) ---
-# When auto-deriving dispersion_hyper_prior_beta from MoM stochastic_v,
-# clamp E[lambda] = alpha/beta to reject only ridiculous values. Lambda is the
-# Exponential rate for sqrt(stochastic_v), so target sqrt(v) scale = 1/lambda.
-# LAMBDA_MIN=1e-4  → rejects scale > 10000 (ridiculously large technical variance)
-# LAMBDA_MAX=100   → rejects scale < 0.01   (ridiculously small technical variance)
-AUTO_HYPER_PRIOR_LAMBDA_MIN = 1e-4
-AUTO_HYPER_PRIOR_LAMBDA_MAX = 100.0
 
 # --- Network architecture ---
 DEFAULT_USE_BATCH_NORM = "none"

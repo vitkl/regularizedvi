@@ -144,12 +144,21 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         List of modality names that get per-feature feature scaling.
     regularise_dispersion
         Enable dispersion regularization.
-    regularise_dispersion_prior
-        Initialization for the Exponential containment prior rate parameter.
+    dispersion_hyper_prior_mean
+        Prior mean of the MoM dispersion estimate (in scale space, e.g.
+        ``1/sqrt(theta)`` or ``sqrt(stochastic_v²) = stochastic_v_scale``).
+        Scalar (broadcast to all modalities) or dict per modality.
+        ``None`` falls back to ``DECODER_TYPE_DEFAULTS`` per modality.
+        Internally: ``lambda_init = 1/mean``, ``beta = alpha * mean``.
     dispersion_hyper_prior_alpha
-        Alpha for Gamma hyper-prior on learned rate.
-    dispersion_hyper_prior_beta
-        Beta for Gamma hyper-prior on learned rate.
+        Alpha for Gamma hyper-prior on learned Exponential rate.
+        Scalar or dict per modality. ``None`` falls back to defaults.
+    dispersion_prior_direction
+        Exponential containment prior direction for ``expected_RNA`` decoders.
+        ``"inverse_sqrt"`` (default): ``1/sqrt(theta) ~ Exp(lambda)`` (pushes theta large).
+        ``"sqrt"``: ``sqrt(theta) ~ Exp(lambda)`` (original ``be4ac30`` behaviour).
+        Ignored for ``burst_frequency_size`` (which always uses ``sqrt(v)``).
+        Scalar or dict per modality.
     use_batch_norm
         Where to use BatchNorm.
     use_layer_norm
@@ -191,9 +200,9 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         additive_background_modalities: list[str] | None = None,
         feature_scaling_modalities: list[str] | None = None,
         regularise_dispersion: bool = True,
-        regularise_dispersion_prior: dict[str, float] | float | None = None,
+        dispersion_hyper_prior_mean: dict[str, float] | float | None = None,
         dispersion_hyper_prior_alpha: dict[str, float] | float | None = None,
-        dispersion_hyper_prior_beta: dict[str, float] | float | None = None,
+        dispersion_prior_direction: dict[str, str] | str = "inverse_sqrt",
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "none",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         encode_covariates: bool = False,
@@ -331,41 +340,53 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # None → use decoder-type defaults from DECODER_TYPE_DEFAULTS
         # scalar → broadcast to all modalities (user override)
         # dict → per-modality (user override)
+        #
+        # All math for (mean, alpha, direction, init_mode) → (alpha, beta, lambda_init,
+        # px_r_mu_init) lives in resolve_dispersion_hyper_prior_params. We store `mean`
+        # separately and re-derive β = α · mean in the loss to avoid drift.
+        from regularizedvi._components import softplus_inverse
         from regularizedvi._constants import DECODER_TYPE_DEFAULTS
+        from regularizedvi._dispersion_init import resolve_dispersion_hyper_prior_params
 
+        self.dispersion_hyper_prior_params = {}  # name → DispersionHyperPriorParams
+        self.dispersion_hyper_prior_mean_dict = {}  # name → mean (for loss-time β re-derivation)
         self.dispersion_hyper_prior_alpha_dict = {}
-        self.dispersion_hyper_prior_beta_dict = {}
-        self.regularise_dispersion_prior_dict = {}
+        self.dispersion_prior_direction_dict = {}
 
         # Resolve user values (None stays None, scalar→dict, dict stays dict)
+        _mean_user = (
+            _resolve_per_modality(dispersion_hyper_prior_mean, self.modality_names)
+            if dispersion_hyper_prior_mean is not None
+            else None
+        )
         _alpha_user = (
             _resolve_per_modality(dispersion_hyper_prior_alpha, self.modality_names)
             if dispersion_hyper_prior_alpha is not None
             else None
         )
-        _beta_user = (
-            _resolve_per_modality(dispersion_hyper_prior_beta, self.modality_names)
-            if dispersion_hyper_prior_beta is not None
-            else None
-        )
-        _prior_user = (
-            _resolve_per_modality(regularise_dispersion_prior, self.modality_names)
-            if regularise_dispersion_prior is not None
-            else None
+        _dir_user = (
+            _resolve_per_modality(dispersion_prior_direction, self.modality_names)
+            if not isinstance(dispersion_prior_direction, str)
+            else dict.fromkeys(self.modality_names, dispersion_prior_direction)
         )
 
         for name in self.modality_names:
-            dt = decoder_type_dict[name]
-            dt_defaults = DECODER_TYPE_DEFAULTS.get(dt, DECODER_TYPE_DEFAULTS["expected_RNA"])
-            self.dispersion_hyper_prior_alpha_dict[name] = (
-                _alpha_user[name] if _alpha_user is not None else dt_defaults["dispersion_hyper_prior_alpha"]
+            _dt = decoder_type_dict[name]
+            _dt_defaults = DECODER_TYPE_DEFAULTS.get(_dt, DECODER_TYPE_DEFAULTS["expected_RNA"])
+            _init_mode = "variance" if _dt == "burst_frequency_size" else "dispersion"
+            _mean = _mean_user[name] if _mean_user is not None else _dt_defaults["dispersion_hyper_prior_mean"]
+            _alpha = _alpha_user[name] if _alpha_user is not None else _dt_defaults["dispersion_hyper_prior_alpha"]
+            _dir = _dir_user[name]
+            self.dispersion_hyper_prior_params[name] = resolve_dispersion_hyper_prior_params(
+                mean=_mean,
+                alpha=_alpha,
+                direction=_dir,
+                init_mode=_init_mode,
             )
-            self.dispersion_hyper_prior_beta_dict[name] = (
-                _beta_user[name] if _beta_user is not None else dt_defaults["dispersion_hyper_prior_beta"]
-            )
-            self.regularise_dispersion_prior_dict[name] = (
-                _prior_user[name] if _prior_user is not None else dt_defaults["regularise_dispersion_prior"]
-            )
+            self.dispersion_hyper_prior_mean_dict[name] = _mean
+            self.dispersion_hyper_prior_alpha_dict[name] = _alpha
+            self.dispersion_prior_direction_dict[name] = _dir
+        # NO _beta_dict exposed — re-derive in loss.
 
         # Feature scaling scaling covariates (cell2location-style detection_tech_gene)
         self.n_cats_per_feature_scaling_cov = n_cats_per_feature_scaling_cov or []
@@ -497,11 +518,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             # Pre-init horseshoe q(λ) posterior so LogNormal(loc=log(M), scale=S):
             #   - mean_encoder.bias = log(M) ⇒ underlying Normal loc = log(M) ⇒ LogNormal median = M
             #   - var_encoder.bias  set so post-activation variance = S² ⇒ std = S
-            # The bias formula depends on the variational var activation:
-            #   * softplus: bias = softplus_inv(S²) = log(expm1(S²))
-            #   * exp:      bias = log(S²) = 2*log(S)
-            # Mean and var head weights are rescaled to N(0, 0.1) — small but non-zero
-            # cell-dependence at init, consistent with the Z encoder's var head treatment.
+            # (mean_encoder.weight is left at PyTorch default; var_encoder.weight was already
+            #  scaled by 0.1× inside RegularizedEncoder when var_init_scale is set.)
             _M = float(self.horseshoe_posterior_init_loc)
             _S = float(self.horseshoe_posterior_init_scale)
             _log_M = math.log(_M)
@@ -514,9 +532,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 for name in self.modality_names:
                     enc = self.horseshoe_encoders[name]
                     enc.mean_encoder.bias.fill_(_log_M)
-                    enc.mean_encoder.weight.normal_(mean=0.0, std=0.1)
                     enc.var_encoder.bias.fill_(_var_bias)
-                    enc.var_encoder.weight.normal_(mean=0.0, std=0.1)
 
         # ---- Single encoder (for single_encoder mode) ----
         if latent_mode == "single_encoder":
@@ -577,7 +593,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                     bias_init = torch.where(
                         init_vals > 20.0,
                         init_vals,
-                        torch.log(torch.expm1(init_vals)),
+                        softplus_inverse(init_vals),
                     )
                     with torch.no_grad():
                         self.decoders[name].px_scale_decoder[0].bias.copy_(bias_init)
@@ -686,8 +702,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             elif _px_r_init_scalar is not None:
                 _mod_init = _px_r_init_scalar
             elif self.regularise_dispersion:
-                _mod_rate = self.regularise_dispersion_prior_dict[name]
-                _mod_init = math.log(_mod_rate**2)
+                _mod_init = self.dispersion_hyper_prior_params[name].px_r_mu_init
             else:
                 _mod_init = None
 
@@ -717,8 +732,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         if self.regularise_dispersion:
             self.dispersion_prior_rate_raw = nn.ParameterDict()
             for name in self.modality_names:
-                _mod_rate = self.regularise_dispersion_prior_dict[name]
-                _raw_init = torch.log(torch.expm1(torch.tensor(_mod_rate)))
+                _hp = self.dispersion_hyper_prior_params[name]
+                _raw_init = softplus_inverse(torch.tensor(_hp.lambda_init))
                 disp = dispersion_dict[name]
                 if disp in ("gene-batch", "region-batch"):
                     self.dispersion_prior_rate_raw[name] = nn.Parameter(
@@ -1587,7 +1602,11 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 # Level 1: learned rate with Gamma hyper-prior (per-modality)
                 learned_rate = torch.nn.functional.softplus(self.dispersion_prior_rate_raw[name])
                 _hp_alpha = self.dispersion_hyper_prior_alpha_dict[name]
-                _hp_beta = self.dispersion_hyper_prior_beta_dict[name]
+                _hp_mean = self.dispersion_hyper_prior_mean_dict[name]
+                # β = α · mean because mean = E[MoM] = 1/λ (not E[λ]); so E[λ] = 1/mean,
+                # and α/β = 1/mean ⇒ β = α · mean. See resolve_dispersion_hyper_prior_params
+                # docstring Semantics section.
+                _hp_beta = _hp_alpha * _hp_mean
                 neg_log_hyper = -Gamma(_hp_alpha, _hp_beta).log_prob(learned_rate).sum()
 
                 # Level 2: Exponential prior on dispersion
@@ -1606,6 +1625,10 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 px_r_sample = torch.exp(self.px_r_mu[name] + px_r_sigma * torch.randn_like(self.px_r_mu[name]))
                 if self.decoder_type_dict.get(name) == "burst_frequency_size":
                     # Prior on sqrt(v) ~ Exp(lambda): pushes technical variance toward zero
+                    px_r_transformed = px_r_sample.pow(0.5)
+                elif self.dispersion_prior_direction_dict[name] == "sqrt":
+                    # Prior on sqrt(theta) ~ Exp(lambda) (original be4ac30 behaviour):
+                    # penalises large theta linearly, preserves overdispersion.
                     px_r_transformed = px_r_sample.pow(0.5)
                 else:
                     # Prior on 1/sqrt(theta) ~ Exp(lambda): pushes theta toward large (Poisson)

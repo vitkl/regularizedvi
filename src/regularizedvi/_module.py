@@ -183,16 +183,29 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         If False, remove batch info from decoder. Batch correction handled
         through additive background and categorical covariates.
     regularise_dispersion
-        If True, add Exponential containment prior on ``1/sqrt(theta)``.
-    regularise_dispersion_prior
-        Rate parameter for the Exponential containment prior on ``1/sqrt(theta)``.
+        If True, add Exponential containment prior on ``1/sqrt(theta)`` (or
+        ``sqrt(theta)`` when ``dispersion_prior_direction="sqrt"``).
+    dispersion_hyper_prior_mean
+        Prior mean of the MoM estimate itself, i.e. ``E[MoM] = 1/lambda``.
+        This is in **scale space** (not variance-space). For
+        ``expected_RNA`` with ``"inverse_sqrt"``, setting ``mean=1/3``
+        encodes a prior typical ``theta ≈ 9`` at equilibrium. If ``None``,
+        falls back to ``DECODER_TYPE_DEFAULTS[decoder_type]``. See
+        ``resolve_dispersion_hyper_prior_params`` for the derivation of
+        ``alpha``, ``beta``, ``lambda_init`` and ``px_r_mu_init`` from
+        ``mean`` (note the unusual convention ``beta = alpha * mean``).
     dispersion_hyper_prior_alpha
         Alpha parameter for the Gamma hyper-prior on the learned dispersion
-        rate parameter. Default ``9.0`` (from cell2location).
-    dispersion_hyper_prior_beta
-        Beta parameter for the Gamma hyper-prior on the learned dispersion
-        rate parameter. Default ``3.0`` (from cell2location).
-        Together with alpha, gives Gamma(9, 3) with mean=3.0.
+        rate parameter. If ``None``, falls back to
+        ``DECODER_TYPE_DEFAULTS[decoder_type]`` (``9.0`` for
+        ``expected_RNA``, ``2.0`` for ``burst_frequency_size``).
+    dispersion_prior_direction
+        Transform used in the Exponential containment prior.
+        ``"inverse_sqrt"`` (default) places ``1/sqrt(theta) ~ Exp(lambda)``
+        and pushes ``theta`` towards large (Poisson). ``"sqrt"`` places
+        ``sqrt(theta) ~ Exp(lambda)`` — the original ``be4ac30`` direction.
+        Ignored for ``decoder_type="burst_frequency_size"``, which always
+        uses ``sqrt(v)``.
     additive_bg_prior_alpha
         Alpha parameter for the Gamma prior on ``exp(additive_background)``.
         Default ``1.0`` (cell2location-style ``gene_add_mean_hyp_prior``).
@@ -237,9 +250,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         use_additive_background: bool = False,
         use_batch_in_decoder: bool = True,
         regularise_dispersion: bool = False,
-        regularise_dispersion_prior: float = 3.0,
-        dispersion_hyper_prior_alpha: float = 9.0,
-        dispersion_hyper_prior_beta: float = 3.0,
+        dispersion_hyper_prior_mean: float | None = None,
+        dispersion_hyper_prior_alpha: float | None = None,
+        dispersion_prior_direction: Literal["inverse_sqrt", "sqrt"] = "inverse_sqrt",
         additive_bg_prior_alpha: float = 1.0,
         additive_bg_prior_beta: float = 100.0,
         regularise_background: bool = True,
@@ -302,9 +315,17 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.use_additive_background = use_additive_background
         self.use_batch_in_decoder = use_batch_in_decoder
         self.regularise_dispersion = regularise_dispersion
-        self.regularise_dispersion_prior = regularise_dispersion_prior
+        # Fill unset (mean, alpha) from decoder-type defaults before storing.
+        from regularizedvi._constants import DECODER_TYPE_DEFAULTS
+
+        _decoder_defaults = DECODER_TYPE_DEFAULTS.get(decoder_type, {})
+        if dispersion_hyper_prior_mean is None:
+            dispersion_hyper_prior_mean = _decoder_defaults.get("dispersion_hyper_prior_mean")
+        if dispersion_hyper_prior_alpha is None:
+            dispersion_hyper_prior_alpha = _decoder_defaults.get("dispersion_hyper_prior_alpha")
+        self.dispersion_hyper_prior_mean = dispersion_hyper_prior_mean  # user-facing mean
         self.dispersion_hyper_prior_alpha = dispersion_hyper_prior_alpha
-        self.dispersion_hyper_prior_beta = dispersion_hyper_prior_beta
+        self.dispersion_prior_direction = dispersion_prior_direction
         self.additive_bg_prior_alpha = additive_bg_prior_alpha
         self.additive_bg_prior_beta = additive_bg_prior_beta
         self.regularise_background = regularise_background
@@ -353,14 +374,32 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         # Initialize px_r variational posterior at prior equilibrium when regularisation is active.
         # Variational LogNormal posterior: q(theta) = LogNormal(mu, sigma)
-        # mu is initialized at log(rate^2) so E[theta] ≈ rate^2 at init.
+        # mu is initialized at the scalar returned by resolve_dispersion_hyper_prior_params
+        # so E[theta] ≈ (target) at init.
         # log_sigma is initialized at log(0.1) for small initial variance.
         # Override with px_r_init_mean/px_r_init_std for ablation experiments.
+        from regularizedvi._components import softplus_inverse
+        from regularizedvi._dispersion_init import resolve_dispersion_hyper_prior_params
+
+        _init_mode = "variance" if self.decoder_type == "burst_frequency_size" else "dispersion"
+
+        if self.regularise_dispersion:
+            _hp = resolve_dispersion_hyper_prior_params(
+                mean=self.dispersion_hyper_prior_mean,
+                alpha=self.dispersion_hyper_prior_alpha,
+                direction=self.dispersion_prior_direction,
+                init_mode=_init_mode,
+            )
+            _px_r_init_scalar = _hp.px_r_mu_init  # used only when dispersion_init != "data"
+            _lambda_raw_init = softplus_inverse(torch.tensor(_hp.lambda_init))
+        else:
+            _px_r_init_scalar = None
+            _lambda_raw_init = None
+
         if px_r_init_mean is not None:
             _px_r_init = px_r_init_mean
         elif self.regularise_dispersion:
-            _rate = regularise_dispersion_prior
-            _px_r_init = math.log(_rate**2)  # log(9) ≈ 2.197
+            _px_r_init = _px_r_init_scalar
         else:
             _px_r_init = None
         _px_r_std = px_r_init_std if px_r_init_std is not None else (0.1 if _px_r_init is not None else 1.0)
@@ -394,17 +433,16 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             raise ValueError("`dispersion` must be one of 'gene', 'gene-batch'.")
 
         # Learnable dispersion prior rate (cell2location-style hierarchical prior)
-        # Initialized at inverse_softplus(regularise_dispersion_prior) so that
-        # softplus(raw) = regularise_dispersion_prior at initialization.
+        # Initialized at inverse_softplus(lambda_init) where lambda_init = 1/mean,
+        # so softplus(raw) = 1/mean at initialization.
         # Gamma(alpha, beta) hyper-prior keeps the rate near the default.
         if self.regularise_dispersion:
-            _init_rate = regularise_dispersion_prior
-            # inverse softplus: log(exp(x) - 1)
-            _raw_init = torch.log(torch.expm1(torch.tensor(_init_rate)))
             if self.dispersion == "gene-batch":
-                self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.expand(self.n_dispersion_cats).clone())
+                self.dispersion_prior_rate_raw = torch.nn.Parameter(
+                    _lambda_raw_init.expand(self.n_dispersion_cats).clone()
+                )
             else:
-                self.dispersion_prior_rate_raw = torch.nn.Parameter(_raw_init.unsqueeze(0).clone())
+                self.dispersion_prior_rate_raw = torch.nn.Parameter(_lambda_raw_init.unsqueeze(0).clone())
 
         # Encoder covariates (dedicated registry key, default=None → no encoder categoricals)
         self.n_cats_per_encoder_cov = list(n_cats_per_encoder_cov) if n_cats_per_encoder_cov else []
@@ -579,7 +617,7 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             bias_init = torch.where(
                 init_vals > 20.0,
                 init_vals,  # softplus_inv(x) ≈ x for large x
-                torch.log(torch.expm1(init_vals)),
+                softplus_inverse(init_vals),
             )
             with torch.no_grad():
                 self.decoder.px_scale_decoder[0].bias.copy_(bias_init)
@@ -1056,14 +1094,12 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
             # Level 1: learned rate with Gamma hyper-prior
             learned_rate = torch.nn.functional.softplus(self.dispersion_prior_rate_raw)
-            neg_log_hyper_prior = (
-                -Gamma(
-                    self.dispersion_hyper_prior_alpha,
-                    self.dispersion_hyper_prior_beta,
-                )
-                .log_prob(learned_rate)
-                .sum()
-            )
+            _hp_alpha = self.dispersion_hyper_prior_alpha
+            # β = α · mean because `mean` = E[MoM] = 1/λ (not E[λ]); so E[λ] = 1/mean,
+            # and α/β = 1/mean ⇒ β = α · mean. See Semantics note in
+            # resolve_dispersion_hyper_prior_params.
+            _hp_beta = _hp_alpha * self.dispersion_hyper_prior_mean
+            neg_log_hyper_prior = -Gamma(_hp_alpha, _hp_beta).log_prob(learned_rate).sum()
 
             # Level 2: Exponential prior on dispersion with learned rate
             # Broadcast rate to match px_r_mu shape
@@ -1081,6 +1117,9 @@ class RegularizedVAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             px_r_sample = torch.exp(self.px_r_mu + px_r_sigma * torch.randn_like(self.px_r_mu))
             if self.decoder_type == "burst_frequency_size":
                 # Prior on sqrt(v) ~ Exp(lambda): pushes technical variance toward zero
+                px_r_transformed = px_r_sample.pow(0.5)
+            elif self.dispersion_prior_direction == "sqrt":
+                # Prior on sqrt(theta) ~ Exp(lambda): original be4ac30 direction
                 px_r_transformed = px_r_sample.pow(0.5)
             else:
                 # Prior on 1/sqrt(theta) ~ Exp(lambda): pushes theta toward large (Poisson)

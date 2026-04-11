@@ -629,11 +629,11 @@ class TestParameterInitialization:
     # --- RNA-only model (AmbientRegularizedSCVI) ---
 
     def test_px_r_init_at_prior_mean_gamma_poisson(self, adata):
-        """px_r_mu should be initialized near log(rate^2) for gamma_poisson."""
+        """px_r_mu should be initialized near log(1/mean²) for gamma_poisson (inverse_sqrt)."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
         model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
-        # Default: gamma_poisson, regularise_dispersion_prior=3.0
-        # Expected: px_r_mu ≈ log(9) = 2.197, theta = exp(px_r_mu) ≈ 9.0
+        # Default: gamma_poisson, dispersion_hyper_prior_mean=1/3, direction="inverse_sqrt"
+        # Expected: px_r_mu ≈ -log((1/3)²) = log(9) = 2.197, theta = exp(px_r_mu) ≈ 9.0
         theta = torch.exp(model.module.px_r_mu).detach()
         assert theta.mean().item() == pytest.approx(9.0, rel=0.2)
         # Noise scale: std of px_r_mu should be ~0.1
@@ -659,11 +659,13 @@ class TestParameterInitialization:
         assert model.module.additive_background.detach().std().item() < 0.05
 
     def test_dispersion_prior_rate_init(self, adata):
-        """Dispersion prior rate should initialize at exactly regularise_dispersion_prior."""
+        """Dispersion prior rate should initialize at 1/dispersion_hyper_prior_mean."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
         model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
         rate = torch.nn.functional.softplus(model.module.dispersion_prior_rate_raw).detach()
-        assert rate.mean().item() == pytest.approx(3.0, rel=0.01)
+        # Default mean = 1/3 → lambda_init = 1/mean = 3.0
+        expected = 1.0 / model.module.dispersion_hyper_prior_mean
+        assert rate.mean().item() == pytest.approx(expected, rel=0.01)
 
     # --- Multimodal model (RegularizedMultimodalVI) ---
 
@@ -703,18 +705,26 @@ class TestParameterInitialization:
         assert rf.mean().item() == pytest.approx(1.0, rel=0.02)
 
     def test_dispersion_prior_rate_init_multimodal(self, mdata):
-        """Multimodal dispersion prior rate should initialize at 3.0."""
+        """Multimodal dispersion prior rate should initialize at 1/mean per modality.
+
+        Under new API, lambda_init = 1/dispersion_hyper_prior_mean. Default
+        expected_RNA mean=1/3 gives lambda_init=3.
+        """
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
         model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
         for name in model.module.modality_names:
             rate = torch.nn.functional.softplus(model.module.dispersion_prior_rate_raw[name]).detach()
+            # Default expected_RNA mean=1/3 → lambda_init = 3
             assert rate.mean().item() == pytest.approx(3.0, rel=0.01), f"Failed for {name}"
 
     def test_px_r_init_custom_prior(self, adata):
-        """px_r_mu initialization adapts to custom regularise_dispersion_prior."""
+        """px_r_mu initialization adapts to custom dispersion_hyper_prior_mean."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
-        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4, regularise_dispersion_prior=5.0)
-        # rate=5 → theta = 25 → px_r_mu ≈ log(25) = 3.219
+        # New API: dispersion_hyper_prior_mean = 1/5 maps to theta = 1/mean² = 25 under inverse_sqrt
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata, n_hidden=16, n_latent=4, dispersion_hyper_prior_mean=1.0 / 5.0
+        )
+        # mean=1/5 → theta = 1/(1/5)² = 25 → px_r_mu ≈ log(25) = 3.219
         theta = torch.exp(model.module.px_r_mu).detach()
         assert theta.mean().item() == pytest.approx(25.0, rel=0.2)
 
@@ -2443,13 +2453,14 @@ class TestBurstInitFixes:
         # stochastic_v should be the same (count-space)
         np.testing.assert_allclose(vals_s1["stochastic_v_scale"], vals_s02["stochastic_v_scale"], rtol=1e-5)
 
-    def test_suggested_hyper_beta_in_init_values(self, adata):
-        """compute_bursting_init returns suggested_hyper_beta consistent with stochastic_v_scale."""
+    def test_suggested_hyper_mean_in_init_values(self, adata):
+        """compute_bursting_init returns suggested_hyper_mean = mean(stochastic_v_scale)."""
         from regularizedvi._dispersion_init import compute_bursting_init
 
-        vals, _ = compute_bursting_init(adata, dispersion_hyper_prior_alpha=2.0, verbose=False)
-        expected_beta = 2.0 * float(np.median(vals["stochastic_v_scale"]))
-        assert abs(vals["suggested_hyper_beta"] - expected_beta) < 1e-6
+        vals, _ = compute_bursting_init(adata, verbose=False)
+        # Item 4: mean (not median), renamed to suggested_hyper_mean.
+        expected_mean = float(np.mean(vals["stochastic_v_scale"]))
+        assert abs(vals["suggested_hyper_mean"] - expected_mean) < 1e-6
 
     def test_label_key_returns_per_group_stats(self, adata):
         """compute_dispersion_init with label_key returns per-group diagnostics."""
@@ -2526,6 +2537,343 @@ class TestBurstInitFixes:
         sp1 = torch.nn.functional.softplus(bias_1x)
         sp2 = torch.nn.functional.softplus(bias_2x)
         assert torch.allclose(sp2, 2.0 * sp1, rtol=1e-4, atol=1e-4), f"sp1={sp1[:5]}, sp2={sp2[:5]}"
+
+
+class TestBurstInitPerFeatureBounds:
+    """Item 1/2/3/3a: per-feature stochastic_v bounds + scalar burst_size/burst_freq bounds."""
+
+    @staticmethod
+    def _make_synthetic_adata(mean_range=(0.005, 0.1), n_obs=200, n_genes=40, seed=0):
+        """Synthetic ATAC-like adata with per-gene rates spanning mean_range."""
+        import anndata as ad
+
+        rng = np.random.default_rng(seed)
+        rates = np.linspace(mean_range[0], mean_range[1], n_genes).astype(np.float32)
+        counts = rng.poisson(lam=rates[None, :] * 10.0, size=(n_obs, n_genes)).astype(np.float32)
+        adata = ad.AnnData(X=counts)
+        adata.layers["counts"] = counts.copy()
+        adata.obs["batch"] = np.array(["b0"] * n_obs)
+        adata.obs["batch"] = adata.obs["batch"].astype("category")
+        adata.var_names = [f"peak_{i}" for i in range(n_genes)]
+        return adata
+
+    def test_compute_bursting_init_clips_stochastic_v_per_feature(self):
+        """stochastic_v_scale bounded per-feature by [mean_g/sqrt(theta_max), mean_g/sqrt(theta_min)]."""
+        from regularizedvi._dispersion_init import compute_bursting_init
+
+        adata = self._make_synthetic_adata()
+        theta_min, theta_max = 0.01, 20.0
+        vals, diag = compute_bursting_init(adata, theta_min=theta_min, theta_max=theta_max, verbose=False)
+        mean_g = diag["mean_g"]
+        sv = vals["stochastic_v_scale"]
+        sv_min_g = mean_g / np.sqrt(theta_max)
+        sv_max_g = mean_g / np.sqrt(theta_min)
+        # Per-feature lower and upper bounds, with small tolerance for float32
+        assert np.all(sv >= sv_min_g - 1e-7), (
+            f"sv violated lower per-feature bound: min(sv - sv_min_g)={np.min(sv - sv_min_g)}"
+        )
+        assert np.all(sv <= sv_max_g + 1e-7), (
+            f"sv violated upper per-feature bound: max(sv - sv_max_g)={np.max(sv - sv_max_g)}"
+        )
+
+    def test_compute_bursting_init_per_feature_sv_bounds_match_theta_bounds(self):
+        """min(sv/mean_g) >= 1/sqrt(theta_max) and max(sv/mean_g) <= 1/sqrt(theta_min)."""
+        from regularizedvi._dispersion_init import compute_bursting_init
+
+        adata = self._make_synthetic_adata()
+        theta_min, theta_max = 0.01, 20.0
+        vals, diag = compute_bursting_init(adata, theta_min=theta_min, theta_max=theta_max, verbose=False)
+        mean_g = diag["mean_g"]
+        sv = vals["stochastic_v_scale"]
+        ratio = sv / mean_g
+        assert ratio.min() >= 1.0 / np.sqrt(theta_max) - 1e-6, (
+            f"min(sv/mean_g)={ratio.min()} < 1/sqrt(theta_max)={1.0 / np.sqrt(theta_max)}"
+        )
+        assert ratio.max() <= 1.0 / np.sqrt(theta_min) + 1e-6, (
+            f"max(sv/mean_g)={ratio.max()} > 1/sqrt(theta_min)={1.0 / np.sqrt(theta_min)}"
+        )
+
+    def test_bursting_init_atac_scale_separation(self):
+        """Per-feature bounds scale linearly with mean_g (not flat scalar bounds)."""
+        from regularizedvi._dispersion_init import compute_bursting_init
+
+        adata = self._make_synthetic_adata(mean_range=(0.005, 0.1))
+        theta_min, theta_max = 0.01, 20.0
+        _, diag = compute_bursting_init(adata, theta_min=theta_min, theta_max=theta_max, verbose=False)
+        mean_g = diag["mean_g"]
+        # Derived bounds
+        sv_min_g = mean_g / np.sqrt(theta_max)
+        sv_max_g = mean_g / np.sqrt(theta_min)
+        # The spread of mean_g should be reflected in spread of sv_min_g and sv_max_g:
+        # NOT flat scalar values. ratio of min/max bound across genes should be
+        # roughly the ratio of min/max mean_g (since division by sqrt(theta_*) is
+        # gene-independent).
+        mean_ratio = float(mean_g.max() / mean_g.min())
+        sv_min_ratio = float(sv_min_g.max() / sv_min_g.min())
+        sv_max_ratio = float(sv_max_g.max() / sv_max_g.min())
+        assert sv_min_ratio == pytest.approx(mean_ratio, rel=1e-4)
+        assert sv_max_ratio == pytest.approx(mean_ratio, rel=1e-4)
+        # Flat-scalar bounds would give ratios == 1.0; this must be strictly > 1.
+        assert sv_min_ratio > 5.0, f"expected clear scale separation; got {sv_min_ratio}"
+
+    def test_compute_bursting_init_clips_burst_size(self):
+        """burst_size clamped to scalar [burst_size_min, burst_size_max] (Item 2)."""
+        from regularizedvi._dispersion_init import compute_bursting_init
+
+        # Use default burst_size_max=20 scalar bound.
+        adata = self._make_synthetic_adata(mean_range=(0.01, 50.0))
+        vals, _ = compute_bursting_init(adata, verbose=False)
+        burst_size = vals["burst_size"]
+        assert burst_size.max() <= 20.0 + 1e-6, f"max burst_size={burst_size.max()} > 20"
+        assert burst_size.min() >= 0.01 - 1e-6, f"min burst_size={burst_size.min()} < 0.01"
+
+    def test_compute_bursting_init_clips_burst_freq(self):
+        """burst_freq clamped to [theta_min, theta_max] with default max=20 (Item 3)."""
+        from regularizedvi._dispersion_init import compute_bursting_init
+
+        adata = self._make_synthetic_adata(mean_range=(0.5, 50.0))
+        vals, _ = compute_bursting_init(adata, verbose=False)
+        burst_freq = vals["burst_freq"]
+        # Default theta_max=20 applies
+        assert burst_freq.max() <= 20.0 + 1e-6, f"max burst_freq={burst_freq.max()} > 20"
+        assert burst_freq.min() >= 0.01 - 1e-6, f"min burst_freq={burst_freq.min()} < 0.01"
+
+
+class TestDispersionInitNonBurstBounds:
+    """Item 3a: compute_dispersion_init (non-burst) theta bounds + bio_frac robustness."""
+
+    @staticmethod
+    def _make_atac_like_adata(n_obs=200, n_genes=40, mean_range=(0.005, 0.1), seed=0):
+        import anndata as ad
+
+        rng = np.random.default_rng(seed)
+        rates = np.linspace(mean_range[0], mean_range[1], n_genes).astype(np.float32)
+        counts = rng.poisson(lam=rates[None, :] * 10.0, size=(n_obs, n_genes)).astype(np.float32)
+        adata = ad.AnnData(X=counts)
+        adata.layers["counts"] = counts.copy()
+        adata.obs["batch"] = np.array(["b0"] * n_obs)
+        adata.obs["batch"] = adata.obs["batch"].astype("category")
+        adata.var_names = [f"peak_{i}" for i in range(n_genes)]
+        return adata
+
+    def test_compute_dispersion_init_clips_theta(self):
+        """theta_clamped ∈ [theta_min, theta_max] with default theta_max=20."""
+        from regularizedvi._dispersion_init import compute_dispersion_init
+
+        adata = self._make_atac_like_adata()
+        log_theta, diag = compute_dispersion_init(adata, biological_variance_fraction=0.9, verbose=False)
+        theta = np.exp(log_theta)
+        # Default theta_min=0.01, theta_max=20 (Item 3a)
+        assert theta.min() >= 0.01 - 1e-6
+        assert theta.max() <= 20.0 + 1e-6
+        assert diag["theta_max"] == 20.0
+
+    def test_compute_dispersion_init_bio_frac_robustness(self):
+        """Same input with bio_frac=0.9 vs 0.99 should not differ wildly under new bounds."""
+        from regularizedvi._dispersion_init import compute_dispersion_init
+
+        adata = self._make_atac_like_adata()
+        log_theta_09, _ = compute_dispersion_init(adata, biological_variance_fraction=0.9, verbose=False)
+        log_theta_099, _ = compute_dispersion_init(adata, biological_variance_fraction=0.99, verbose=False)
+        theta_09 = np.exp(log_theta_09)
+        theta_099 = np.exp(log_theta_099)
+        # Both should be finite and within the theta_max=20 bound.
+        assert np.all(np.isfinite(theta_09)) and np.all(np.isfinite(theta_099))
+        assert theta_09.max() <= 20.0 + 1e-6
+        assert theta_099.max() <= 20.0 + 1e-6
+        # Summary: ratio of the overall medians should be < 5x under new bounds.
+        ratio = float(np.median(theta_099) / max(float(np.median(theta_09)), 1e-12))
+        assert ratio < 5.0, f"bio_frac sensitivity too extreme: median ratio={ratio:.2f}"
+
+
+class TestDispersionPriorDirection:
+    """Item 6: dispersion_prior_direction flag (inverse_sqrt default, sqrt option)."""
+
+    def test_dispersion_prior_direction_default_inverse_sqrt(self, adata):
+        """Default dispersion_prior_direction == 'inverse_sqrt'."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(adata, n_hidden=16, n_latent=4)
+        assert model.module.dispersion_prior_direction == "inverse_sqrt"
+
+    def test_dispersion_prior_direction_sqrt_single_modal(self, adata):
+        """sqrt direction with default alpha=9 trains without NaNs in dispersion_kl."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        # Under sqrt direction the target theta ≈ 9 ⇔ mean = sqrt(9) = 3
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            regularise_dispersion=True,
+            dispersion_prior_direction="sqrt",
+            dispersion_hyper_prior_alpha=9.0,
+            dispersion_hyper_prior_mean=3.0,
+        )
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        hist = model.history_
+        # Single-modal logs 'dispersion_kl_train' (see _module.py extra_metrics).
+        assert "dispersion_kl_train" in hist, f"dispersion_kl_train not logged: {list(hist.keys())[:20]}"
+        vals_k = np.asarray(hist["dispersion_kl_train"].values).ravel().astype(float)
+        assert np.all(np.isfinite(vals_k)), f"NaN/inf in dispersion_kl_train: {vals_k}"
+        assert model.module.dispersion_prior_direction == "sqrt"
+
+    def test_dispersion_prior_direction_sqrt_multi_modal(self, mdata):
+        """sqrt direction with default alpha=9 multimodal trains without NaNs.
+
+        Multimodal loss rolls the dispersion hyper-prior penalty into the overall
+        train loss (no dedicated `dispersion_kl_*` key), so we assert the total
+        reconstruction and elbo are finite — no NaN propagates from the new
+        direction branch.
+        """
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            regularise_dispersion=True,
+            dispersion_prior_direction="sqrt",
+            dispersion_hyper_prior_alpha=9.0,
+            dispersion_hyper_prior_mean=3.0,
+        )
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        hist = model.history_
+        finite_seen = 0
+        for key in ("elbo_train", "reconstruction_loss_train", "train_loss_epoch"):
+            if key in hist:
+                vals_k = np.asarray(hist[key].values).ravel().astype(float)
+                assert np.all(np.isfinite(vals_k)), f"NaN/inf in {key}: {vals_k}"
+                finite_seen += 1
+        assert finite_seen > 0, f"no standard training metric found: {list(hist.keys())[:20]}"
+        # Per-modality dispersion attribute stores the direction dict.
+        for name in model.module.modality_names:
+            assert model.module.dispersion_prior_direction_dict[name] == "sqrt"
+
+    def test_init_under_sqrt_direction_expected_rna(self, adata):
+        """sqrt direction + mean=3 → theta_init = mean² = 9 → exp(px_r_mu) ≈ 9."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            decoder_type="expected_RNA",
+            regularise_dispersion=True,
+            dispersion_prior_direction="sqrt",
+            dispersion_hyper_prior_alpha=9.0,
+            dispersion_hyper_prior_mean=3.0,
+        )
+        theta = torch.exp(model.module.px_r_mu).detach()
+        assert theta.mean().item() == pytest.approx(9.0, rel=0.2)
+
+    def test_init_under_inverse_sqrt_direction_expected_rna(self, adata):
+        """inverse_sqrt + mean=1/3 → theta_init = 1/mean² = 9 → exp(px_r_mu) ≈ 9."""
+        regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, layer="counts", batch_key="batch")
+        model = regularizedvi.AmbientRegularizedSCVI(
+            adata,
+            n_hidden=16,
+            n_latent=4,
+            decoder_type="expected_RNA",
+            regularise_dispersion=True,
+            dispersion_prior_direction="inverse_sqrt",
+            dispersion_hyper_prior_alpha=9.0,
+            dispersion_hyper_prior_mean=1.0 / 3.0,
+        )
+        theta = torch.exp(model.module.px_r_mu).detach()
+        assert theta.mean().item() == pytest.approx(9.0, rel=0.2)
+
+
+class TestEncoderWeightInit:
+    """Item 8: Encoder var head weight init scaled 0.1× (mean head at PyTorch default)."""
+
+    def test_encoder_var_head_weight_init_scaled(self):
+        """var_encoder.weight.std() is ~0.1× a fresh nn.Linear's std."""
+        from regularizedvi._components import RegularizedEncoder
+
+        torch.manual_seed(0)
+        n_input, n_output, n_hidden = 20, 8, 16
+        enc = RegularizedEncoder(
+            n_input=n_input,
+            n_output=n_output,
+            n_hidden=n_hidden,
+            var_init_scale=0.1,
+        )
+        # Reference: a fresh nn.Linear with identical shape (matches PyTorch default init).
+        torch.manual_seed(0)
+        ref = torch.nn.Linear(n_hidden, n_output)
+        ref_std = ref.weight.data.std().item()
+        enc_var_std = enc.var_encoder.weight.data.std().item()
+        # Should be ~0.1× the reference; allow mild tolerance for random draws.
+        ratio = enc_var_std / ref_std
+        assert 0.05 < ratio < 0.2, f"var weight std ratio {ratio:.3f} not in (0.05, 0.2)"
+
+    def test_encoder_mean_head_weight_init_default(self):
+        """mean_encoder.weight matches PyTorch default (not zero, not scaled)."""
+        from regularizedvi._components import RegularizedEncoder
+
+        torch.manual_seed(0)
+        enc = RegularizedEncoder(
+            n_input=20,
+            n_output=8,
+            n_hidden=16,
+            var_init_scale=0.1,
+        )
+        # Mean head weights must be non-zero (i.e. PyTorch's kaiming default, not hand-init)
+        mw = enc.mean_encoder.weight.data
+        assert mw.abs().mean().item() > 0.0
+        # Reference std from a fresh nn.Linear
+        torch.manual_seed(0)
+        ref = torch.nn.Linear(16, 8)
+        ref_std = ref.weight.data.std().item()
+        mean_std = mw.std().item()
+        ratio = mean_std / ref_std
+        # Untouched mean head should be close to 1× the reference (NOT 0.1×).
+        assert ratio > 0.5, f"mean head weight std ratio {ratio:.3f} looks scaled"
+
+    def test_qz_scale_at_init_matches_var_init_scale(self):
+        """qz.scale.mean() at init is within 2% of var_init_scale."""
+        from regularizedvi._components import RegularizedEncoder
+
+        torch.manual_seed(0)
+        target = 0.1
+        enc = RegularizedEncoder(
+            n_input=32,
+            n_output=16,
+            n_hidden=64,
+            use_softplus_var_activation=True,
+            var_init_scale=target,
+            return_dist=True,
+        )
+        enc.eval()
+        x = torch.randn(256, 32)
+        dist, _ = enc(x)
+        m = dist.scale.mean().item()
+        # With 0.1× weight scaling the noise contribution should land within 2% of target.
+        assert abs(m - target) / target < 0.02, f"qz.scale.mean()={m:.5f} vs target={target}"
+
+    def test_horseshoe_pre_init_no_weight_touch(self, mdata):
+        """After horseshoe pre-init: mean_encoder weights non-zero (PyTorch default lives)
+        and var_encoder weights scaled by 0.1× (not zero)."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(
+            mdata,
+            n_hidden=16,
+            n_latent=4,
+            horseshoe_latent_z_prior_type="lognormal",
+            horseshoe_posterior_init_loc=1.0,
+            horseshoe_posterior_init_scale=0.1,
+            use_softplus_var_activation=True,
+            var_init_scale=0.1,
+        )
+        for name in model.module.modality_names:
+            enc = model.module.horseshoe_encoders[name]
+            mw = enc.mean_encoder.weight.data
+            vw = enc.var_encoder.weight.data
+            # Mean head weights: non-zero, from PyTorch default
+            assert mw.abs().mean().item() > 0.0
+            # Var head weights: non-zero (not zeroed by a hand-init) and narrower than mean
+            assert vw.abs().mean().item() > 0.0
+            # Var head should be noticeably narrower because of the 0.1× scaling
+            assert vw.std().item() < mw.std().item(), (
+                f"{name}: var weight std {vw.std().item():.4f} not < mean weight std {mw.std().item():.4f}"
+            )
 
 
 class TestSparsityFeatures:
@@ -2742,16 +3090,16 @@ class TestScaleSoftplusBias:
         assert np.all(np.isfinite(out_n))
 
     def test_b4_expected_rna_respects_user_hyper_prior(self, adata):
-        """expected_RNA decoder: user dispersion_hyper_prior_beta is respected, not overridden."""
+        """expected_RNA decoder: user dispersion_hyper_prior_mean is respected, not overridden."""
         regularizedvi.AmbientRegularizedSCVI.setup_anndata(adata, batch_key="batch", layer="counts")
         model = regularizedvi.AmbientRegularizedSCVI(
             adata,
             n_hidden=16,
             n_latent=4,
             decoder_type="expected_RNA",
-            dispersion_hyper_prior_beta=7.5,
+            dispersion_hyper_prior_mean=0.5,
         )
-        assert model.module.dispersion_hyper_prior_beta == 7.5
+        assert model.module.dispersion_hyper_prior_mean == 0.5
 
     def test_b4_data_init_raises_on_data_plus_burst(self, adata):
         """dispersion_init='data' + decoder_type='burst_frequency_size' is rejected."""

@@ -44,8 +44,6 @@ from scvi.utils import setup_anndata_dsp
 
 from regularizedvi._constants import (
     AMBIENT_COVS_KEY,
-    AUTO_HYPER_PRIOR_LAMBDA_MAX,
-    AUTO_HYPER_PRIOR_LAMBDA_MIN,
     DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
     DEFAULT_ADDITIVE_BG_PRIOR_BETA,
     DEFAULT_COMPUTE_PEARSON,
@@ -141,8 +139,18 @@ class AmbientRegularizedSCVI(
         Pass batch info to decoder. Default ``False`` (batch-free decoder).
     regularise_dispersion
         Enable overdispersion regularisation. Default ``True``.
-    regularise_dispersion_prior
-        Rate for Exponential containment prior on ``1/sqrt(theta)``. Default ``3.0``.
+    dispersion_hyper_prior_mean
+        Prior mean of the MoM dispersion estimate (in *scale* space — e.g. ``mean(1/sqrt(theta))``
+        for ``dispersion_prior_direction="inverse_sqrt"`` or ``mean(sqrt(theta))`` for ``"sqrt"``).
+        The loss-time rate is derived as ``lambda = alpha / (alpha * mean) = 1/mean``. ``None``
+        falls back to the decoder-type default from ``DECODER_TYPE_DEFAULTS``.
+    dispersion_hyper_prior_alpha
+        Shape of the Gamma hyper-prior on the Exponential rate. ``None`` falls back to the
+        decoder-type default.
+    dispersion_prior_direction
+        Which MoM transform of ``theta`` the Exponential prior places probability mass on.
+        ``"inverse_sqrt"`` (default) penalises ``1/sqrt(theta)`` (cell2location convention).
+        ``"sqrt"`` penalises ``sqrt(theta)``.
     use_batch_norm
         Where to use BatchNorm. Default ``"none"``.
     use_layer_norm
@@ -210,9 +218,9 @@ class AmbientRegularizedSCVI(
         use_additive_background: bool = DEFAULT_USE_ADDITIVE_BACKGROUND,
         use_batch_in_decoder: bool = DEFAULT_USE_BATCH_IN_DECODER,
         regularise_dispersion: bool = DEFAULT_REGULARISE_DISPERSION,
-        regularise_dispersion_prior: float | None = None,
+        dispersion_hyper_prior_mean: float | None = None,
         dispersion_hyper_prior_alpha: float | None = None,
-        dispersion_hyper_prior_beta: float | None = None,
+        dispersion_prior_direction: Literal["inverse_sqrt", "sqrt"] = "inverse_sqrt",
         additive_bg_prior_alpha: float = DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
         additive_bg_prior_beta: float = DEFAULT_ADDITIVE_BG_PRIOR_BETA,
         regularise_background: bool = DEFAULT_REGULARISE_BACKGROUND,
@@ -226,7 +234,7 @@ class AmbientRegularizedSCVI(
         dispersion_init: Literal["prior", "data", "variance_burst_size"] = "prior",
         dispersion_init_bio_frac: float = 0.9,
         dispersion_init_theta_min: float = 0.01,
-        dispersion_init_theta_max: float = 10.0,
+        dispersion_init_theta_max: float = 20.0,
         px_r_init_mean: float | np.ndarray | None = None,
         px_r_init_std: float | None = None,
         additive_bg_init_mean: float | None = None,
@@ -283,12 +291,10 @@ class AmbientRegularizedSCVI(
         # overrides are ignored and replaced with MoM-derived values (warned below, post-init).
         _is_data_init_path = decoder_type in DATA_INIT_DECODER_TYPES and dispersion_init in DATA_DRIVEN_DISPERSION_INIT
         _dt_defaults = DECODER_TYPE_DEFAULTS.get(decoder_type, DECODER_TYPE_DEFAULTS["expected_RNA"])
-        if regularise_dispersion_prior is None:
-            regularise_dispersion_prior = _dt_defaults["regularise_dispersion_prior"]
+        if dispersion_hyper_prior_mean is None:
+            dispersion_hyper_prior_mean = _dt_defaults["dispersion_hyper_prior_mean"]
         if dispersion_hyper_prior_alpha is None:
             dispersion_hyper_prior_alpha = _dt_defaults["dispersion_hyper_prior_alpha"]
-        if dispersion_hyper_prior_beta is None:
-            dispersion_hyper_prior_beta = _dt_defaults["dispersion_hyper_prior_beta"]
 
         self._module_kwargs = {
             "n_hidden": n_hidden,
@@ -307,9 +313,9 @@ class AmbientRegularizedSCVI(
             "use_additive_background": use_additive_background,
             "use_batch_in_decoder": use_batch_in_decoder,
             "regularise_dispersion": regularise_dispersion,
-            "regularise_dispersion_prior": regularise_dispersion_prior,
+            "dispersion_hyper_prior_mean": dispersion_hyper_prior_mean,
             "dispersion_hyper_prior_alpha": dispersion_hyper_prior_alpha,
-            "dispersion_hyper_prior_beta": dispersion_hyper_prior_beta,
+            "dispersion_prior_direction": dispersion_prior_direction,
             "additive_bg_prior_alpha": additive_bg_prior_alpha,
             "additive_bg_prior_beta": additive_bg_prior_beta,
             "regularise_background": regularise_background,
@@ -526,12 +532,29 @@ class AmbientRegularizedSCVI(
                     biological_variance_fraction=dispersion_init_bio_frac,
                     theta_min=dispersion_init_theta_min,
                     theta_max=dispersion_init_theta_max,
+                    dispersion_prior_direction=dispersion_prior_direction,
                     verbose=False,
                 )
                 px_r_init_mean = log_theta_init
+
+                # Data-init path — always use MoM-derived hyper-prior mean. User overrides
+                # on dispersion_hyper_prior_mean are replaced with the MoM-derived value.
+                _suggested_mean = float(np.clip(_diag["suggested_hyper_mean"], 1e-4, 100.0))
+                _prev_mean = dispersion_hyper_prior_mean
+                dispersion_hyper_prior_mean = _suggested_mean
+                if _prev_mean is not None and _prev_mean != _suggested_mean:
+                    import warnings as _warnings
+
+                    _warnings.warn(
+                        f"[data-init] Overriding dispersion_hyper_prior_mean: "
+                        f"{_prev_mean} -> {_suggested_mean:.4f} "
+                        f"(lambda_init = {1.0 / _suggested_mean:.2f})",
+                        stacklevel=2,
+                    )
                 logger.info(
                     f"Dispersion init: median theta={np.exp(np.median(log_theta_init)):.3f}, "
-                    f"CV²(L)={_diag['cv2_L']:.3f}, sub-Poisson={_diag['n_sub_poisson']}/{len(log_theta_init)}"
+                    f"CV²(L)={_diag['cv2_L']:.3f}, sub-Poisson={_diag['n_sub_poisson']}/{len(log_theta_init)}, "
+                    f"suggested_hyper_mean={_suggested_mean:.4f}, lambda_init={1.0 / _suggested_mean:.2f}"
                 )
             elif dispersion_init == "variance_burst_size" and decoder_type == "burst_frequency_size":
                 from regularizedvi._dispersion_init import compute_bursting_init
@@ -550,7 +573,6 @@ class AmbientRegularizedSCVI(
                     biological_variance_fraction=dispersion_init_bio_frac,
                     burst_size_intercept=burst_size_intercept,
                     sensitivity=_sens,
-                    dispersion_hyper_prior_alpha=dispersion_hyper_prior_alpha,
                     theta_min=dispersion_init_theta_min,
                     theta_max=dispersion_init_theta_max,
                     verbose=True,
@@ -558,38 +580,24 @@ class AmbientRegularizedSCVI(
                 # Use log_theta for px_r_init_mean (backward compatible with dispersion path)
                 px_r_init_mean = _bursting_init_values["log_theta"]
 
-                # B4: data-init path — always use MoM-derived hyper-prior. User overrides
-                # on dispersion_hyper_prior_beta / regularise_dispersion_prior are ignored.
-                _suggested = _bursting_init_values["suggested_hyper_beta"]
-                _suggested = float(
-                    np.clip(
-                        _suggested,
-                        dispersion_hyper_prior_alpha / AUTO_HYPER_PRIOR_LAMBDA_MAX,
-                        dispersion_hyper_prior_alpha / AUTO_HYPER_PRIOR_LAMBDA_MIN,
-                    )
-                )
-                _prev_beta = dispersion_hyper_prior_beta
-                _prev_prior = regularise_dispersion_prior
-                dispersion_hyper_prior_beta = _suggested
-                regularise_dispersion_prior = dispersion_hyper_prior_alpha / dispersion_hyper_prior_beta
-                import warnings as _warnings
+                # Data-init path — always use MoM-derived hyper-prior mean. User overrides
+                # on dispersion_hyper_prior_mean are replaced with the MoM-derived value.
+                _suggested_mean = float(np.clip(_bursting_init_values["suggested_hyper_mean"], 1e-4, 100.0))
+                _prev_mean = dispersion_hyper_prior_mean
+                dispersion_hyper_prior_mean = _suggested_mean
+                if _prev_mean is not None and _prev_mean != _suggested_mean:
+                    import warnings as _warnings
 
-                if _prev_beta != _suggested or _prev_prior != regularise_dispersion_prior:
                     _warnings.warn(
-                        f"[data-init decoder '{decoder_type}'] Overriding user dispersion hyper-prior "
-                        f"with MoM-derived values: "
-                        f"dispersion_hyper_prior_beta: {_prev_beta} -> {dispersion_hyper_prior_beta:.4f}, "
-                        f"regularise_dispersion_prior: {_prev_prior} -> {regularise_dispersion_prior:.1f}",
+                        f"[data-init burst] Overriding dispersion_hyper_prior_mean: "
+                        f"{_prev_mean} -> {_suggested_mean:.4f} "
+                        f"(lambda_init = {1.0 / _suggested_mean:.2f})",
                         stacklevel=2,
                     )
                 logger.info(
-                    f"Auto hyper-prior: beta={dispersion_hyper_prior_beta:.4f}, "
-                    f"lambda_init={regularise_dispersion_prior:.1f}"
-                )
-
-                logger.info(
                     f"Bursting init: median burst_freq={np.median(_bursting_init_values['burst_freq']):.3f}, "
-                    f"median stochastic_v={np.median(_bursting_init_values['stochastic_v_scale']):.4f}"
+                    f"median stochastic_v={np.median(_bursting_init_values['stochastic_v_scale']):.4f}, "
+                    f"suggested_hyper_mean={_suggested_mean:.4f}, lambda_init={1.0 / _suggested_mean:.2f}"
                 )
 
             # Determine use_observed_lib_size:
@@ -626,9 +634,9 @@ class AmbientRegularizedSCVI(
                 use_additive_background=use_additive_background,
                 use_batch_in_decoder=use_batch_in_decoder,
                 regularise_dispersion=regularise_dispersion,
-                regularise_dispersion_prior=regularise_dispersion_prior,
+                dispersion_hyper_prior_mean=dispersion_hyper_prior_mean,
                 dispersion_hyper_prior_alpha=dispersion_hyper_prior_alpha,
-                dispersion_hyper_prior_beta=dispersion_hyper_prior_beta,
+                dispersion_prior_direction=dispersion_prior_direction,
                 additive_bg_prior_alpha=additive_bg_prior_alpha,
                 additive_bg_prior_beta=additive_bg_prior_beta,
                 regularise_background=regularise_background,

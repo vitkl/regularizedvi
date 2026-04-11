@@ -30,6 +30,11 @@ def _identity(x):
     return x
 
 
+def softplus_inverse(x: torch.Tensor) -> torch.Tensor:
+    """Numerically stable inverse of softplus. Equivalent to log(expm1(x))."""
+    return torch.log(torch.expm1(x))
+
+
 def _scale_softplus_bias(bias: torch.Tensor, multiplier: float) -> torch.Tensor:
     """Return new pre-softplus bias b' such that softplus(b') == multiplier * softplus(bias).
 
@@ -343,25 +348,23 @@ class RegularizedEncoder(nn.Module):
         # var_activation produces the variance q_v; std = sqrt(q_v + var_eps). Target q_v = s²
         # so std ≈ s. The bias formula depends on the activation:
         #   * softplus: softplus(bias) = s² ⇒ bias = softplus_inv(s²) = log(expm1(s²))
-        #   * exp:      exp(bias)      = s² ⇒ bias = 2 * log(s)
-        # We rescale the var head weights to a small N(0, 0.1) gaussian so cells start with
-        # tiny but non-zero spread around the target std (Pyro AutoNormal-style narrow init,
-        # not a hard-pinned constant). Same treatment is applied to the loc head when explicit
-        # init is requested elsewhere (horseshoe posterior init in _multimodule.py).
+        #   * exp:      exp(bias)      = s² ⇒ bias = log(s²) = 2 * log(s)
+        # Var head WEIGHTS are scaled DOWN by 0.1× from PyTorch's default kaiming_uniform init
+        # (preserving the fan-in-aware uniform distribution shape, just narrower). Mean head
+        # weights are left at PyTorch default. This gives small but non-zero cell-dependence
+        # at init around the bias-pinned target std (Pyro AutoNormal-style narrow init).
         if var_init_scale is not None:
             if float(var_init_scale) <= 0.0:
                 raise ValueError(f"var_init_scale must be > 0 if set, got {var_init_scale!r}")
             with torch.no_grad():
                 s_sq = float(var_init_scale) ** 2
                 if use_softplus_var_activation:
-                    # bias = softplus_inv(s²) = log(expm1(s²)); switch to identity for large s²
                     bias_val = s_sq if s_sq > 20.0 else float(np.log(np.expm1(s_sq)))
                 else:
-                    # exp activation: bias = log(s²) = 2 * log(s)
                     bias_val = float(np.log(s_sq))
                 self.var_encoder.bias.fill_(bias_val)
-                # Small but non-zero cell-dependence at init: weight ~ N(0, 0.1).
-                self.var_encoder.weight.normal_(mean=0.0, std=0.1)
+                # Scale the kaiming_uniform default by 0.1× (preserves fan-in scaling, just narrower).
+                self.var_encoder.weight.data.mul_(0.1)
 
     def forward(self, x: torch.Tensor, *cat_list: int):
         r"""The forward computation for a single sample.

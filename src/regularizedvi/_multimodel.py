@@ -177,12 +177,19 @@ class RegularizedMultimodalVI(
         Gamma prior beta on feature scaling. Default 200.
     regularise_dispersion
         Enable dispersion regularization. Default True.
-    regularise_dispersion_prior
-        Initialization for Exponential containment prior rate. Default 3.0.
+    dispersion_hyper_prior_mean
+        Prior mean of the MoM estimate (``sqrt(stochastic_v^2)`` for burst,
+        ``1/sqrt(theta)`` for expected_RNA + ``"inverse_sqrt"``, or
+        ``sqrt(theta)`` for expected_RNA + ``"sqrt"``). Per-modality dict or
+        shared float. ``None`` uses ``DECODER_TYPE_DEFAULTS``.
     dispersion_hyper_prior_alpha
-        Gamma hyper-prior alpha. Default 9.0.
-    dispersion_hyper_prior_beta
-        Gamma hyper-prior beta. Default 3.0.
+        Gamma hyper-prior alpha on ``lambda``. Per-modality dict or shared float.
+        ``None`` uses ``DECODER_TYPE_DEFAULTS``.
+    dispersion_prior_direction
+        Direction of the Exponential containment prior for ``expected_RNA``
+        decoders: ``"inverse_sqrt"`` (default) → ``1/sqrt(theta) ~ Exp(lambda)``;
+        ``"sqrt"`` → ``sqrt(theta) ~ Exp(lambda)``. Ignored for
+        ``burst_frequency_size``. Per-modality dict or shared str.
     use_batch_norm
         Where to use BatchNorm. Default ``"none"``.
     use_layer_norm
@@ -221,9 +228,9 @@ class RegularizedMultimodalVI(
         feature_scaling_prior_alpha: float = DEFAULT_FEATURE_SCALING_PRIOR_ALPHA,
         feature_scaling_prior_beta: float = DEFAULT_FEATURE_SCALING_PRIOR_BETA,
         regularise_dispersion: bool = DEFAULT_REGULARISE_DISPERSION,
-        regularise_dispersion_prior: dict[str, float] | float | None = None,
+        dispersion_hyper_prior_mean: dict[str, float] | float | None = None,
         dispersion_hyper_prior_alpha: dict[str, float] | float | None = None,
-        dispersion_hyper_prior_beta: dict[str, float] | float | None = None,
+        dispersion_prior_direction: dict[str, str] | str = "inverse_sqrt",
         additive_bg_prior_alpha: float = DEFAULT_ADDITIVE_BG_PRIOR_ALPHA,
         additive_bg_prior_beta: float = DEFAULT_ADDITIVE_BG_PRIOR_BETA,
         regularise_background: bool = DEFAULT_REGULARISE_BACKGROUND,
@@ -244,9 +251,9 @@ class RegularizedMultimodalVI(
         library_obs_w_prior_rate: float = 1.0,
         # Data-driven dispersion initialization
         dispersion_init: Literal["prior", "data", "variance_burst_size"] = "prior",
-        dispersion_init_bio_frac: float = 0.9,
+        dispersion_init_bio_frac: dict[str, float] | float = 0.9,
         dispersion_init_theta_min: float = 0.01,
-        dispersion_init_theta_max: float = 10.0,
+        dispersion_init_theta_max: float = 20.0,
         # Bursting model decoder type (per modality)
         decoder_type: dict[str, str] | str = "expected_RNA",
         burst_size_intercept: dict[str, float] | float = 1.0,
@@ -328,9 +335,9 @@ class RegularizedMultimodalVI(
             "feature_scaling_prior_alpha": feature_scaling_prior_alpha,
             "feature_scaling_prior_beta": feature_scaling_prior_beta,
             "regularise_dispersion": regularise_dispersion,
-            "regularise_dispersion_prior": regularise_dispersion_prior,
+            "dispersion_hyper_prior_mean": dispersion_hyper_prior_mean,
             "dispersion_hyper_prior_alpha": dispersion_hyper_prior_alpha,
-            "dispersion_hyper_prior_beta": dispersion_hyper_prior_beta,
+            "dispersion_prior_direction": dispersion_prior_direction,
             "additive_bg_prior_alpha": additive_bg_prior_alpha,
             "additive_bg_prior_beta": additive_bg_prior_beta,
             "regularise_background": regularise_background,
@@ -639,161 +646,148 @@ class RegularizedMultimodalVI(
         if ENCODER_COVS_KEY in self.adata_manager.data_registry:
             n_cats_per_encoder_cov = self.adata_manager.get_state_registry(ENCODER_COVS_KEY).n_cats_per_key
 
-        # Data-driven dispersion initialization (per-modality)
-        px_r_init_mean_dict = None
-        if self._dispersion_init == "data":
-            from regularizedvi._dispersion_init import compute_dispersion_init
+        # Data-driven dispersion initialization (per-modality).
+        # Resolve per-modality helper dicts up front (shared across both init paths).
+        from regularizedvi._constants import DECODER_TYPE_DEFAULTS, DEFAULT_DECODER_TYPE
 
-            px_r_init_mean_dict = {}
-            for mod_name in modality_names:
-                mod_adata = self.adata.mod[mod_name]
-                logger.info(f"Computing data-driven dispersion init for modality '{mod_name}'...")
-                log_theta_init, _diag = compute_dispersion_init(
-                    mod_adata,
-                    biological_variance_fraction=self._dispersion_init_bio_frac,
-                    theta_min=self._dispersion_init_theta_min,
-                    theta_max=self._dispersion_init_theta_max,
-                    verbose=False,
-                )
-                px_r_init_mean_dict[mod_name] = log_theta_init
-                logger.info(
-                    f"  {mod_name}: median theta={np.exp(np.median(log_theta_init)):.3f}, "
-                    f"CV²(L)={_diag['cv2_L']:.3f}, sub-Poisson={_diag['n_sub_poisson']}/{len(log_theta_init)}"
-                )
+        _decoder_type_kw = self._module_kwargs.get("decoder_type", DEFAULT_DECODER_TYPE)
+        decoder_type_dict = (
+            dict(_decoder_type_kw)
+            if isinstance(_decoder_type_kw, dict)
+            else dict.fromkeys(modality_names, _decoder_type_kw)
+        )
+        for _mn in modality_names:
+            decoder_type_dict.setdefault(_mn, DEFAULT_DECODER_TYPE)
 
-        # Bursting model init (per-modality, only for burst_frequency_size modalities)
-        _bursting_init_per_modality = {}
-        if self._dispersion_init == "variance_burst_size":
-            from regularizedvi._constants import DEFAULT_DECODER_TYPE
+        # Per-modality dispersion_prior_direction (dict | str → dict)
+        _dir_kw = self._module_kwargs.get("dispersion_prior_direction", "inverse_sqrt")
+        if isinstance(_dir_kw, dict):
+            dispersion_prior_direction_dict = {_mn: _dir_kw.get(_mn, "inverse_sqrt") for _mn in modality_names}
+        else:
+            dispersion_prior_direction_dict = dict.fromkeys(modality_names, _dir_kw)
+
+        # Per-modality bio_frac (dict | float → dict)  [Item 3a]
+        _bf_kw = self._dispersion_init_bio_frac
+        if isinstance(_bf_kw, dict):
+            bio_frac_dict = {_mn: float(_bf_kw.get(_mn, 0.9)) for _mn in modality_names}
+        else:
+            bio_frac_dict = dict.fromkeys(modality_names, float(_bf_kw))
+
+        # Per-modality user mean override (dict | float | None)
+        _user_mean_kw = self._module_kwargs.get("dispersion_hyper_prior_mean")
+        if _user_mean_kw is None:
+            _user_hp_mean: dict[str, float] | None = None
+        elif isinstance(_user_mean_kw, dict):
+            _user_hp_mean = {_mn: float(_user_mean_kw[_mn]) for _mn in modality_names if _mn in _user_mean_kw}
+        else:
+            _user_hp_mean = dict.fromkeys(modality_names, float(_user_mean_kw))
+
+        # Per-modality burst_size_intercept + sensitivity (used by variance_burst_size path)
+        _burst_intercept_kw = self._module_kwargs.get("burst_size_intercept", 1.0)
+        burst_intercept_dict = (
+            dict(_burst_intercept_kw)
+            if isinstance(_burst_intercept_kw, dict)
+            else dict.fromkeys(modality_names, _burst_intercept_kw)
+        )
+        _centering = self._module_kwargs.get("library_log_means_centering_sensitivity")
+        sensitivity_dict = {}
+        for _mn in modality_names:
+            if _centering is None:
+                sensitivity_dict[_mn] = 1.0
+            elif isinstance(_centering, dict):
+                sensitivity_dict[_mn] = float(_centering.get(_mn, 1.0))
+            else:
+                sensitivity_dict[_mn] = float(_centering)
+
+        # Per-modality init dispatch.
+        _px_r_init_per_modality: dict[str, np.ndarray] = {}
+        _bursting_init_per_modality: dict[str, dict] = {}
+        _auto_mean: dict[str, float] = {}
+
+        _needs_init = self._dispersion_init in ("data", "variance_burst_size")
+        if _needs_init:
             from regularizedvi._dispersion_init import compute_bursting_init, compute_dispersion_init
 
-            _decoder_type = self._module_kwargs.get("decoder_type", DEFAULT_DECODER_TYPE)
-            _decoder_type_resolved = (
-                _decoder_type if isinstance(_decoder_type, dict) else dict.fromkeys(modality_names, _decoder_type)
-            )
-            _burst_intercept = self._module_kwargs.get("burst_size_intercept", 1.0)
-            _burst_intercept_resolved = (
-                _burst_intercept
-                if isinstance(_burst_intercept, dict)
-                else dict.fromkeys(modality_names, _burst_intercept)
-            )
-
-            # Resolve per-modality sensitivity
-            _centering = self._module_kwargs.get("library_log_means_centering_sensitivity")
-            _sensitivity_resolved = {}
             for _mn in modality_names:
-                if _centering is None:
-                    _sensitivity_resolved[_mn] = 1.0
-                elif isinstance(_centering, dict):
-                    _sensitivity_resolved[_mn] = _centering.get(_mn, 1.0)
-                else:
-                    _sensitivity_resolved[_mn] = float(_centering)
+                _dt = decoder_type_dict[_mn]
+                _dir = dispersion_prior_direction_dict[_mn]
+                _bf = bio_frac_dict[_mn]
+                _dt_def = DECODER_TYPE_DEFAULTS.get(_dt, DECODER_TYPE_DEFAULTS["expected_RNA"])
 
-            # Resolve per-modality hyper-prior alpha
-            _hp_alpha = self._module_kwargs.get("dispersion_hyper_prior_alpha")
-            _hp_alpha_resolved = {}
-            for _mn in modality_names:
-                if _hp_alpha is None:
-                    from regularizedvi._constants import DECODER_TYPE_DEFAULTS
+                _suggested_mean: float | None = None
+                mod_adata = self.adata.mod[_mn]
 
-                    _dt = _decoder_type_resolved.get(_mn, "expected_RNA")
-                    _hp_alpha_resolved[_mn] = DECODER_TYPE_DEFAULTS.get(_dt, DECODER_TYPE_DEFAULTS["expected_RNA"])[
-                        "dispersion_hyper_prior_alpha"
-                    ]
-                elif isinstance(_hp_alpha, dict):
-                    _hp_alpha_resolved[_mn] = _hp_alpha.get(_mn, 2.0)
-                else:
-                    _hp_alpha_resolved[_mn] = float(_hp_alpha)
-
-            px_r_init_mean_dict = px_r_init_mean_dict or {}
-            for mod_name in modality_names:
-                if _decoder_type_resolved.get(mod_name) == "burst_frequency_size":
-                    mod_adata = self.adata.mod[mod_name]
-                    logger.info(f"Computing bursting model init for modality '{mod_name}'...")
-                    _init_vals, _diag = compute_bursting_init(
-                        mod_adata,
-                        biological_variance_fraction=self._dispersion_init_bio_frac,
-                        burst_size_intercept=_burst_intercept_resolved.get(mod_name, 1.0),
-                        sensitivity=_sensitivity_resolved.get(mod_name, 1.0),
-                        dispersion_hyper_prior_alpha=_hp_alpha_resolved.get(mod_name, 2.0),
-                        theta_min=self._dispersion_init_theta_min,
-                        theta_max=self._dispersion_init_theta_max,
-                        verbose=True,
-                    )
-                    px_r_init_mean_dict[mod_name] = _init_vals["log_theta"]
-                    _bursting_init_per_modality[mod_name] = _init_vals
+                if self._dispersion_init == "data":
                     logger.info(
-                        f"  {mod_name}: median burst_freq={np.median(_init_vals['burst_freq']):.3f}, "
-                        f"median stochastic_v={np.median(_init_vals['stochastic_v_scale']):.4f}"
+                        f"Computing data-driven dispersion init for modality '{_mn}' "
+                        f"(bio_frac={_bf}, direction={_dir})..."
                     )
-            # Fallback: non-burst modalities get data-driven MoM theta init
-            for mod_name in modality_names:
-                if mod_name not in px_r_init_mean_dict:
-                    mod_adata = self.adata.mod[mod_name]
-                    logger.info(f"Computing data-driven dispersion init for non-burst modality '{mod_name}'...")
                     log_theta_init, _diag = compute_dispersion_init(
                         mod_adata,
-                        biological_variance_fraction=self._dispersion_init_bio_frac,
+                        biological_variance_fraction=_bf,
                         theta_min=self._dispersion_init_theta_min,
                         theta_max=self._dispersion_init_theta_max,
+                        dispersion_prior_direction=_dir,
                         verbose=False,
                     )
-                    px_r_init_mean_dict[mod_name] = log_theta_init
-
-        # B4: per-modality hyper-prior routing.
-        # Rule: if a modality uses a data-init decoder (e.g. burst_frequency_size) AND
-        # dispersion_init is a data-driven mode, user hyper-prior overrides for that
-        # modality are IGNORED and replaced with MoM-derived values (warned).
-        if _bursting_init_per_modality:
-            import warnings as _warnings
-
-            from regularizedvi._constants import (
-                AUTO_HYPER_PRIOR_LAMBDA_MAX,
-                AUTO_HYPER_PRIOR_LAMBDA_MIN,
-                DECODER_TYPE_DEFAULTS,
-            )
-
-            _user_hp_beta = self._module_kwargs.get("dispersion_hyper_prior_beta")
-            _auto_beta = {}
-            _auto_prior = {}
-            for _mn in modality_names:
-                if _mn in _bursting_init_per_modality:
-                    _suggested = _bursting_init_per_modality[_mn]["suggested_hyper_beta"]
-                    _suggested = float(
-                        np.clip(
-                            _suggested,
-                            _hp_alpha_resolved[_mn] / AUTO_HYPER_PRIOR_LAMBDA_MAX,
-                            _hp_alpha_resolved[_mn] / AUTO_HYPER_PRIOR_LAMBDA_MIN,
-                        )
+                    _px_r_init_per_modality[_mn] = log_theta_init
+                    _suggested_mean = float(np.clip(_diag["suggested_hyper_mean"], 1e-4, 100.0))
+                    logger.info(
+                        f"  {_mn}: median theta={np.exp(np.median(log_theta_init)):.3f}, "
+                        f"CV²(L)={_diag['cv2_L']:.3f}, sub-Poisson={_diag['n_sub_poisson']}/{len(log_theta_init)}, "
+                        f"suggested_hyper_mean={_suggested_mean:.4f}"
                     )
-                    # Determine if a user override exists for this modality
-                    _user_val = None
-                    if isinstance(_user_hp_beta, dict):
-                        _user_val = _user_hp_beta.get(_mn)
-                    elif _user_hp_beta is not None:
-                        _user_val = float(_user_hp_beta)
-                    if _user_val is not None:
-                        _warnings.warn(
-                            f"[data-init decoder @ modality '{_mn}'] Ignoring user "
-                            f"dispersion_hyper_prior_beta={_user_val}; using MoM-derived "
-                            f"{_suggested:.4f} instead.",
+                elif self._dispersion_init == "variance_burst_size":
+                    if _dt == "burst_frequency_size":
+                        logger.info(f"Computing bursting model init for modality '{_mn}' (bio_frac={_bf})...")
+                        _init_vals, _diag = compute_bursting_init(
+                            mod_adata,
+                            biological_variance_fraction=_bf,
+                            burst_size_intercept=burst_intercept_dict.get(_mn, 1.0),
+                            sensitivity=sensitivity_dict.get(_mn, 1.0),
+                            theta_min=self._dispersion_init_theta_min,
+                            theta_max=self._dispersion_init_theta_max,
+                            verbose=True,
+                        )
+                        _px_r_init_per_modality[_mn] = _init_vals["log_theta"]
+                        _bursting_init_per_modality[_mn] = _init_vals
+                        _suggested_mean = float(np.clip(_init_vals["suggested_hyper_mean"], 1e-4, 100.0))
+                        logger.info(
+                            f"  {_mn}: median burst_freq={np.median(_init_vals['burst_freq']):.3f}, "
+                            f"median stochastic_v={np.median(_init_vals['stochastic_v_scale']):.4f}, "
+                            f"suggested_hyper_mean={_suggested_mean:.4f}"
+                        )
+                    else:
+                        # Non-burst modality under variance_burst_size: fall back to dispersion init
+                        logger.info(
+                            f"Computing data-driven dispersion init for non-burst modality '{_mn}' "
+                            f"(bio_frac={_bf}, direction={_dir})..."
+                        )
+                        log_theta_init, _diag = compute_dispersion_init(
+                            mod_adata,
+                            biological_variance_fraction=_bf,
+                            theta_min=self._dispersion_init_theta_min,
+                            theta_max=self._dispersion_init_theta_max,
+                            dispersion_prior_direction=_dir,
+                            verbose=False,
+                        )
+                        _px_r_init_per_modality[_mn] = log_theta_init
+                        _suggested_mean = float(np.clip(_diag["suggested_hyper_mean"], 1e-4, 100.0))
+
+                # Resolve auto-mean: MoM-derived if available, else decoder-type default
+                if _suggested_mean is not None:
+                    _user_val = _user_hp_mean.get(_mn) if _user_hp_mean else None
+                    _auto_mean[_mn] = _suggested_mean
+                    if _user_val is not None and _user_val != _suggested_mean:
+                        warnings.warn(
+                            f"[data-init {_mn}] Overriding dispersion_hyper_prior_mean: "
+                            f"{_user_val} -> {_suggested_mean:.4f}",
                             stacklevel=2,
                         )
-                    _auto_beta[_mn] = _suggested
-                    _auto_prior[_mn] = _hp_alpha_resolved[_mn] / _auto_beta[_mn]
-                    logger.info(
-                        f"  {_mn}: auto hyper-prior beta={_auto_beta[_mn]:.4f}, lambda_init={_auto_prior[_mn]:.1f}"
-                    )
                 else:
-                    _dt = _decoder_type_resolved.get(_mn, "expected_RNA")
-                    _dt_def = DECODER_TYPE_DEFAULTS.get(_dt, DECODER_TYPE_DEFAULTS["expected_RNA"])
-                    if isinstance(_user_hp_beta, dict) and _mn in _user_hp_beta:
-                        _auto_beta[_mn] = _user_hp_beta[_mn]
-                    elif isinstance(_user_hp_beta, (int, float)):
-                        _auto_beta[_mn] = float(_user_hp_beta)
-                    else:
-                        _auto_beta[_mn] = _dt_def["dispersion_hyper_prior_beta"]
-                    _auto_prior[_mn] = _hp_alpha_resolved[_mn] / _auto_beta[_mn]
+                    _auto_mean[_mn] = _dt_def["dispersion_hyper_prior_mean"]
+
+        px_r_init_mean_dict: dict[str, np.ndarray] | None = _px_r_init_per_modality if _px_r_init_per_modality else None
 
         kwargs = dict(self._module_kwargs)
         # Remove keys that are passed separately
@@ -804,10 +798,9 @@ class RegularizedMultimodalVI(
         if px_r_init_mean_dict is not None:
             kwargs["px_r_init_mean"] = px_r_init_mean_dict
 
-        # Inject auto-derived hyper-prior for burst modalities
-        if _bursting_init_per_modality and _auto_beta:
-            kwargs["dispersion_hyper_prior_beta"] = _auto_beta
-            kwargs["regularise_dispersion_prior"] = _auto_prior
+        # Inject auto-derived hyper-prior mean per modality (replaces legacy beta/prior injection)
+        if _needs_init and _auto_mean:
+            kwargs["dispersion_hyper_prior_mean"] = _auto_mean
 
         self.module = self._module_cls(
             modality_names=modality_names,
