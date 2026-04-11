@@ -386,7 +386,10 @@ def plot_variability_ratio(
     -------
     (fig, summary)
         ``summary`` has keys ``median_ratio``, ``min_ratio``, ``max_ratio``,
-        ``n_dims`` and ``claim_supported`` (True if median < 1e-2).
+        ``n_dims``, ``claim_supported_100x`` (True if median < 1e-2),
+        and ``claim_supported_1000x`` (True if median < 1e-3 — the strict
+        form that matches the plan's 1000× claim wording and the visual
+        reference line).
     """
     assert qz_loc.shape == qz_scale.shape, "qz_loc and qz_scale must have same shape"
     std_loc = np.std(qz_loc, axis=0)  # (n_dims,)
@@ -425,7 +428,8 @@ def plot_variability_ratio(
         "min_ratio": float(np.min(ratio)),
         "max_ratio": float(np.max(ratio)),
         "n_dims": int(len(ratio)),
-        "claim_supported": bool(med < 1e-2),
+        "claim_supported_100x": bool(med < 1e-2),
+        "claim_supported_1000x": bool(med < 1e-3),
     }
     return fig, summary
 
@@ -513,6 +517,49 @@ def plot_horseshoe_init_paired(
     axes[1].set_title(f"Initial scale — {dataset_label}")
     for a in axes:
         a.legend(fontsize=8)
+    fig.tight_layout()
+    save_fig(fig, output_dir, stem + f"_{dataset_label}", suffix)
+    return fig
+
+
+def plot_horseshoe_kl_trace(
+    history: dict[str, pd.DataFrame],
+    dataset_label: str,
+    output_dir: str | Path | None = None,
+    stem: str = "d4_horseshoe_kl_trace",
+    suffix: str = "",
+) -> plt.Figure | None:
+    """Twin-axis plot of per-epoch horseshoe KL vs reconstruction loss.
+
+    Reads ``history`` (i.e. ``model.history_``) looking for any keys that
+    start with ``horseshoe_kl_`` and end with ``_train``, plus the standard
+    ``reconstruction_loss_train``. Returns ``None`` if neither metric is
+    logged (the failed runs may not have horseshoe_kl logged).
+    """
+    hs_keys = [k for k in history if k.startswith("horseshoe_kl_") and k.endswith("_train")]
+    recon_key = "reconstruction_loss_train"
+    if not hs_keys or recon_key not in history:
+        return None
+
+    fig, ax1 = plt.subplots(figsize=(7, 4))
+    ax2 = ax1.twinx()
+
+    for k in hs_keys:
+        df = history[k]
+        y = df.iloc[:, 0].values
+        ax1.plot(np.arange(len(y)), y, label=k, color="C3")
+
+    recon_df = history[recon_key]
+    y_recon = recon_df.iloc[:, 0].values
+    ax2.plot(np.arange(len(y_recon)), y_recon, label=recon_key, color="C0")
+
+    ax1.set_xlabel("epoch")
+    ax1.set_ylabel("horseshoe_kl (red)")
+    ax2.set_ylabel("reconstruction_loss (blue)")
+    ax1.set_title(f"Horseshoe KL vs reconstruction trace — {dataset_label}")
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc="best")
     fig.tight_layout()
     save_fig(fig, output_dir, stem + f"_{dataset_label}", suffix)
     return fig
