@@ -1,0 +1,14 @@
+gsm_id	sample_id	filename	data_type	url	size_mb	gse_id
+GSM8944727	PBMC_Pie_Pre_ATAC	GSM8944727_BCG_PBMC_PIE_Pre_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM8944nnn/GSM8944727/suppl/GSM8944727_BCG_PBMC_PIE_Pre_atac_fragments.tsv.gz	1289.5	GSE295277
+GSM8944729	PBMC_Pool_Pre_ATAC	GSM8944729_BCG_PBMC_Pool_Pre_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM8944nnn/GSM8944729/suppl/GSM8944729_BCG_PBMC_Pool_Pre_atac_fragments.tsv.gz	1442.2	GSE295277
+GSM8944731	PBMC_Post_ATAC	GSM8944731_BCG_post_PBMC_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM8944nnn/GSM8944731/suppl/GSM8944731_BCG_post_PBMC_atac_fragments.tsv.gz	1683.0	GSE295277
+GSM8944733	PBMC_Pre_ATAC	GSM8944733_BCG_pre_PBMC_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM8944nnn/GSM8944733/suppl/GSM8944733_BCG_pre_PBMC_atac_fragments.tsv.gz	1088.2	GSE295277
+GSM8944735	PIE_Post_ATAC	GSM8944735_BCG_post_PIE_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM8944nnn/GSM8944735/suppl/GSM8944735_BCG_post_PIE_atac_fragments.tsv.gz	131.0	GSE295277
+GSM8944737	PIE_Post_1_ATAC	GSM8944737_BCG_PBMC_PIE_Post_1_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM8944nnn/GSM8944737/suppl/GSM8944737_BCG_PBMC_PIE_Post_1_atac_fragments.tsv.gz	1362.2	GSE295277
+GSM8944739	PIE_Post_2_ATAC	GSM8944739_BCG_PBMC_PIE_Post_2_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM8944nnn/GSM8944739/suppl/GSM8944739_BCG_PBMC_PIE_Post_2_atac_fragments.tsv.gz	1625.6	GSE295277
+GSM8945136	ATAC_preBCG_R1	GSM8945136_Sample_BCG_h1_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM8945nnn/GSM8945136/suppl/GSM8945136_Sample_BCG_h1_atac_fragments.tsv.gz	2933.8	GSE295308
+GSM8945137	ATAC_postBCG_R1	GSM8945137_Sample_BCG_h2_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM8945nnn/GSM8945137/suppl/GSM8945137_Sample_BCG_h2_atac_fragments.tsv.gz	1238.7	GSE295308
+GSM8945138	ATAC_preBCG_R2	GSM8945138_Sample_BCG_h3_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM8945nnn/GSM8945138/suppl/GSM8945138_Sample_BCG_h3_atac_fragments.tsv.gz	4531.0	GSE295308
+GSM8945139	ATAC_postBCG_R2	GSM8945139_Sample_BCG_h4_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM8945nnn/GSM8945139/suppl/GSM8945139_Sample_BCG_h4_atac_fragments.tsv.gz	1679.6	GSE295308
+GSE295277	GSE295277	GSE295277_25-04-16_BCG_cohort1_RNA_GEO.h5ad	rna_h5ad	ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE295nnn/GSE295277/suppl/GSE295277_25-04-16_BCG_cohort1_RNA_GEO.h5ad	613.4	GSE295277
+GSE295308	GSE295308	GSE295308_25-04-16_BCG_cohort2_RNA_GEO.h5ad	rna_h5ad	ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE295nnn/GSE295308/suppl/GSE295308_25-04-16_BCG_cohort2_RNA_GEO.h5ad	338.1	GSE295308

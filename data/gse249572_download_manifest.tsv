@@ -1,0 +1,7 @@
+gsm_id	sample_id	filename	data_type	url	size_mb
+GSM7950270	iPSC_prepat_d5_1	GSM7950270_adata_iPSC_prepat_d5_1.h5ad.gz	rna_h5ad	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7950nnn/GSM7950270/suppl/GSM7950270_adata_iPSC_prepat_d5_1.h5ad.gz	83.4
+GSM7950271	iPSC_prepat_d5_1	GSM7950271_iPSC_prepat_d5_1_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7950nnn/GSM7950271/suppl/GSM7950271_iPSC_prepat_d5_1_atac_fragments.tsv.gz	2662.4
+GSM7950272	iPSC_prepat_d5_2	GSM7950272_adata_iPSC_prepat_d5_2.h5ad.gz	rna_h5ad	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7950nnn/GSM7950272/suppl/GSM7950272_adata_iPSC_prepat_d5_2.h5ad.gz	82.9
+GSM7950273	iPSC_prepat_d5_2	GSM7950273_iPSC_prepat_d5_2_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7950nnn/GSM7950273/suppl/GSM7950273_iPSC_prepat_d5_2_atac_fragments.tsv.gz	2560.0
+GSM7950274	iPSC_ctrl	GSM7950274_adata_iPSC_ctrl.h5ad.gz	rna_h5ad	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7950nnn/GSM7950274/suppl/GSM7950274_adata_iPSC_ctrl.h5ad.gz	14.0
+GSM7950275	iPSC_ctrl	GSM7950275_iPSC_ctrl_atac_fragments.tsv.gz	atac_fragment	ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7950nnn/GSM7950275/suppl/GSM7950275_iPSC_ctrl_atac_fragments.tsv.gz	2867.2
