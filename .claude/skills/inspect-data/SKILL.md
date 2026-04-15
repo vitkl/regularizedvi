@@ -19,6 +19,8 @@ bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/insp
 bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/inspect_h5ad.py file.h5ad --var-names 10 --obs-names 5
 bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/inspect_h5ad.py file.h5ad --layer-shapes
 bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/inspect_h5ad.py file.h5ad --grep "train" --head 10
+bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/inspect_h5ad.py file.h5ad --obs-unique tissue dataset batch
+bash scripts/helper_scripts/run_python_cmd.sh scripts/claude_helper_scripts/inspect_h5ad.py file.h5ad --obs-unique tissue --obs-unique-counts
 ```
 
 ## Pickle files - `inspect_pickle.py`
