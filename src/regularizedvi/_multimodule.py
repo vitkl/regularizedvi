@@ -260,6 +260,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         # Variational posterior init (low-sigma init for var_encoder bias)
         var_init_scale: float | None = None,
         use_softplus_var_activation: bool = False,
+        # Mean-encoder weight upscale at init (widens qz.loc spread to counteract collapse)
+        z_loc_init_scale: float = 1.0,
         # MOFA2-style ARD per-dim sigma scale on Z
         use_ard_z_sigma_scale: bool = False,
     ):
@@ -301,6 +303,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         self.horseshoe_posterior_init_scale = horseshoe_posterior_init_scale
         self.var_init_scale = var_init_scale
         self.use_softplus_var_activation = use_softplus_var_activation
+        self.z_loc_init_scale = z_loc_init_scale
         self.use_ard_z_sigma_scale = use_ard_z_sigma_scale
         if self.horseshoe_latent_z_prior_type is not None and self.horseshoe_latent_z_prior_type not in (
             "lognormal",
@@ -320,6 +323,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
             )
         if self.var_init_scale is not None and float(self.var_init_scale) <= 0.0:
             raise ValueError(f"var_init_scale must be > 0 if set, got {self.var_init_scale!r}")
+        if float(self.z_loc_init_scale) <= 0.0:
+            raise ValueError(f"z_loc_init_scale must be > 0, got {self.z_loc_init_scale!r}")
         if self.horseshoe_latent_z_prior_type is not None:
             if float(horseshoe_posterior_init_loc) <= 0.0:
                 raise ValueError(f"horseshoe_posterior_init_loc must be > 0, got {horseshoe_posterior_init_loc!r}")
@@ -475,6 +480,8 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         }
 
         # ---- Per-modality encoders ----
+        # z_loc_init_scale applied ONLY to the Z posterior encoders (not to horseshoe q(λ)
+        # or library encoders) — it targets posterior-Z-loc collapse specifically.
         self.encoders = nn.ModuleDict()
         for name in self.modality_names:
             n_in = n_input_per_modality[name] + n_continuous_cov
@@ -490,6 +497,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 use_batch_norm=use_batch_norm_encoder,
                 use_layer_norm=use_layer_norm_encoder,
                 return_dist=True,
+                z_loc_init_scale=self.z_loc_init_scale,
                 **_enc_init_kwargs,
                 **_extra_encoder_kwargs,
             )
@@ -552,6 +560,7 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 use_batch_norm=use_batch_norm_encoder,
                 use_layer_norm=use_layer_norm_encoder,
                 return_dist=True,
+                z_loc_init_scale=self.z_loc_init_scale,
                 **_enc_init_kwargs,
                 **_extra_encoder_kwargs,
             )

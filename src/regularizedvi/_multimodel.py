@@ -273,6 +273,8 @@ class RegularizedMultimodalVI(
         # Variational posterior init (low-sigma init for var_encoder bias)
         var_init_scale: float | None = None,
         use_softplus_var_activation: bool = False,
+        # Mean-encoder weight upscale at init (widens qz.loc spread to counteract collapse)
+        z_loc_init_scale: float = 1.0,
         # MOFA2-style ARD per-dim sigma scale on Z
         use_ard_z_sigma_scale: bool = False,
         **kwargs,
@@ -365,6 +367,7 @@ class RegularizedMultimodalVI(
             "horseshoe_posterior_init_scale": horseshoe_posterior_init_scale,
             "var_init_scale": var_init_scale,
             "use_softplus_var_activation": use_softplus_var_activation,
+            "z_loc_init_scale": z_loc_init_scale,
             "use_ard_z_sigma_scale": use_ard_z_sigma_scale,
             **kwargs,
         }

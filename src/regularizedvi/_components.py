@@ -295,6 +295,17 @@ class RegularizedEncoder(nn.Module):
         Defaults to :meth:`torch.exp`.
     return_dist
         Return directly the distribution of z instead of its parameters.
+    use_softplus_var_activation
+        If True, use softplus instead of exp for the variance activation.
+    var_init_scale
+        If set, pins the initial qz.scale (std) to approximately this value by
+        setting the var-head bias and scaling its weights by 0.1×. If None, the
+        variance head uses PyTorch default init.
+    z_loc_init_scale
+        Multiplicative factor applied to ``mean_encoder.weight`` at initialisation
+        (relative to PyTorch's default Kaiming-uniform init). Default 1.0 = no-op.
+        Values >1 widen cell-to-cell qz.loc spread at init, which can counteract
+        posterior collapse to the N(0, I) prior. Must be > 0.
     **kwargs
         Keyword args for :class:`RegularizedFCLayers`
     """
@@ -313,6 +324,7 @@ class RegularizedEncoder(nn.Module):
         return_dist: bool = False,
         use_softplus_var_activation: bool = False,
         var_init_scale: float | None = None,
+        z_loc_init_scale: float = 1.0,
         **kwargs,
     ):
         super().__init__()
@@ -365,6 +377,16 @@ class RegularizedEncoder(nn.Module):
                 self.var_encoder.bias.fill_(bias_val)
                 # Scale the kaiming_uniform default by 0.1× (preserves fan-in scaling, just narrower).
                 self.var_encoder.weight.data.mul_(0.1)
+
+        # Upscale mean_encoder weights to widen cell-to-cell qz.loc spread at init.
+        # Counteracts posterior collapse when init-time qz.loc variability is much smaller
+        # than qz.scale (diagnosed ~500× at default init, ~50× at var_init_scale=0.1).
+        # Default 1.0 = no-op. Bias untouched (shifting all cells identically is not useful).
+        if float(z_loc_init_scale) <= 0.0:
+            raise ValueError(f"z_loc_init_scale must be > 0, got {z_loc_init_scale!r}")
+        if float(z_loc_init_scale) != 1.0:
+            with torch.no_grad():
+                self.mean_encoder.weight.data.mul_(float(z_loc_init_scale))
 
     def forward(self, x: torch.Tensor, *cat_list: int):
         r"""The forward computation for a single sample.
