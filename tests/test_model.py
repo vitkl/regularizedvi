@@ -3298,6 +3298,68 @@ class TestZPosteriorDiagnostics:
         with pytest.raises(ValueError, match="var_init_scale must be > 0"):
             RegularizedEncoder(n_input=4, n_output=2, n_hidden=4, var_init_scale=0.0)
 
+    def test_z_loc_init_scale_scales_mean_encoder_weight(self):
+        """z_loc_init_scale multiplies mean_encoder.weight by the given factor at init."""
+        from regularizedvi._components import RegularizedEncoder
+
+        torch.manual_seed(0)
+        enc1 = RegularizedEncoder(n_input=8, n_output=4, n_hidden=16, z_loc_init_scale=1.0)
+        torch.manual_seed(0)
+        enc10 = RegularizedEncoder(n_input=8, n_output=4, n_hidden=16, z_loc_init_scale=10.0)
+        w1 = enc1.mean_encoder.weight.detach()
+        w10 = enc10.mean_encoder.weight.detach()
+        assert torch.allclose(w10, 10.0 * w1, atol=1e-6), "mean_encoder.weight should be 10× with z_loc_init_scale=10"
+        # Bias untouched
+        assert torch.allclose(enc10.mean_encoder.bias.detach(), enc1.mean_encoder.bias.detach())
+        # var_encoder untouched by z_loc_init_scale
+        assert torch.allclose(enc10.var_encoder.weight.detach(), enc1.var_encoder.weight.detach())
+
+    def test_z_loc_init_scale_default_is_noop(self):
+        """Default z_loc_init_scale=1.0 preserves PyTorch default init bitwise."""
+        from regularizedvi._components import RegularizedEncoder
+
+        torch.manual_seed(42)
+        enc_default = RegularizedEncoder(n_input=8, n_output=4, n_hidden=16)
+        torch.manual_seed(42)
+        enc_explicit = RegularizedEncoder(n_input=8, n_output=4, n_hidden=16, z_loc_init_scale=1.0)
+        assert torch.equal(enc_default.mean_encoder.weight, enc_explicit.mean_encoder.weight)
+
+    def test_z_loc_init_scale_zero_raises(self):
+        from regularizedvi._components import RegularizedEncoder
+
+        with pytest.raises(ValueError, match="z_loc_init_scale must be > 0"):
+            RegularizedEncoder(n_input=4, n_output=2, n_hidden=4, z_loc_init_scale=0.0)
+        with pytest.raises(ValueError, match="z_loc_init_scale must be > 0"):
+            RegularizedEncoder(n_input=4, n_output=2, n_hidden=4, z_loc_init_scale=-1.0)
+
+    def test_z_loc_init_scale_multimodal_train(self, mdata):
+        """End-to-end: multimodal model with z_loc_init_scale=5.0 trains and scales Z encoder weights.
+
+        Also verifies library (l_encoders) and horseshoe encoders are NOT affected.
+        """
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        torch.manual_seed(0)
+        model_default = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        torch.manual_seed(0)
+        model_scaled = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, z_loc_init_scale=5.0)
+        # Per-modality Z encoders: weight should be 5× larger
+        for name in model_scaled.module.modality_names:
+            w_def = model_default.module.encoders[name].mean_encoder.weight.detach()
+            w_scl = model_scaled.module.encoders[name].mean_encoder.weight.detach()
+            assert torch.allclose(w_scl, 5.0 * w_def, atol=1e-5), f"Z encoder[{name}] not scaled"
+            # Library encoder must NOT be scaled
+            l_def = model_default.module.l_encoders[name].mean_encoder.weight.detach()
+            l_scl = model_scaled.module.l_encoders[name].mean_encoder.weight.detach()
+            assert torch.equal(l_def, l_scl), f"l_encoder[{name}] should be unaffected by z_loc_init_scale"
+        model_scaled.train(max_epochs=2, train_size=1.0, batch_size=32)
+        assert "elbo_train" in model_scaled.history_
+
+    def test_z_loc_init_scale_module_zero_raises(self, mdata):
+        """Module-level guard on z_loc_init_scale."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        with pytest.raises(ValueError, match="z_loc_init_scale must be > 0"):
+            regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4, z_loc_init_scale=0.0)
+
     def test_var_init_scale_multimodal_train(self, mdata):
         """End-to-end: multimodal model with var_init_scale=0.1 trains."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
