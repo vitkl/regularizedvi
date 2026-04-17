@@ -875,7 +875,14 @@ def load_tea_seq_pbmc(
     annot_df["bc_seq"] = annot_df["barcode"].str.rsplit("-", n=1).str[0]
     annot_df["suffix"] = annot_df["barcode"].str.rsplit("-", n=1).str[1]
 
-    # Mapping: sample_id -> Seurat suffix in the Figure4 CSV
+    # Mapping: sample_id -> Seurat suffix in the Figure4 CSV.
+    # Verified 2026-04-17 via Jaccard overlap between cellranger H5 barcodes and
+    # Figure4 bc_seq per suffix (scripts/claude_helper_scripts/_tea_seq_jaccard_check.py):
+    #   GSM5123951 ↔ suffix 3 (J=0.791, containment=0.997)
+    #   GSM5123952 ↔ suffix 4 (J=0.767, containment=0.996)
+    #   GSM5123953 ↔ suffix 5 (J=0.769, containment=0.997)
+    #   GSM5123954 ↔ suffix 6 (J=0.729, containment=0.997)
+    # Off-diagonal Jaccard ≈ 0.005 (barcode-whitelist overlap, not real match).
     well_to_suffix = {
         "GSM5123951_tea_seq": "3",
         "GSM5123952_tea_seq": "4",
@@ -907,18 +914,26 @@ def load_tea_seq_pbmc(
     # Fragment files use UUID barcodes, not cellranger barcodes.
     # Convert obs_names from {sample_id}-{cellranger_bc} to {sample_id}-{uuid_bc}
     # using metadata CSVs that provide the mapping.
+    # Key the map by (sample_id, original_barcode): the same cellranger barcode
+    # sequence appears in multiple wells (shared 10x whitelist), so a flat map
+    # keyed only on barcode would have later wells overwrite earlier wells.
     import glob as _glob
 
     tea_seq_base = data_folder.rstrip("/")
-    bc_map = {}  # cellranger_barcode -> uuid_barcode
+    bc_map: dict[tuple[str, str], str] = {}  # (sample_id, cellranger_bc) -> uuid_bc
     for meta_file in sorted(
         _glob.glob(f"{tea_seq_base}/tea_seq/GSM*/GSM*_metadata.csv.gz")
         + _glob.glob(f"{tea_seq_base}/multiome/GSM*/GSM*_metadata.csv.gz")
     ):
+        # Derive sample_id from directory layout: .../(tea_seq|multiome)/GSM*/...
+        parts = meta_file.split(os.sep)
+        kind = "tea_seq" if "tea_seq" in parts else "multiome"
+        gsm = next(p for p in parts if p.startswith("GSM"))
+        meta_sid = f"{gsm}_{kind}"
         meta_df = pd.read_csv(meta_file, usecols=["barcodes", "original_barcodes"])
         for _, row in meta_df.iterrows():
-            bc_map[row["original_barcodes"]] = row["barcodes"]
-    print(f"TEA-seq UUID barcode mapping: {len(bc_map)} entries")
+            bc_map[(meta_sid, row["original_barcodes"])] = row["barcodes"]
+    print(f"TEA-seq UUID barcode mapping: {len(bc_map)} entries across {len({k[0] for k in bc_map})} samples")
 
     # Remap obs_names: replace cellranger barcode with UUID
     new_names = []
@@ -927,7 +942,7 @@ def load_tea_seq_pbmc(
         raw_bc = name[len(sid) + 1 :]
         if not raw_bc.endswith("-1"):
             raw_bc = raw_bc + "-1"
-        uuid_bc = bc_map.get(raw_bc)
+        uuid_bc = bc_map.get((sid, raw_bc))
         if uuid_bc is not None:
             new_names.append(f"{sid}-{uuid_bc}")
             n_uuid_mapped += 1
