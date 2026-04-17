@@ -20,6 +20,15 @@ Supporting: `_model.py` (942L), `_multimodel.py` (1571L), `_components.py` (472L
 - `encoder_covariate_keys` — encoder injection (default False, matching scVI/MultiVI/PeakVI)
 - `batch_key` alone fans out to `ambient_covariate_keys` `library_size_key` `dispersion_key` (backward compatibility)
 
+## Purpose-Based Covariate Keys (new code convention)
+- `library_key` — finest technical unit (sequencing run, lane, GEM well). In `_model.py`, `batch_key` is semantically equivalent to `library_key` — it is the finest technical unit, fanning out to `ambient_covariate_keys`, `library_size_key`, `dispersion_key`.
+- `dataset_key` — groups of libraries from the same study. Optional mid-level grouping; each `library_key` value must map to exactly one `dataset_key` value (validated at setup).
+- `technical_covariate_keys` — broad technical axes (embryo, experiment type, 10x kit). Optional, non-hierarchical; may have multiple values specified.
+- New code should use purpose-based keys instead of the generic `batch_key`. The model's existing `ambient_covariate_keys`, `dispersion_key`, `library_size_key` are all finest-unit groupings — aligning with `library_key` terminology.
+- Graceful degradation: when only `library_key` is provided, multi-level comparisons (cross-dataset, cross-technical) become empty but do not raise errors.
+- Backward compatibility: existing code (`_model.py` `batch_key`, `_integration_metrics.py` `batch_key`) retains current semantics. New neighbourhood correlation metrics module `src/regularizedvi/plt/_neighbourhood_correlation.py` uses `library_key`, `dataset_key`, `technical_covariate_keys` exclusively.
+- Curated marker genes: `docs/notebooks/known_marker_genes.csv` (~192 genes, columns: gene, cell_type, lineage, category).
+
 ## Mathematical Components
 - **Ambient RNA**: Additive background s_e,g = exp(beta) with Gamma(1,100) prior — per gene/batch (by default not regularised with prior)
 - **Feature scaling**: y_t,g = softplus(gamma)/0.7 with Gamma(200,200) prior — multiplicative bias per covariate group (by default regularised with prior)
@@ -95,6 +104,9 @@ Per-modality encoders, concatenated latent space [z_atac; z_rna] (alphabetical s
 
 ## Active Experiments
 GPU experiment specs in `_gpu_jobs.yaml` (~20+ experiments on NeurIPS 2021 adult bone marrow multiome). Testing: library centering, library prior variance, early stopping sensitivity, stratified validation, learnable modality scaling, ATAC filtering thresholds, per-modality learning rates.
+
+## Integration Assessment Plans (Active)
+- Neighbourhood correlation metrics: `.claude/plans/neighbourhood_correlation_plan.md` — per-cell marker gene correlation with KNN neighbours, label-free. Stratified by library/dataset/technical.
 
 ## Immune Integration Pipeline
 `docs/notebooks/immune_integration/` — 7-dataset multi-site study (706k cells after QC): bone marrow, TEA-seq PBMC, NEAT-seq CD4, Crohn's PBMC, COVID infant PBMC, lung/spleen, infant/adult spleen. 7 notebooks: data loading -> scrublet -> ATAC loading -> RNA training -> annotation -> CRE selection -> multimodal training.

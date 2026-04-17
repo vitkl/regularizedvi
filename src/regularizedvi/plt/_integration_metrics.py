@@ -336,11 +336,50 @@ _BATCH_METRICS = {
 _BIO_PREFIXES = ("silhouette_label_",)
 _BATCH_PREFIXES = ("silhouette_batch_",)
 
+# Neighbourhood correlation headline metrics (H1-H14)
+_NEIGHBOURHOOD_METRICS = {
+    "corr_within_library",
+    "corr_consistency",
+    "corr_cross_library",
+    "corr_gap_library",
+    "isolation_norm_cross_library",
+    "discrepancy_cross_library",
+    "corr_cross_dataset",
+    "corr_gap_dataset",
+    "isolation_norm_cross_dataset",
+    "discrepancy_cross_dataset",
+    "distrib_overlap_library",
+    "distrib_overlap_dataset",
+    "integration_failure_rate",
+    "cross_technical_correlation",
+    "bio_conservation",
+    "library_integration",
+    "dataset_integration",
+    "batch_correction",
+    "total",
+}
+_NEIGHBOURHOOD_PREFIXES = (
+    "corr_within_",
+    "corr_cross_",
+    "corr_gap_",
+    "corr_consistency_",
+    "isolation_norm_",
+    "discrepancy_",
+    "distrib_overlap_",
+    "integration_failure_",
+    "cross_technical_",
+    "bio_conservation_",
+    "library_integration_",
+    "dataset_integration_",
+    "batch_correction_",
+)
+
 # Colors for column header groups
 _GROUP_COLORS = {
     "summary": "#808080",  # gray
     "bio": "#2ca02c",  # green
     "batch": "#ff7f0e",  # orange
+    "neighbourhood": "#1f77b4",  # blue
     "hyperparam": "#9467bd",  # purple
 }
 
@@ -358,6 +397,11 @@ def _classify_metric_col(col_name: str) -> str:
         return "bio"
     if col_name.startswith(_BATCH_PREFIXES):
         return "batch"
+    # Neighbourhood correlation metrics (H1-H14)
+    if col_name in _NEIGHBOURHOOD_METRICS:
+        return "neighbourhood"
+    if col_name.startswith(_NEIGHBOURHOOD_PREFIXES):
+        return "neighbourhood"
     return "hyperparam"
 
 
@@ -440,9 +484,9 @@ def plot_integration_heatmap(
     if sort_by in plot_df.columns:
         plot_df = plot_df.sort_values(sort_by, ascending=False)
 
-    # ── 4. Define column order: summary → bio → batch → hyperparams ──
+    # ── 4. Define column order: summary → bio → batch → neighbourhood → hyperparams ──
     ordered_metric_cols = []
-    for group_name in ["summary", "bio", "batch"]:
+    for group_name in ["summary", "bio", "batch", "neighbourhood"]:
         for c in metric_cols:
             if _classify_metric_col(c) == group_name:
                 ordered_metric_cols.append(c)
@@ -559,7 +603,7 @@ def plot_integration_heatmap(
     ax.set_frame_on(False)
 
     # Group labels at top
-    group_positions = {"summary": [], "bio": [], "batch": [], "hyperparam": []}
+    group_positions = {"summary": [], "bio": [], "batch": [], "neighbourhood": [], "hyperparam": []}
     for j, c in enumerate(all_display_cols):
         g = _classify_metric_col(c) if j < n_metric else "hyperparam"
         group_positions[g].append(j)
@@ -567,6 +611,7 @@ def plot_integration_heatmap(
         "summary": "Summary",
         "bio": "Bio conservation",
         "batch": "Batch correction",
+        "neighbourhood": "Neighbourhood corr.",
         "hyperparam": "Hyperparameters",
     }
     for g, positions in group_positions.items():
