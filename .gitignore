@@ -70,7 +70,6 @@ _create_nb55b.py
 _check_job_mem.sh
 _submit_experiments.sh
 _extract_lib_values.sh
-scripts/helper_scripts/
 scripts/claude_helper_scripts/
 
 # Claude Code local settings (user-specific permissions)
