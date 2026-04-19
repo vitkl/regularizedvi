@@ -4,10 +4,20 @@ description: Mandatory rules for running Python, using helper scripts, planning 
 
 # Helper Script Rules
 
+## Cluster Detection
+The helper scripts auto-detect which HPC cluster they are running on — you don't need to branch on cluster in your own code. Detection markers:
+
+- **Crick** — `/nemo/lab/briscoej/` exists **and** `/camp/apps/eb/software/Miniconda3/` exists; hostname typically matches `*.thecrick.org` or `*.crick.ac.uk`.
+- **Sanger farm22** — `/software/conda/users/vk7/` exists; hostname matches `farm22-*`.
+
+Cluster-specific entry points: use `/check-job` for **LSF/bsub** (Sanger) and `/check-job-slurm` for **Slurm/sbatch** (Crick). `run_python_cmd.sh` handles cluster detection internally — one call site, both clusters.
+
+One-time setup on Crick (before first use): `bash scripts/helper_scripts/setup_bashrc_crick.sh` — sanity-checks conda init + module availability and appends `PYTHONNOUSERSITE=TRUE` to `~/.bashrc` as a safety net.
+
 ## Python Execution
 - ALWAYS use `bash scripts/helper_scripts/run_python_cmd.sh` to run Python
 - Default env: `regularizedvi`
-- Other envs: `--env cell2state`, `--env hashfrag`
+- Other envs: `--env cell2state`, `--env hashfrag` (Sanger only for now)
 
 ## NEVER Do These
 - Bare `python3` or `python`
@@ -23,7 +33,8 @@ description: Mandatory rules for running Python, using helper scripts, planning 
 ## Inspection Routing — Global Skills (in `~/.claude/shared-skills/`)
 | Need | Skill / Script |
 |------|----------------|
-| Job status / monitoring | `/check-job` skill → `bash ~/.claude/shared-skills/scripts/check_jobs.sh JOB_ID1 [JOB_ID2 ...]` |
+| Slurm job status / monitoring (Crick) | `/check-job-slurm` skill → `bash ~/.claude/shared-skills/scripts/check_jobs_slurm.sh JOB_ID1 [JOB_ID2 ...]` |
+| LSF/bsub job status / monitoring (Sanger) | `/check-job` skill → `bash ~/.claude/shared-skills/scripts/check_jobs.sh JOB_ID1 [JOB_ID2 ...]` |
 | Notebook structure/search/errors/progress | `/inspect-notebook` skill → `bash scripts/helper_scripts/run_python_cmd.sh ~/.claude/shared-skills/scripts/_inspect_notebook.py NOTEBOOK [flags]` |
 | Conversation JSONL inspection | `/inspect-conversation` skill → `python3 ~/.claude/shared-skills/scripts/inspect_conversation.py JSONL [flags]` |
 | Notebook progress bars (tqdm) | `bash scripts/helper_scripts/run_python_cmd.sh ~/.claude/shared-skills/scripts/check_notebook_progress_bar.py NOTEBOOK` |
