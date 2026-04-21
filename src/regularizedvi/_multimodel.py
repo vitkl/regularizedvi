@@ -1770,10 +1770,10 @@ class RegularizedMultimodalVI(
         # ------------------------------------------------------------------
         # Phase B: per-batch loop with progress bar.
         # ------------------------------------------------------------------
+        _n_batches = len(scdl) if hasattr(scdl, "__len__") else None
         try:
             from tqdm.auto import tqdm
 
-            _n_batches = len(scdl) if hasattr(scdl, "__len__") else None
             _scdl_iter = tqdm(
                 scdl,
                 total=_n_batches,
@@ -1783,7 +1783,53 @@ class RegularizedMultimodalVI(
         except ImportError:
             _scdl_iter = scdl
 
+        import time as _time
+
+        _attr_batch_idx = 0
+        _attr_t20: float | None = None
+        _attr_sec_per_batch: float | None = None
+        _attr_t_loop_start = _time.perf_counter()
+        # Print ~10 equally-spaced progress lines after the initial estimate.
+        _attr_print_every: int | None = (
+            max(1, _n_batches // 10) if _n_batches is not None else None
+        )
+
         for tensors in _scdl_iter:
+            _attr_batch_idx += 1
+
+            # Timing instrumentation: bypasses frozen tqdm in papermill.
+            # Estimate rate from batches 20-50; then ~10 equally-spaced lines.
+            _t_now = _time.perf_counter()
+            if _attr_batch_idx == 20:
+                _attr_t20 = _t_now
+            elif _attr_batch_idx == 50 and _attr_t20 is not None and _n_batches is not None:
+                _attr_sec_per_batch = (_t_now - _attr_t20) / 30
+                _total_sec = _attr_sec_per_batch * _n_batches
+                _h, _rem = divmod(int(_total_sec), 3600)
+                _m = _rem // 60
+                print(
+                    f"[attribution] {_attr_sec_per_batch:.2f}s/batch × {_n_batches} batches"
+                    f" ≈ {_h}h {_m:02d}m total",
+                    flush=True,
+                )
+            elif (
+                _attr_sec_per_batch is not None
+                and _attr_print_every is not None
+                and _attr_batch_idx > 50
+                and _attr_batch_idx % _attr_print_every == 0
+            ):
+                _elapsed = _t_now - _attr_t_loop_start
+                _remaining = max(0.0, _attr_sec_per_batch * _n_batches - _elapsed)
+                _eh, _rem = divmod(int(_elapsed), 3600)
+                _em = _rem // 60
+                _rh, _rem = divmod(int(_remaining), 3600)
+                _rm = _rem // 60
+                print(
+                    f"[attribution] batch {_attr_batch_idx}/{_n_batches}"
+                    f"  elapsed {_eh}h{_em:02d}m  remaining ~{_rh}h{_rm:02d}m",
+                    flush=True,
+                )
+
             # Move all tensors to model device (dataloader returns CPU tensors)
             tensors = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
 
