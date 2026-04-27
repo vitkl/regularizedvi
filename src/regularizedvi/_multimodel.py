@@ -1561,6 +1561,7 @@ class RegularizedMultimodalVI(
         eps: float = 1e-3,
         remove_covariates: str | bool = False,
         covariate_reference: str = "zero",
+        attribution_method: str = "jacfwd",
     ) -> dict[str, dict[str, np.ndarray]]:
         """Compute decoder Jacobian attribution per modality.
 
@@ -1569,10 +1570,11 @@ class RegularizedMultimodalVI(
         dimensions each decoder actually uses. This allows creating
         modality-specific views of the shared latent space.
 
-        Uses ``torch.func.vmap(jacfwd(...))`` to compute exact per-cell
-        Jacobians, vectorized across the cell batch dimension. Forward-mode
-        autodiff is preferred because n_genes >> n_latent. ``eps`` is retained
-        for backward compatibility but is no longer used (Jacobian is exact).
+        Two algorithms are available — see ``attribution_method``. Both produce
+        numerically equivalent results (within fp32 reduction order); H2b
+        unlocks much larger ``batch_size`` because peak memory is independent
+        of ``n_latent``. ``eps`` is retained for backward compatibility but is
+        no longer used (Jacobian is exact).
 
         Parameters
         ----------
@@ -1600,6 +1602,20 @@ class RegularizedMultimodalVI(
             - ``"zero"``: zero out one-hot encodings (or skip feature scaling).
             - ``"mean"``: use uniform distribution across categories.
             - ``"reference"``: use the most common level per covariate column.
+        attribution_method
+            Algorithm used to compute the per-cell decoder Jacobian:
+
+            - ``"jacfwd"`` (default): ``vmap(jacfwd(decoder))`` — materialises
+              the full ``(bs, n_features, n_latent)`` Jacobian per batch.
+              Memory scales with ``bs × n_features × n_latent`` and has a
+              ~6× working-set overhead from ``vmap`` internals (the embryo
+              4-modality model OOMs on 80 GB at ``batch_size > 8``).
+            - ``"h2b"``: chunked Python ``for k in range(n_latent)`` loop
+              calling ``vmap(jvp(decoder))`` per latent column. Materialises
+              a single Jacobian column ``(bs, n_features)`` at a time;
+              peak memory is **independent of ``n_latent``**, unlocking
+              substantially larger ``batch_size`` (≥128). Numerically
+              equivalent to ``"jacfwd"`` within fp32 reduction order.
 
         Returns
         -------
@@ -1627,6 +1643,9 @@ class RegularizedMultimodalVI(
             raise ValueError(msg)
         if covariate_reference not in ("zero", "mean", "reference"):
             msg = f"covariate_reference must be 'zero', 'mean', or 'reference'. Got {covariate_reference!r}"
+            raise ValueError(msg)
+        if attribution_method not in ("jacfwd", "h2b"):
+            msg = f"attribution_method must be 'jacfwd' or 'h2b'. Got {attribution_method!r}"
             raise ValueError(msg)
 
         _remove_cat = remove_covariates in ("cat_covs", "all")
@@ -1675,7 +1694,7 @@ class RegularizedMultimodalVI(
         # embryo dataset. We also (optionally) wrap the hoisted wrapper with
         # torch.compile(dynamic=True) so Inductor can fuse the decoder path.
         # ------------------------------------------------------------------
-        from torch.func import jacfwd, vmap
+        from torch.func import jacfwd, jvp, vmap
 
         # Stability flags derived from the data registry + call-level options.
         # These do not vary across batches within a single attribution run,
@@ -1747,25 +1766,43 @@ class RegularizedMultimodalVI(
                 )
                 return one_cell_decode(z_s.unsqueeze(0)).squeeze(0)
 
-            _in_dims = (0, 0, 0, 0, 0, 0, tuple(0 for _ in _dec_n_cat_list_name))
-            jac_per_cell = vmap(
-                jacfwd(_decode_rate_one, argnums=0),
-                in_dims=_in_dims,
-            )
-            # Note: we intentionally do NOT wrap `jac_per_cell` with
-            # `torch.compile`. Dynamo + functorch's `vmap(jacfwd(...))` path
-            # fails inside `torch.cat((x, *one_hot_cat_list_layer), dim=-1)` in
-            # `FCLayers.forward` with "Cannot call sizes() on tensor with
-            # symbolic sizes/strides" under dynamic-shape tracing. The
-            # hoisting refactor alone captures the bulk of the speedup
-            # (avoiding ~200k per-batch Python/functorch wrapper allocations
-            # on the embryo dataset).
+            if attribution_method == "h2b":
+                # H2b: vmap the decoder over the cell batch axis ONCE here
+                # (Phase A). In Phase B we then call ``torch.func.jvp`` once
+                # per latent column on the batched decoder, with the
+                # non-z primals (lib, batch_index, bg, cc, fs, cat) supplied
+                # as closure constants of the wrapper lambda. This keeps
+                # the jvp call OUTSIDE vmap (avoids known
+                # vmap-inside-jvp routing issues with multiple primals)
+                # and matches jacfwd's "differentiate w.r.t. argnums=0"
+                # semantics exactly.
+                _in_dims = (0, 0, 0, 0, 0, 0, tuple(0 for _ in _dec_n_cat_list_name))
+                decoder_batched = vmap(_decode_rate_one, in_dims=_in_dims)
+                per_modality_ops[name] = {
+                    "decoder_batched": decoder_batched,
+                    "has_bg": _has_bg_for_name,
+                    "dec_n_cat_list": _dec_n_cat_list_name,
+                }
+            else:  # "jacfwd"
+                _in_dims = (0, 0, 0, 0, 0, 0, tuple(0 for _ in _dec_n_cat_list_name))
+                jac_per_cell = vmap(
+                    jacfwd(_decode_rate_one, argnums=0),
+                    in_dims=_in_dims,
+                )
+                # Note: we intentionally do NOT wrap `jac_per_cell` with
+                # `torch.compile`. Dynamo + functorch's `vmap(jacfwd(...))` path
+                # fails inside `torch.cat((x, *one_hot_cat_list_layer), dim=-1)` in
+                # `FCLayers.forward` with "Cannot call sizes() on tensor with
+                # symbolic sizes/strides" under dynamic-shape tracing. The
+                # hoisting refactor alone captures the bulk of the speedup
+                # (avoiding ~200k per-batch Python/functorch wrapper allocations
+                # on the embryo dataset).
 
-            per_modality_ops[name] = {
-                "jac": jac_per_cell,
-                "has_bg": _has_bg_for_name,
-                "dec_n_cat_list": _dec_n_cat_list_name,
-            }
+                per_modality_ops[name] = {
+                    "jac": jac_per_cell,
+                    "has_bg": _has_bg_for_name,
+                    "dec_n_cat_list": _dec_n_cat_list_name,
+                }
 
         # ------------------------------------------------------------------
         # Phase B: per-batch loop with progress bar.
@@ -1981,9 +2018,44 @@ class RegularizedMultimodalVI(
                             _ci += 1
                 cat_pack = tuple(cat_pack_list)
 
-                # Call the hoisted vmap(jacfwd(...)) wrapper built in Phase A.
-                J = ops["jac"](z, lib, batch_index, bg_pack, cc_pack, fs_pack, cat_pack)
-                importance = J.abs().mean(dim=1)  # (bs, n_latent)
+                # Compute per-cell (bs, n_latent) attribution via the
+                # operator built in Phase A.
+                if attribution_method == "h2b":
+                    n_latent_total = z.shape[-1]
+                    importance = torch.empty(
+                        bs_z,
+                        n_latent_total,
+                        device=z.device,
+                        dtype=z.dtype,
+                    )
+                    e_basis = torch.eye(
+                        n_latent_total,
+                        device=z.device,
+                        dtype=z.dtype,
+                    )
+                    # Wrap the batched decoder so jvp differentiates only
+                    # w.r.t. z (other primals are captured as closure
+                    # constants — same semantics as ``jacfwd(..., argnums=0)``
+                    # in the jacfwd path).
+                    _dec_b = ops["decoder_batched"]
+
+                    def _f_z(z_arg, _dec_b=_dec_b, _lib=lib, _bi=batch_index,
+                             _bg=bg_pack, _cc=cc_pack, _fs=fs_pack, _cat=cat_pack):
+                        return _dec_b(z_arg, _lib, _bi, _bg, _cc, _fs, _cat)
+
+                    for k in range(n_latent_total):
+                        # Use repeat (owning storage) instead of expand
+                        # (stride-0 view) so jvp's tangent has its own
+                        # contiguous storage — avoids a tangent/primal
+                        # batch-dim aliasing issue.
+                        tangent_batched = e_basis[k].unsqueeze(0).repeat(bs_z, 1)
+                        _, Jk = jvp(_f_z, (z,), (tangent_batched,))
+                        # Jk shape: (bs, n_features) — one Jacobian column.
+                        importance[:, k] = Jk.abs().mean(dim=1)
+                        del Jk
+                else:  # "jacfwd"
+                    J = ops["jac"](z, lib, batch_index, bg_pack, cc_pack, fs_pack, cat_pack)
+                    importance = J.abs().mean(dim=1)  # (bs, n_latent)
                 importances[name].append(importance.cpu().numpy())
 
         z_all = np.concatenate(all_z, axis=0)
@@ -2079,6 +2151,7 @@ class RegularizedMultimodalVI(
         attribution: dict | None = None,
         batch_size: int = 256,
         suffix: str = "",
+        attribution_method: str = "jacfwd",
     ) -> dict:
         """Compute attribution and store results in ``adata``.
 
@@ -2106,6 +2179,10 @@ class RegularizedMultimodalVI(
         suffix
             Suffix to append to all stored keys. Use e.g. ``"_nocov"`` to store
             covariate-removed attribution alongside the default results.
+        attribution_method
+            Forwarded to :meth:`get_modality_attribution` when ``attribution``
+            is not pre-computed. See that method's docstring for the
+            ``"jacfwd"`` vs ``"h2b"`` trade-offs.
 
         Returns
         -------
@@ -2115,7 +2192,10 @@ class RegularizedMultimodalVI(
         import numpy as np
 
         if attribution is None:
-            attribution = self.get_modality_attribution(batch_size=batch_size)
+            attribution = self.get_modality_attribution(
+                batch_size=batch_size,
+                attribution_method=attribution_method,
+            )
 
         # Store attribution-weighted latents
         for name in self.module.modality_names:
@@ -2718,6 +2798,7 @@ class RegularizedMultimodalVI(
         attribution: dict | None = None,
         batch_size: int = 256,
         figsize: tuple[float, float] = (14, 5),
+        attribution_method: str = "jacfwd",
     ) -> tuple[dict, matplotlib.figure.Figure]:
         """Plot attribution bar chart showing per-modality decoder sensitivity.
 
@@ -2730,6 +2811,10 @@ class RegularizedMultimodalVI(
             Batch size for attribution computation (if not pre-computed).
         figsize
             Figure size for the bar chart.
+        attribution_method
+            Forwarded to :meth:`get_modality_attribution` when ``attribution``
+            is not pre-computed. See that method's docstring for the
+            ``"jacfwd"`` vs ``"h2b"`` trade-offs.
 
         Returns
         -------
@@ -2739,7 +2824,10 @@ class RegularizedMultimodalVI(
         from matplotlib.patches import Patch
 
         if attribution is None:
-            attribution = self.get_modality_attribution(batch_size=batch_size)
+            attribution = self.get_modality_attribution(
+                batch_size=batch_size,
+                attribution_method=attribution_method,
+            )
 
         n_modalities = len(self.module.modality_names)
         fig, axes = plt.subplots(1, n_modalities, figsize=figsize)

@@ -1673,6 +1673,69 @@ class TestRegularizedMultimodalVI:
             # Attribution values should be non-negative (mean of abs)
             assert np.all(result[name]["attribution"] >= 0)
 
+    @pytest.mark.parametrize(
+        ("remove_covariates", "covariate_reference"),
+        [
+            (False, "zero"),
+            (True, "mean"),
+            ("feature_scaling", "mean"),
+            ("cat_covs", "zero"),
+        ],
+    )
+    def test_attribution_h2b_matches_jacfwd(self, mdata, remove_covariates, covariate_reference):
+        """H2b chunked-JVP attribution must be numerically equivalent to jacfwd.
+
+        Validates the algorithmic optimisation that swaps
+        ``vmap(jacfwd(decoder))`` for a Python ``for k in range(n_latent)``
+        loop calling ``vmap(jvp(decoder))`` per latent column. The two paths
+        must produce identical ``attribution`` and ``weighted_z`` arrays
+        within fp32 reduction-order tolerance.
+        """
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(
+            mdata,
+            batch_key="batch",
+            feature_scaling_covariate_keys=["technology"],
+            nn_conditioning_covariate_keys=["site"],
+        )
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=2, train_size=1.0, batch_size=32)
+
+        kw = dict(
+            batch_size=32,
+            remove_covariates=remove_covariates,
+            covariate_reference=covariate_reference,
+        )
+        # Seed both calls identically — inference() samples library
+        # (residual library encoder) and qz, so without seeding the two
+        # paths would see different per-cell library / latent samples.
+        torch.manual_seed(0)
+        res_jac = model.get_modality_attribution(attribution_method="jacfwd", **kw)
+        torch.manual_seed(0)
+        res_h2b = model.get_modality_attribution(attribution_method="h2b", **kw)
+
+        assert set(res_jac.keys()) == set(res_h2b.keys())
+        for name in res_jac:
+            np.testing.assert_allclose(
+                res_h2b[name]["attribution"],
+                res_jac[name]["attribution"],
+                rtol=1e-4,
+                atol=1e-5,
+            )
+            np.testing.assert_allclose(
+                res_h2b[name]["weighted_z"],
+                res_jac[name]["weighted_z"],
+                rtol=1e-4,
+                atol=1e-5,
+            )
+
+    def test_attribution_h2b_invalid_method_raises(self, mdata):
+        """Unknown attribution_method values must raise ValueError early."""
+        regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
+        model = regularizedvi.RegularizedMultimodalVI(mdata, n_hidden=16, n_latent=4)
+        model.train(max_epochs=1, train_size=1.0, batch_size=32)
+        with pytest.raises(ValueError, match="attribution_method"):
+            model.get_modality_attribution(batch_size=32, attribution_method="bogus")
+
     def test_compute_pearson_multimodal(self, mdata):
         """Test that per-modality Pearson correlation metrics are logged."""
         regularizedvi.RegularizedMultimodalVI.setup_mudata(mdata, batch_key="batch")
