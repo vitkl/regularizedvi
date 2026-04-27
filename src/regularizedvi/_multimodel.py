@@ -1561,7 +1561,7 @@ class RegularizedMultimodalVI(
         eps: float = 1e-3,
         remove_covariates: str | bool = False,
         covariate_reference: str = "zero",
-        attribution_method: str = "jacfwd",
+        attribution_method: str = "h2b",
     ) -> dict[str, dict[str, np.ndarray]]:
         """Compute decoder Jacobian attribution per modality.
 
@@ -1826,10 +1826,11 @@ class RegularizedMultimodalVI(
         _attr_t20: float | None = None
         _attr_sec_per_batch: float | None = None
         _attr_t_loop_start = _time.perf_counter()
-        # Print ~10 equally-spaced progress lines after the initial estimate.
-        _attr_print_every: int | None = (
-            max(1, _n_batches // 10) if _n_batches is not None else None
-        )
+        # Periodic progress prints scale with total batch count: at most every
+        # 5 batches (for very short runs), at least every N/1000 batches (so
+        # long runs stay under ~1000 prints). Capped at N so tiny runs still
+        # fire at least one progress line.
+        _attr_print_every: int | None = min(_n_batches, max(5, _n_batches // 1000)) if _n_batches is not None else None
 
         for tensors in _scdl_iter:
             _attr_batch_idx += 1
@@ -1845,8 +1846,7 @@ class RegularizedMultimodalVI(
                 _h, _rem = divmod(int(_total_sec), 3600)
                 _m = _rem // 60
                 print(
-                    f"[attribution] {_attr_sec_per_batch:.2f}s/batch × {_n_batches} batches"
-                    f" ≈ {_h}h {_m:02d}m total",
+                    f"[attribution] {_attr_sec_per_batch:.2f}s/batch × {_n_batches} batches ≈ {_h}h {_m:02d}m total",
                     flush=True,
                 )
             elif (
@@ -2039,8 +2039,16 @@ class RegularizedMultimodalVI(
                     # in the jacfwd path).
                     _dec_b = ops["decoder_batched"]
 
-                    def _f_z(z_arg, _dec_b=_dec_b, _lib=lib, _bi=batch_index,
-                             _bg=bg_pack, _cc=cc_pack, _fs=fs_pack, _cat=cat_pack):
+                    def _f_z(
+                        z_arg,
+                        _dec_b=_dec_b,
+                        _lib=lib,
+                        _bi=batch_index,
+                        _bg=bg_pack,
+                        _cc=cc_pack,
+                        _fs=fs_pack,
+                        _cat=cat_pack,
+                    ):
                         return _dec_b(z_arg, _lib, _bi, _bg, _cc, _fs, _cat)
 
                     for k in range(n_latent_total):
@@ -2151,7 +2159,7 @@ class RegularizedMultimodalVI(
         attribution: dict | None = None,
         batch_size: int = 256,
         suffix: str = "",
-        attribution_method: str = "jacfwd",
+        attribution_method: str = "h2b",
     ) -> dict:
         """Compute attribution and store results in ``adata``.
 
@@ -2798,7 +2806,7 @@ class RegularizedMultimodalVI(
         attribution: dict | None = None,
         batch_size: int = 256,
         figsize: tuple[float, float] = (14, 5),
-        attribution_method: str = "jacfwd",
+        attribution_method: str = "h2b",
     ) -> tuple[dict, matplotlib.figure.Figure]:
         """Plot attribution bar chart showing per-modality decoder sensitivity.
 
