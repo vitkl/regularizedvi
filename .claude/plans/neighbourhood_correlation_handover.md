@@ -9,7 +9,7 @@ The neighbourhood correlation metrics module (`src/regularizedvi/plt/_neighbourh
 - User feedback: `neighbourhood_correlation_user_feedback.md`
 - Sub-plans: `neighbourhood_correlation_subplan_01_*.md` through `_11_*.md`
 
-**Test command**: `bash run_tests.sh tests/test_neighbourhood_correlation.py -x -q`
+**Test command**: `bash scripts/helper_scripts/run_tests.sh tests/test_neighbourhood_correlation.py -x -q`
 
 ---
 
@@ -248,7 +248,7 @@ Note: depends on F1, F3, F9, F10, F11 being fixed first (otherwise notebook will
 7. **F12 docstring + sparse Pearson docstring + tests** — documentation
 8. **Evaluation notebook** — last, after all metrics are correct
 
-After each fix: run `bash run_tests.sh tests/test_neighbourhood_correlation.py -x -q` to verify no regressions.
+After each fix: run `bash scripts/helper_scripts/run_tests.sh tests/test_neighbourhood_correlation.py -x -q` to verify no regressions.
 
 ---
 

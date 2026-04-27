@@ -20,7 +20,7 @@ Claude MUST use helper scripts instead of bare python3, conda run, inline Python
 | Inspect parquet | `scripts/claude_helper_scripts/check_parquet.py` |
 | Check bsub jobs | Root-level `_check_alive.sh`, `_check_job_mem.sh` |
 | Monitor process memory | Root-level `_monitor_process.sh` (can kill processes) |
-| Run tests | `run_tests.sh` (at project root) |
+| Run tests | `scripts/helper_scripts/run_tests.sh` (cluster-aware via `run_python_cmd.sh`) |
 | Inspect package source | `scripts/claude_helper_scripts/inspect_package_source.py` |
 | Compare h5ad files | `scripts/claude_helper_scripts/compare_h5ad.py` |
 | Compute gene variance | `scripts/claude_helper_scripts/compute_gene_variance.py` |

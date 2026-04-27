@@ -310,7 +310,7 @@ Uses embryo template, gpu-normal/300G/99. Base overrides from embryo_burst_vbs2_
 
 ## Verification
 
-1. **Tests:** `bash run_tests.sh tests/test_model.py -x -q` — all pass
+1. **Tests:** `bash scripts/helper_scripts/run_tests.sh tests/test_model.py -x -q` — all pass
 2. **New tests:** Each flag trains + penalty logged
 3. **/verify-implementation** before job submission
 4. **GPU runs:** Submit 26 experiments

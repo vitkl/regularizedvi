@@ -89,7 +89,7 @@ Per-modality encoders, concatenated latent space [z_atac; z_rna] (alphabetical s
 - **RegularizedDecoderSCVI**: FCLayers → px_scale_decoder linear head → softplus activation
 
 ## Build & Test
-- `bash run_tests.sh tests/test_model.py -x -q` (114 tests)
+- `bash scripts/helper_scripts/run_tests.sh tests/test_model.py -x -q` (114 tests)
 - Pre-commit: pyproject-fmt, ruff check, ruff format (auto-fix)
 - Python >=3.11
 
