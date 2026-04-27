@@ -175,10 +175,18 @@ def select_marker_genes(
     category_col: str = "category",
     broad_level_cols: list[str] | None = None,
     subtype_specificity_threshold: float = 0.3,
+    top_n_per_label: int | None = 500,
     per_dataset: bool = True,
     return_per_level: bool = True,
 ) -> dict[str, pd.Index | pd.DataFrame | dict]:
-    """Select marker genes by data-driven specificity per dataset, union with curated CSV."""
+    """Select marker genes by data-driven specificity per dataset, union with curated CSV.
+
+    For each column of the specificity table (one per label value in each
+    label column, per dataset), keep the top ``top_n_per_label`` genes by
+    specificity — restricted to genes that already pass ``mean_threshold``
+    and ``specificity_threshold``. Set ``top_n_per_label=None`` (or 0) to
+    disable. Union across columns and datasets.
+    """
     if broad_level_cols is None:
         broad_level_cols = ["level_2", "level_3"]
 
@@ -252,6 +260,7 @@ def select_marker_genes(
                     mean_threshold=mean_threshold,
                     specificity_threshold=specificity_threshold,
                     subtype_specificity_threshold=subtype_specificity_threshold,
+                    top_n_per_label=top_n_per_label,
                     harmonized_annotation_col=harmonized_annotation_col,
                     per_level_genes=per_level_genes,
                     summary_rows=summary_rows,
@@ -271,6 +280,15 @@ def select_marker_genes(
         passes_mean = label_averages.max(axis=1) > mean_threshold
         passes_spec = specificity.max(axis=1) > specificity_threshold
         selected_mask = passes_mean & passes_spec
+        n_pre_top_n = int(selected_mask.sum())
+
+        if top_n_per_label is not None and top_n_per_label > 0 and selected_mask.any():
+            candidates = specificity.loc[selected_mask]
+            top_mask = pd.Series(False, index=specificity.index)
+            for col in candidates.columns:
+                top_idx = candidates[col].nlargest(top_n_per_label).index
+                top_mask.loc[top_idx] = True
+            selected_mask = selected_mask & top_mask
 
         ds_selected_genes = adata.var_names[selected_mask]
         per_dataset_genes[ds] = ds_selected_genes
@@ -281,7 +299,9 @@ def select_marker_genes(
                 "label_column": "<all_concatenated>",
                 "n_genes_passing_mean": int(passes_mean.sum()),
                 "n_genes_passing_specificity": int(passes_spec.sum()),
-                "n_selected": int(selected_mask.sum()),
+                "n_selected": n_pre_top_n,
+                "top_n_per_label": top_n_per_label,
+                "n_selected_after_top_n": int(selected_mask.sum()),
                 "n_overlap_with_curated": int(ds_selected_genes.intersection(curated_genes).size),
             }
         )
@@ -355,6 +375,7 @@ def _run_specificity_filter_per_level(
     mean_threshold: float,
     specificity_threshold: float,
     subtype_specificity_threshold: float,
+    top_n_per_label: int | None,
     harmonized_annotation_col: str,
     per_level_genes: dict[str, pd.Index],
     summary_rows: list[dict],
@@ -369,6 +390,16 @@ def _run_specificity_filter_per_level(
     passes_mean = averages_col.max(axis=1) > mean_threshold
     passes_spec = spec.max(axis=1) > specificity_threshold
     selected = passes_mean & passes_spec
+    n_pre_top_n = int(selected.sum())
+
+    if top_n_per_label is not None and top_n_per_label > 0 and selected.any():
+        candidates = spec.loc[selected]
+        top_mask = pd.Series(False, index=spec.index)
+        for col in candidates.columns:
+            top_idx = candidates[col].nlargest(top_n_per_label).index
+            top_mask.loc[top_idx] = True
+        selected = selected & top_mask
+
     selected_genes = averages_col.index[selected]
 
     if label_col in per_level_genes:
@@ -392,7 +423,9 @@ def _run_specificity_filter_per_level(
             "label_column": label_col,
             "n_genes_passing_mean": int(passes_mean.sum()),
             "n_genes_passing_specificity": int(passes_spec.sum()),
-            "n_selected": int(selected.sum()),
+            "n_selected": n_pre_top_n,
+            "top_n_per_label": top_n_per_label,
+            "n_selected_after_top_n": int(selected.sum()),
             "n_overlap_with_curated": int(selected_genes.intersection(curated_genes).size),
         }
     )
