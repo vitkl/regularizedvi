@@ -67,8 +67,12 @@ pip install \
     ml_collections pydantic \
     tqdm rich
 
-echo "=== Step 7: Install gh CLI (conda-forge) ==="
-conda install -y -c conda-forge gh
+echo "=== Step 7: Install gh CLI + nodejs (conda-forge) ==="
+# nodejs is needed so pre-commit's biome hook can use the in-env node
+# (language_version: system in .pre-commit-config.yaml). The node binary
+# pre-commit otherwise downloads links against libatomic.so.1, which is
+# absent on RHEL8/Rocky 8 by default.
+conda install -y -c conda-forge gh nodejs
 
 echo "=== Step 8: Smoke tests ==="
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
