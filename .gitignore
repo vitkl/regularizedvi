@@ -35,6 +35,9 @@ __pycache__/
 *_out.ipynb
 *_out_lite.ipynb
 
+# Symlink dir to per-run plot outputs
+docs/notebooks/model_comparisons/embryo_attribution_figures/
+
 # Generated experiment report
 experiment_report.html
 experiment_pages/
