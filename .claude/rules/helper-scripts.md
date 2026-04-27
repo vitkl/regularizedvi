@@ -79,3 +79,7 @@ All project Python scripts via: `bash scripts/helper_scripts/run_python_cmd.sh s
 ## Data Type Rules
 - Default float dtype: float32
 - Integer dtypes are nuanced — always ask (e.g. chromosome position → int64, some layers → uint16)
+
+## Tools & Environment
+- `gh` CLI on Crick: invoke directly via the cell2state env binary — `~/.conda/envs/cell2state_v2026_cuda124_torch25/bin/gh <command>`. (`gh` is the only command exempted this way; everything else still needs proper env activation.)
+- `gh` CLI on Sanger (different cluster, `/nfs/team205/...` paths): `module load ISG/conda && conda activate regularizedvi && gh <command>`. Do NOT use the Sanger form on Crick.
