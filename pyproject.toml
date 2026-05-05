@@ -30,6 +30,7 @@ dependencies = [
   "ipywidgets",
   "mudata",
   "numpy",
+  "pytorch-lightning<=2.6.1", # GHSA-w37p-236h-pfx3
   "scrublet",
   "scvi-tools>=1.2",
   # for debug logging (referenced from the issue template)
