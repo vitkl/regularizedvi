@@ -19,6 +19,23 @@ import numpy as np
 import scipy.sparse as sp
 
 
+def clip_per_feature_variance_to_theta_bounds(
+    var_g: np.ndarray,
+    mean_g: np.ndarray,
+    theta_min: float,
+    theta_max: float,
+) -> np.ndarray:
+    """Clip per-feature variance to ``[mean²/theta_max, mean²/theta_min]``.
+
+    Canonical clip used for any per-feature variance derived from the
+    method-of-moments decomposition (excess_biological, stochastic_v_scale, …).
+    Single source of truth for the theta-bound translation.
+    """
+    var_min_g = mean_g**2 / theta_max
+    var_max_g = mean_g**2 / theta_min
+    return np.clip(var_g, var_min_g, var_max_g)
+
+
 class DispersionHyperPriorParams(NamedTuple):
     """Resolved hyper-prior parameters for the 2-level dispersion containment prior."""
 
@@ -599,6 +616,10 @@ def _compute_theta(
     Returns (log_theta_clipped, diagnostics_dict).
     """
     eps = 1e-10
+    # Floor used by compute_bursting_init (line 776) when computing excess_biological;
+    # we expose the same floored quantity in `diagnostics` so it can be reused as a
+    # single source of truth (Feature 0). eps_bio**2 = 1e-8.
+    eps_bio = 1e-4
 
     # Step A: Poisson variance
     poisson_var = mean_g
@@ -616,6 +637,7 @@ def _compute_theta(
     # Shrinkage: only technical fraction of excess attributed to NB dispersion
     technical_fraction = 1 - biological_variance_fraction
     excess_technical = excess_adjusted * technical_fraction
+    excess_biological = np.maximum(excess_adjusted * biological_variance_fraction, eps_bio**2)
 
     # Theta option 1: full correction
     # Sub-Poisson genes have excess_raw < 0 → excess_technical < 0
@@ -669,6 +691,7 @@ def _compute_theta(
         "cv2_L_between_batch": cv2_L_between,
         "excess_raw": excess_raw,
         "excess_adjusted": excess_adjusted,
+        "excess_biological": excess_biological,
         "poisson_var": poisson_var,
         "library_var": library_var,
         "n_sub_poisson": n_sub_poisson,
@@ -769,24 +792,27 @@ def compute_bursting_init(
 
     mean_g = diagnostics["mean_g"]
     excess_adjusted = diagnostics["excess_adjusted"]
+    # Read biological excess from diagnostics (single source of truth — Feature 0
+    # makes _compute_theta expose the same floored quantity).
+    excess_biological = diagnostics["excess_biological"]
     eps = 1e-4
 
     # Split excess into biological and technical components
     technical_fraction = 1 - biological_variance_fraction
-    excess_biological = np.maximum(excess_adjusted * biological_variance_fraction, eps**2)
 
     # stochastic_v: scale param (std-like), then .pow(2) gives variance in the model.
     # Item 1: per-feature bounds derived from theta_min/theta_max (not scalar).
     # From excess_technical = mean_g² / theta  ⇒  sqrt(excess_technical) = mean_g / sqrt(theta).
     raw_sv = np.sqrt(np.maximum(excess_adjusted * technical_fraction, 0.0))
-    sv_min_g = mean_g / np.sqrt(theta_max)
-    sv_max_g = mean_g / np.sqrt(theta_min)
-    stochastic_v_scale = np.clip(raw_sv, sv_min_g, sv_max_g)
+    # Clip variance form (raw_sv²) via the shared theta-bound helper, then sqrt
+    # back. Byte-identical to the prior `np.clip(raw_sv, mean_g/sqrt(theta_max),
+    # mean_g/sqrt(theta_min))` because raw_sv ≥ 0.
+    stochastic_v_scale = np.sqrt(clip_per_feature_variance_to_theta_bounds(raw_sv**2, mean_g, theta_min, theta_max))
 
     # Item 4: use MEAN (not median); rename suggested_hyper_beta -> suggested_hyper_mean.
     # Floor by the global min of the per-feature lower bound (no scalar floor exists).
     _mean_sv = float(np.mean(stochastic_v_scale))
-    suggested_hyper_mean = max(_mean_sv, float(np.min(sv_min_g)))
+    suggested_hyper_mean = max(_mean_sv, float(np.min(mean_g / np.sqrt(theta_max))))
 
     # burst_freq: biological concentration = mean^2 / excess_biological.
     # Item 3: clamped to [theta_min, theta_max] (now defaulting to 20).

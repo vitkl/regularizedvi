@@ -264,6 +264,25 @@ class RegularizedMultimodalVAE(BaseModuleClass):
         z_loc_init_scale: float = 1.0,
         # MOFA2-style ARD per-dim sigma scale on Z
         use_ard_z_sigma_scale: bool = False,
+        # Modality-balanced encoder init (Feature 1): rescale per-modality
+        # mean_encoder/var_encoder weights so per-element weight variance equals
+        # 1/(3·total_n_hidden) across all modalities (treating the multimodal
+        # encoder as if it were a single virtual Linear of fan_in = total_n_hidden).
+        use_modality_balanced_encoder_init: bool = False,
+        # Decoder weight init scaled by per-feature biological variance
+        # (Feature 2). None = off (default Kaiming). Positive scalar (or
+        # per-modality dict) = enabled; pre-softplus output variance per gene
+        # lands at fraction × clip_per_feature_variance_to_theta_bounds(
+        #     excess_biological_g, mean_g, theta_min, theta_max).
+        decoder_init_variance_target_fraction: float | dict[str, float] | None = None,
+        decoder_burst_size_init_variance_target_fraction: float | dict[str, float] | None = None,
+        # Per-feature biological variance + mean (passed by RegularizedMultimodalVI
+        # from compute_dispersion_init / compute_bursting_init diagnostics dicts);
+        # consumed only when decoder_init_variance_target_fraction is set.
+        decoder_init_excess_biological: dict[str, np.ndarray] | None = None,
+        decoder_init_mean_g: dict[str, np.ndarray] | None = None,
+        decoder_init_theta_min: float = 0.01,
+        decoder_init_theta_max: float = 20.0,
     ):
         from regularizedvi._components import RegularizedDecoderSCVI, RegularizedEncoder
 
@@ -831,6 +850,143 @@ class RegularizedMultimodalVAE(BaseModuleClass):
                 target = init_val * 0.7
                 raw_init = math.log(math.exp(target) - 1) if target < 20 else target
                 self.modality_scale_raw[name] = nn.Parameter(torch.tensor(raw_init))
+
+        # ---- Feature 1: modality-balanced encoder init (per-modality mean/var
+        # encoder weight rebalance so per-element weight variance equals
+        # 1/(3·total_n_hidden) across modalities). Off by default; in-flight
+        # runs are byte-identical when use_modality_balanced_encoder_init=False.
+        if use_modality_balanced_encoder_init:
+            self._modality_balanced_encoder_init()
+
+        # ---- Feature 2: decoder weight init scaled by per-feature biological
+        # variance. Off when decoder_init_variance_target_fraction is None.
+        # Applied AFTER Feature 1 (encoder vs. decoder — independent in
+        # principle, but explicit ordering keeps the call sequence readable).
+        if decoder_init_variance_target_fraction is not None:
+            if decoder_init_excess_biological is None or decoder_init_mean_g is None:
+                raise ValueError(
+                    "decoder_init_variance_target_fraction is set, but "
+                    "decoder_init_excess_biological / decoder_init_mean_g were not "
+                    "passed (Feature 2 needs MoM diagnostics from "
+                    "compute_dispersion_init). RegularizedMultimodalVI populates "
+                    "these from _diag automatically when dispersion_init is "
+                    "'data' or 'variance_burst_size'."
+                )
+            # The 1/3 Kaiming-derived "current variance" assumes Var(h_dim) ≈ 1
+            # under LayerNorm on the decoder hidden activation. Without decoder
+            # LayerNorm the variance target silently miscalibrates.
+            if not use_layer_norm_decoder:
+                warnings.warn(
+                    "decoder_init_variance_target_fraction is set but use_layer_norm "
+                    f"= {use_layer_norm!r} disables decoder LayerNorm. The 1/3 "
+                    "default-pre-softplus-variance assumption (Var(h_dim) ≈ 1) "
+                    "no longer holds, so the per-feature variance target may be "
+                    "miscalibrated. Set use_layer_norm to 'decoder' or 'both' to "
+                    "restore calibration.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            self._scale_decoder_weights_to_biological_variance(
+                target_variance_per_feature=decoder_init_excess_biological,
+                fraction=decoder_init_variance_target_fraction,
+                burst_size_fraction=decoder_burst_size_init_variance_target_fraction,
+                mean_per_feature=decoder_init_mean_g,
+                theta_min=decoder_init_theta_min,
+                theta_max=decoder_init_theta_max,
+            )
+
+    # ---- Feature 1 + Feature 2 init helpers ----
+
+    # Analytic pre-softplus output variance from default Kaiming init on
+    # nn.Linear(fan_in, fan_out): Var(W_per_element) = 1/(3·fan_in); with a
+    # LayerNorm-stabilised hidden h (Var(h_dim) ≈ 1):
+    #   Var(W_row · h) = fan_in · 1/(3·fan_in) · 1 = 1/3
+    # Stored as an explicit constant so a future change to the init scheme is loud.
+    _KAIMING_CURRENT_PRE_SOFTPLUS_VAR = 1.0 / 3.0
+
+    def _modality_balanced_encoder_init(self) -> None:
+        """Rebalance per-modality `mean_encoder` / `var_encoder` weights.
+
+        Per-element weight variance equals ``1/(3·total_n_hidden)`` across all
+        modalities (treating the multimodal encoder as one virtual Linear of
+        fan_in = ``total_n_hidden = sum_m n_hidden_m``).
+
+        Skipped in ``latent_mode='single_encoder'`` (the joint encoder already
+        sees all modalities concatenated through a single Linear).
+        """
+        if self.latent_mode == "single_encoder":
+            return
+        total_n_hidden = sum(self.n_hidden_dict[m] for m in self.modality_names)
+        encoder_dicts = [self.encoders]
+        if getattr(self, "horseshoe_encoders", None) is not None:
+            encoder_dicts.append(self.horseshoe_encoders)
+        for enc_dict in encoder_dicts:
+            for name in self.modality_names:
+                n_hidden_m = self.n_hidden_dict[name]
+                multiplier = (n_hidden_m / total_n_hidden) ** 0.5
+                with torch.no_grad():
+                    enc_dict[name].mean_encoder.weight.mul_(multiplier)
+                    enc_dict[name].var_encoder.weight.mul_(multiplier)
+
+    def _scale_decoder_weights_to_biological_variance(
+        self,
+        target_variance_per_feature: dict[str, np.ndarray],
+        fraction: float | dict[str, float],
+        burst_size_fraction: float | dict[str, float] | None,
+        mean_per_feature: dict[str, np.ndarray],
+        theta_min: float,
+        theta_max: float,
+    ) -> None:
+        """Rescale per-modality decoder weight rows to a biological-variance target.
+
+        ``px_scale_decoder[0]`` (and bursting ``burst_size_head[0]``) weight
+        rows are scaled so the per-feature pre-softplus output variance lands
+        at ``fraction × clip(excess_biological_g)``.
+
+        Bursting decoders (``decoder_type == "burst_frequency_size"``):
+        the ``px_scale_decoder[0]`` head outputs ``log(burst_freq)`` (a
+        biological concentration parameter), not ``log(rate)``. Scaling its
+        pre-softplus variance by ``fraction × excess_biological_g`` (where
+        ``excess_biological_g`` is the biological excess of OBSERVED expression
+        variance) is therefore an approximation: it borrows the encoder
+        analogy (``z_loc_init_scale`` lands the encoder pre-prior variance at a
+        controlled fraction of the prior) rather than a tight rate-space
+        derivation. The ``burst_size_head[0]`` gets an independent
+        ``burst_size_fraction``, typically ``main_fraction / 10``, so it has
+        less init variability than the burst-frequency head.
+        """
+        from regularizedvi._dispersion_init import clip_per_feature_variance_to_theta_bounds
+
+        def _scale_per_row(target_pre_softplus_var_g: np.ndarray) -> np.ndarray:
+            return np.sqrt(target_pre_softplus_var_g / self._KAIMING_CURRENT_PRE_SOFTPLUS_VAR)
+
+        for name in self.modality_names:
+            if name not in target_variance_per_feature or name not in mean_per_feature:
+                continue
+            f = fraction[name] if isinstance(fraction, dict) else float(fraction)
+            var_bio_g = clip_per_feature_variance_to_theta_bounds(
+                target_variance_per_feature[name],
+                mean_per_feature[name],
+                theta_min,
+                theta_max,
+            )
+            scale_g_main = _scale_per_row(f * var_bio_g)
+            self._rescale_decoder_head_rows(self.decoders[name].px_scale_decoder[0], scale_g_main)
+            if self.decoder_type_dict[name] == "burst_frequency_size" and burst_size_fraction is not None:
+                r = burst_size_fraction[name] if isinstance(burst_size_fraction, dict) else float(burst_size_fraction)
+                scale_g_size = _scale_per_row(r * var_bio_g)
+                self._rescale_decoder_head_rows(self.decoders[name].burst_size_head[0], scale_g_size)
+
+    @staticmethod
+    def _rescale_decoder_head_rows(linear_layer: nn.Linear, scale_per_row: np.ndarray) -> None:
+        """Scale each row of ``linear_layer.weight`` by ``scale_per_row``.
+
+        ``scale_per_row`` has length ``n_features`` (the number of output rows).
+        """
+        weight = linear_layer.weight
+        with torch.no_grad():
+            scale = torch.from_numpy(scale_per_row.astype(np.float32)).to(weight.device)
+            weight.mul_(scale.unsqueeze(1))
 
     def _decoder_weight_l2_penalty(self) -> torch.Tensor:
         """Sum of squared weights in all decoder FC layers (excludes biases)."""

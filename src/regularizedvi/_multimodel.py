@@ -277,6 +277,12 @@ class RegularizedMultimodalVI(
         z_loc_init_scale: float = 1.0,
         # MOFA2-style ARD per-dim sigma scale on Z
         use_ard_z_sigma_scale: bool = False,
+        # Modality-balanced encoder init (Feature 1)
+        use_modality_balanced_encoder_init: bool = False,
+        # Decoder weight init scaled by per-feature biological variance (Feature 2).
+        # Requires dispersion_init in {"data", "variance_burst_size"}.
+        decoder_init_variance_target_fraction: float | dict[str, float] | None = None,
+        decoder_burst_size_init_variance_target_fraction: float | dict[str, float] | None = None,
         **kwargs,
     ):
         AmbientRegularizedSCVI._validate_bool_params(
@@ -369,8 +375,25 @@ class RegularizedMultimodalVI(
             "use_softplus_var_activation": use_softplus_var_activation,
             "z_loc_init_scale": z_loc_init_scale,
             "use_ard_z_sigma_scale": use_ard_z_sigma_scale,
+            "use_modality_balanced_encoder_init": use_modality_balanced_encoder_init,
+            "decoder_init_variance_target_fraction": decoder_init_variance_target_fraction,
+            "decoder_burst_size_init_variance_target_fraction": (decoder_burst_size_init_variance_target_fraction),
+            "decoder_init_theta_min": dispersion_init_theta_min,
+            "decoder_init_theta_max": dispersion_init_theta_max,
             **kwargs,
         }
+
+        # Feature 2 requires MoM diagnostics; cannot run with dispersion_init="prior".
+        if (
+            decoder_init_variance_target_fraction is not None
+            or decoder_burst_size_init_variance_target_fraction is not None
+        ) and dispersion_init not in ("data", "variance_burst_size"):
+            raise ValueError(
+                "decoder_init_variance_target_fraction and "
+                "decoder_burst_size_init_variance_target_fraction require "
+                "dispersion_init in {'data', 'variance_burst_size'} (Feature 2 needs "
+                f"per-feature MoM diagnostics); got dispersion_init={dispersion_init!r}."
+            )
 
         if hidden_activation_sparsity and any(
             v > 1
@@ -706,6 +729,10 @@ class RegularizedMultimodalVI(
         _px_r_init_per_modality: dict[str, np.ndarray] = {}
         _bursting_init_per_modality: dict[str, dict] = {}
         _auto_mean: dict[str, float] = {}
+        # Feature 2 inputs: per-modality biological excess + data mean from MoM
+        # diagnostics (populated for every modality whose `_diag` is computed).
+        _excess_biological_per_modality: dict[str, np.ndarray] = {}
+        _mean_g_per_modality: dict[str, np.ndarray] = {}
 
         _needs_init = self._dispersion_init in ("data", "variance_burst_size")
         if _needs_init:
@@ -734,6 +761,8 @@ class RegularizedMultimodalVI(
                         verbose=False,
                     )
                     _px_r_init_per_modality[_mn] = log_theta_init
+                    _excess_biological_per_modality[_mn] = np.asarray(_diag["excess_biological"])
+                    _mean_g_per_modality[_mn] = np.asarray(_diag["mean_g"])
                     _suggested_mean = float(np.clip(_diag["suggested_hyper_mean"], 1e-4, 100.0))
                     logger.info(
                         f"  {_mn}: median theta={np.exp(np.median(log_theta_init)):.3f}, "
@@ -754,6 +783,8 @@ class RegularizedMultimodalVI(
                         )
                         _px_r_init_per_modality[_mn] = _init_vals["log_theta"]
                         _bursting_init_per_modality[_mn] = _init_vals
+                        _excess_biological_per_modality[_mn] = np.asarray(_diag["excess_biological"])
+                        _mean_g_per_modality[_mn] = np.asarray(_diag["mean_g"])
                         _suggested_mean = float(np.clip(_init_vals["suggested_hyper_mean"], 1e-4, 100.0))
                         logger.info(
                             f"  {_mn}: median burst_freq={np.median(_init_vals['burst_freq']):.3f}, "
@@ -775,6 +806,8 @@ class RegularizedMultimodalVI(
                             verbose=False,
                         )
                         _px_r_init_per_modality[_mn] = log_theta_init
+                        _excess_biological_per_modality[_mn] = np.asarray(_diag["excess_biological"])
+                        _mean_g_per_modality[_mn] = np.asarray(_diag["mean_g"])
                         _suggested_mean = float(np.clip(_diag["suggested_hyper_mean"], 1e-4, 100.0))
 
                 # Resolve auto-mean: MoM-derived if available, else decoder-type default
@@ -804,6 +837,13 @@ class RegularizedMultimodalVI(
         # Inject auto-derived hyper-prior mean per modality (replaces legacy beta/prior injection)
         if _needs_init and _auto_mean:
             kwargs["dispersion_hyper_prior_mean"] = _auto_mean
+
+        # Feature 2 inputs: per-modality biological excess + mean (only when
+        # decoder_init_variance_target_fraction is set; otherwise the module
+        # ignores them).
+        if _excess_biological_per_modality:
+            kwargs["decoder_init_excess_biological"] = _excess_biological_per_modality
+            kwargs["decoder_init_mean_g"] = _mean_g_per_modality
 
         self.module = self._module_cls(
             modality_names=modality_names,
