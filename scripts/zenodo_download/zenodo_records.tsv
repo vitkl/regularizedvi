@@ -1,0 +1,15 @@
+record_id	dataset_type	organ	doi	title
+15009251	fragments_mtx	Adrenal	10.5281/zenodo.15009251	HDMA Fragment Files + Count Matrices Adrenal
+15009262	fragments_mtx	Brain	10.5281/zenodo.15009262	HDMA Fragment Files + Count Matrices Brain
+15014513	fragments_mtx	Eye	10.5281/zenodo.15014513	HDMA Fragment Files + Count Matrices Eye
+15014536	fragments_mtx	Heart	10.5281/zenodo.15014536	HDMA Fragment Files + Count Matrices Heart
+15014655	fragments_mtx	Liver	10.5281/zenodo.15014655	HDMA Fragment Files + Count Matrices Liver
+15192514	fragments_mtx	Lung	10.5281/zenodo.15192514	HDMA Fragment Files + Count Matrices Lung Part1
+15192516	fragments_mtx	Lung	10.5281/zenodo.15192516	HDMA Fragment Files + Count Matrices Lung Part2
+15014660	fragments_mtx	Muscle	10.5281/zenodo.15014660	HDMA Fragment Files + Count Matrices Muscle
+15014663	fragments_mtx	Skin	10.5281/zenodo.15014663	HDMA Fragment Files + Count Matrices Skin
+15014667	fragments_mtx	Spleen	10.5281/zenodo.15014667	HDMA Fragment Files + Count Matrices Spleen
+15014665	fragments_mtx	StomachEsophagus	10.5281/zenodo.15014665	HDMA Fragment Files + Count Matrices StomachEsophagus
+15014669	fragments_mtx	Thymus	10.5281/zenodo.15014669	HDMA Fragment Files + Count Matrices Thymus
+15014713	fragments_mtx	Thyroid	10.5281/zenodo.15014713	HDMA Fragment Files + Count Matrices Thyroid
+17427146	annotations_caCRE	all	10.5281/zenodo.17427146	HDMA cell metadata, regulatory elements, motif lexicon, and ABC loops
