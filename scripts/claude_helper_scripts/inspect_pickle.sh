@@ -9,10 +9,10 @@ if [[ -n "${RUN_PYTHON_CMD:-}" ]]; then
     RPC="$RUN_PYTHON_CMD"
 elif git_root=$(git rev-parse --show-toplevel 2>/dev/null) && [[ -f "$git_root/scripts/helper_scripts/run_python_cmd.sh" ]]; then
     RPC="$git_root/scripts/helper_scripts/run_python_cmd.sh"
-elif [[ -f "$HOME/Desktop/my_packages/cell2state/scripts/helper_scripts/run_python_cmd.sh" ]]; then
-    RPC="$HOME/Desktop/my_packages/cell2state/scripts/helper_scripts/run_python_cmd.sh"
-elif [[ -f "/nemo/lab/briscoej/home/users/kleshcv/my_packages/cell2state/scripts/helper_scripts/run_python_cmd.sh" ]]; then
-    RPC="/nemo/lab/briscoej/home/users/kleshcv/my_packages/cell2state/scripts/helper_scripts/run_python_cmd.sh"
+elif [[ -f "$HOME/Desktop/my_packages/regularizedvi/scripts/helper_scripts/run_python_cmd.sh" ]]; then
+    RPC="$HOME/Desktop/my_packages/regularizedvi/scripts/helper_scripts/run_python_cmd.sh"
+elif [[ -f "/nemo/lab/briscoej/home/users/kleshcv/my_packages/regularizedvi/scripts/helper_scripts/run_python_cmd.sh" ]]; then
+    RPC="/nemo/lab/briscoej/home/users/kleshcv/my_packages/regularizedvi/scripts/helper_scripts/run_python_cmd.sh"
 fi
 [[ -z "$RPC" ]] && { echo "ERROR: cannot locate run_python_cmd.sh" >&2; exit 1; }
 
