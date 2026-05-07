@@ -30,17 +30,17 @@ One-time setup on Crick (before first use): `bash scripts/helper_scripts/setup_b
 - **NEVER use `cat > file << EOF`, `echo >`, or heredocs to create or write files** — always use the Write tool (for new files) or Edit tool (for modifications). This applies to ALL file types: scripts, plans, configs, reports, data files. If a subagent lacks Write/Edit tools, it must return the content to the parent agent which then uses Write/Edit. Subagents must NEVER work around missing Write/Edit by using Bash heredocs.
 - **NEVER write fake verification reports** — all checks MUST actually execute the real tools (syntax_check.py, check_imports.py, inspect_h5ad.py, etc.). If you need to verify something, RUN the actual check — do not fabricate output.
 
-## Inspection Routing — Global Skills (in `~/.claude/shared-skills/`)
+## Inspection Routing — Global Skills (in `~/.claude/claude-shared-skills/`)
 | Need | Skill / Script |
 |------|----------------|
-| Slurm job status / monitoring (Crick) | `/check-job-slurm` skill → `bash ~/.claude/shared-skills/scripts/check_jobs_slurm.sh JOB_ID1 [JOB_ID2 ...]` |
-| LSF/bsub job status / monitoring (Sanger) | `/check-job` skill → `bash ~/.claude/shared-skills/scripts/check_jobs.sh JOB_ID1 [JOB_ID2 ...]` |
-| Notebook structure/search/errors/progress | `/inspect-notebook` skill → `bash scripts/helper_scripts/run_python_cmd.sh ~/.claude/shared-skills/scripts/_inspect_notebook.py NOTEBOOK [flags]` |
-| Conversation JSONL inspection | `/inspect-conversation` skill → `python3 ~/.claude/shared-skills/scripts/inspect_conversation.py JSONL [flags]` |
-| Notebook progress bars (tqdm) | `bash scripts/helper_scripts/run_python_cmd.sh ~/.claude/shared-skills/scripts/check_notebook_progress_bar.py NOTEBOOK` |
-| Process alive check | `bash ~/.claude/shared-skills/scripts/_check_alive.sh PID` |
-| Job memory (cgroup) | `bash ~/.claude/shared-skills/scripts/_check_job_mem.sh [--watch N]` |
-| Memory watchdog | `bash ~/.claude/shared-skills/scripts/_monitor_process.sh PID MAX_GB [INTERVAL] [DURATION]` |
+| Slurm job status / monitoring (Crick) | `/check-job-slurm` skill → `bash ~/.claude/claude-shared-skills/scripts/check_jobs_slurm.sh JOB_ID1 [JOB_ID2 ...]` |
+| LSF/bsub job status / monitoring (Sanger) | `/check-job` skill → `bash ~/.claude/claude-shared-skills/scripts/check_jobs.sh JOB_ID1 [JOB_ID2 ...]` |
+| Notebook structure/search/errors/progress | `/inspect-notebook` skill → `bash scripts/helper_scripts/run_python_cmd.sh ~/.claude/claude-shared-skills/scripts/_inspect_notebook.py NOTEBOOK [flags]` |
+| Conversation JSONL inspection | `/inspect-conversation` skill → `python3 ~/.claude/claude-shared-skills/scripts/inspect_conversation.py JSONL [flags]` |
+| Notebook progress bars (tqdm) | `bash scripts/helper_scripts/run_python_cmd.sh ~/.claude/claude-shared-skills/scripts/check_notebook_progress_bar.py NOTEBOOK` |
+| Process alive check | `bash ~/.claude/claude-shared-skills/scripts/_check_alive.sh PID` |
+| Job memory (cgroup) | `bash ~/.claude/claude-shared-skills/scripts/_check_job_mem.sh [--watch N]` |
+| Memory watchdog | `bash ~/.claude/claude-shared-skills/scripts/_monitor_process.sh PID MAX_GB [INTERVAL] [DURATION]` |
 
 ## Inspection Routing — Project-Specific
 | Need | Script |
