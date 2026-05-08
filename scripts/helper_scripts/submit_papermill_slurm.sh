@@ -109,7 +109,7 @@ for col in name template output mem; do
     fi
 done
 
-FIXED_COLS=(name template output queue mem priority)
+FIXED_COLS=(name template output queue mem priority time partition)
 RAW_COLS=(wandb_project wandb_group wandb_name)
 
 is_fixed_col() {
@@ -178,22 +178,47 @@ while IFS= read -r line; do
         fi
     done
 
+    # --- Per-row walltime override (column "time" in TSV).
+    # Slurm format: D-HH:MM:SS or HH:MM:SS or MM. "-" / empty falls back to
+    # CLI default ($TIME). Shorter walltimes improve backfill eligibility for
+    # jobs that don't need the full partition max.
+    row_time=""
+    if [[ -n "${IDX[time]+set}" ]]; then
+        row_time="${ROW[${IDX[time]}]:-}"
+    fi
+    if [[ -z "$row_time" || "$row_time" == "-" ]]; then
+        row_time="$TIME"
+    fi
+
+    # --- Per-row partition override (column "partition" in TSV).
+    # "-" / empty falls back to the CLI default ($PARTITION). Reservation is
+    # re-detected against the chosen partition so jobs can move freely between
+    # ga100/gh100/etc. without manual --reservation passes.
+    row_partition="$PARTITION"
+    if [[ -n "${IDX[partition]+set}" ]]; then
+        rp="${ROW[${IDX[partition]}]:-}"
+        if [[ -n "$rp" && "$rp" != "-" ]]; then
+            row_partition="$rp"
+        fi
+    fi
+    row_reservation="$(detect_reservation "$row_partition" || true)"
+
     # --- Build sbatch command ---
     SBATCH_ARGS=(
         --job-name="$name"
         --output="${LOGDIR}/%j.slurm.out"
         --error="${LOGDIR}/%j.slurm.err"
-        --partition="$PARTITION"
+        --partition="$row_partition"
         --gres="$GRES"
         --cpus-per-task="$CPUS"
-        --time="$TIME"
+        --time="$row_time"
         --mem="${mem}M"
     )
     if $EXCLUSIVE_NODE; then
         SBATCH_ARGS+=(--exclusive)
     fi
-    if [[ -n "$RESERVATION" ]]; then
-        SBATCH_ARGS+=(--reservation="$RESERVATION")
+    if [[ -n "$row_reservation" ]]; then
+        SBATCH_ARGS+=(--reservation="$row_reservation")
     fi
 
     # --- Build wrapped command ---
