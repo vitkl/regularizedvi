@@ -1,5 +1,6 @@
 """Plotting and evaluation utilities for regularizedvi."""
 
+from regularizedvi.plt._covariate_analysis import plot_covariate_corr_heatmaps, plot_covariate_umap_grid
 from regularizedvi.plt._dotplot import plot_marker_dotplots
 from regularizedvi.plt._integration_metrics import compute_integration_metrics, plot_integration_heatmap
 from regularizedvi.plt._neighbourhood_correlation import (
@@ -14,6 +15,8 @@ from regularizedvi.plt._neighbourhood_correlation import (
 
 __all__ = [
     "compute_integration_metrics",
+    "plot_covariate_corr_heatmaps",
+    "plot_covariate_umap_grid",
     "plot_distribution_overlap",
     "plot_failure_mode_scatter",
     "plot_integration_heatmap",

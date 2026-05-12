@@ -232,7 +232,11 @@ while IFS= read -r line; do
     # brings in conda init + module. PIP_CACHE_DIR redirect prevents any
     # incidental `pip install` inside the notebook from blowing the 5 GB
     # homefs quota.
-    WRAP="source ~/.bashrc && export PYTHONNOUSERSITE=TRUE && export PIP_CACHE_DIR=/nemo/lab/briscoej/home/users/kleshcv/.cache/pip && conda activate $(printf '%q' "$ENV_PATH") && echo \"CONDA_PREFIX=\$CONDA_PREFIX PYTHONNOUSERSITE=\$PYTHONNOUSERSITE python=\$(which python)\" && papermill $(printf '%q' "$template") $(printf '%q' "$output")${PM_ARGS_QUOTED}"
+    # cd into the template's directory so notebooks with local imports
+    # (e.g. immune integration's data_loading_utils.py) can resolve them via
+    # Jupyter's auto-add-cwd-to-sys.path behaviour.
+    TEMPLATE_DIR="$(dirname "$template")"
+    WRAP="source ~/.bashrc && export PYTHONNOUSERSITE=TRUE && export PIP_CACHE_DIR=/nemo/lab/briscoej/home/users/kleshcv/.cache/pip && conda activate $(printf '%q' "$ENV_PATH") && cd $(printf '%q' "$TEMPLATE_DIR") && echo \"CONDA_PREFIX=\$CONDA_PREFIX PYTHONNOUSERSITE=\$PYTHONNOUSERSITE python=\$(which python) cwd=\$(pwd)\" && papermill $(printf '%q' "$template") $(printf '%q' "$output")${PM_ARGS_QUOTED}"
 
     echo "----------------------------------------"
     echo "Job: $name"
