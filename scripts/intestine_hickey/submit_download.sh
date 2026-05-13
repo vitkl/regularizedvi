@@ -44,21 +44,29 @@ conda activate ${ENV_PATH}
 echo \"CONDA_PREFIX=\$CONDA_PREFIX  python=\$(which python)\"
 
 echo
-echo '--- 1. Download from Dryad (4 parallel workers) ---'
+echo '--- 1. Download from Dryad (sequential, respects 100 req/hour rate limit) ---'
 python -u ${REPO_DIR}/scripts/intestine_hickey/download_dryad.py \\
     --manifest ${MANIFEST} \\
     --output-dir ${OUTPUT_DIR} \\
     --credentials ${CREDENTIALS} \\
-    --workers 4
+    --workers 1
 
 echo
-echo '--- 2. Extract per-compartment cell metadata from Seurat .rds objects ---'
+echo '--- 2. Seurat metadata extraction (seurat conda env, isolated R libs) ---'
 ANNOT_DIR=${OUTPUT_DIR}/annotations
+conda deactivate
+conda activate seurat
+# Isolate R library lookup to the seurat env only — never pick up other users'
+# R libs (e.g. /nemo/lab/briscoej/home/users/<other>/R_lib) or our own ~/R/.
+export R_LIBS_USER=\${CONDA_PREFIX}/lib/R/library
+export R_LIBS=\${CONDA_PREFIX}/lib/R/library
+echo \"  R: \$(which Rscript) \$(Rscript --version 2>&1)\"
 if compgen -G \"\${ANNOT_DIR}/clustered_*_object.rds\" > /dev/null; then
     Rscript ${REPO_DIR}/scripts/intestine_hickey/extract_seurat_metadata.R \\
         \${ANNOT_DIR}
 else
-    echo \"WARN: no clustered_*_object.rds files in \${ANNOT_DIR}; skipping Seurat metadata extraction\"
+    echo \"ERROR: no clustered_*_object.rds files in \${ANNOT_DIR} — downloads incomplete?\"
+    exit 1
 fi
 "
 

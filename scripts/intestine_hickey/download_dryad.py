@@ -174,8 +174,40 @@ def already_downloaded(row: dict, dest: Path) -> bool:
     return actual == expected
 
 
-def download_one(row: dict, dest: Path, token_manager: TokenManager, attempt: int = 1) -> tuple[dict, str | None]:
-    """Download a single file via the bearer-token API endpoint. Returns (row, err or None)."""
+def _sleep_until_rate_reset(headers: dict, default_wait: int = 60) -> int:
+    """Read RateLimit-Reset (unix ts) or Retry-After (seconds) headers, sleep until reset.
+
+    Returns the seconds actually slept (clamped to [10, 3700] for safety).
+    """
+    wait = default_wait
+    reset_unix = headers.get("RateLimit-Reset") or headers.get("X-RateLimit-Reset")
+    retry_after = headers.get("Retry-After")
+    if reset_unix:
+        try:
+            wait = max(10, int(reset_unix) - int(time.time()) + 5)  # +5s margin
+        except ValueError:
+            pass
+    elif retry_after:
+        try:
+            wait = max(10, int(retry_after) + 5)
+        except ValueError:
+            pass
+    wait = min(wait, 3700)  # never sleep more than ~1h
+    print(
+        f"  [rate-limit] 429 received; sleeping {wait}s (until {time.strftime('%H:%M:%S', time.localtime(time.time() + wait))})",
+        flush=True,
+    )
+    time.sleep(wait)
+    return wait
+
+
+def download_one(
+    row: dict, dest: Path, token_manager: TokenManager, attempt: int = 1, max_429_retries: int = 6
+) -> tuple[dict, str | None]:
+    """Download a single file via the bearer-token API endpoint. Returns (row, err or None).
+
+    Handles Dryad's 100-req/hour rate limit by sleeping until RateLimit-Reset on 429.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     url = row["url"]
@@ -190,8 +222,15 @@ def download_one(row: dict, dest: Path, token_manager: TokenManager, attempt: in
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=300) as resp:
-            # If we asked for a Range but the server returned the full body (200 vs 206),
-            # discard the prior partial and start from scratch.
+            # Throttle proactively if quota is running low (avoid getting 429'd).
+            remaining_hdr = resp.headers.get("RateLimit-Remaining") or resp.headers.get("X-RateLimit-Remaining")
+            if remaining_hdr is not None:
+                try:
+                    remaining = int(remaining_hdr)
+                    if remaining <= 2:
+                        _sleep_until_rate_reset(dict(resp.headers), default_wait=120)
+                except ValueError:
+                    pass
             if start_byte > 0 and resp.status != 206:
                 tmp.unlink(missing_ok=True)
                 start_byte = 0
@@ -213,8 +252,17 @@ def download_one(row: dict, dest: Path, token_manager: TokenManager, attempt: in
         if e.code == 401 and attempt == 1:
             token_manager.invalidate()
             time.sleep(1)
-            return download_one(row, dest, token_manager, attempt=2)
-        return (row, f"HTTP {e.code} {e.reason}")
+            return download_one(row, dest, token_manager, attempt=2, max_429_retries=max_429_retries)
+        if e.code == 429 and max_429_retries > 0:
+            _sleep_until_rate_reset(dict(e.headers), default_wait=300)
+            return download_one(row, dest, token_manager, attempt=attempt, max_429_retries=max_429_retries - 1)
+        # 400 from Dryad has been observed when rate-limited via certain paths — log body for diagnosis.
+        body_snippet = ""
+        try:
+            body_snippet = e.read(200).decode(errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+        return (row, f"HTTP {e.code} {e.reason} | body: {body_snippet!r}")
     except Exception as e:  # noqa: BLE001
         return (row, str(e))
 
@@ -226,7 +274,12 @@ def main():
     ap.add_argument("--output-dir", required=True, type=Path)
     ap.add_argument("--credentials", type=Path, default=Path.home() / ".dryad_credentials")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--workers", type=int, default=4, help="Parallel downloads (Dryad recommends ≤ 4)")
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel downloads. Default 1 — Dryad enforces a global 100 req/hour rate limit so concurrency does not help and may cause 400s under contention.",
+    )
     ap.add_argument("--limit", type=int, default=0, help="Cap total downloads (for testing)")
     args = ap.parse_args()
 
