@@ -24,6 +24,7 @@ SUBDIR_MAP = {
     "rna_mtx": "rna/{sample_id}",
     "atac_fragment": "atac/{sample_id}",
     "atac_fragment_index": "atac/{sample_id}",
+    "annotation": "annotations",
 }
 
 # Map data_type to canonical local filename
@@ -34,6 +35,7 @@ CANONICAL_NAME = {
     "rna_mtx": "{original}",
     "atac_fragment": "atac_fragments.tsv.gz",
     "atac_fragment_index": "atac_fragments.tsv.gz.tbi",
+    "annotation": "{original}",
 }
 
 # Data types that should be gunzipped after download

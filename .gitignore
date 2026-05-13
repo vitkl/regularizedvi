@@ -79,3 +79,7 @@ scripts/claude_helper_scripts/
 .claude/settings.local.json
 .claude/tasks.lock
 .claude/scheduled_tasks.lock
+
+# Secrets — defensive (these files normally live in $HOME, never in the repo)
+**/.dryad_credentials
+**/*credentials*.ini

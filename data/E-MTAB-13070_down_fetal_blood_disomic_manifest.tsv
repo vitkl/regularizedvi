@@ -1,0 +1,15 @@
+gsm_id	sample_id	donor	condition	tissue	filename	data_type	url	size_mb	accession
+H_5_A	H_5_A	H_5	disomic	fetal_liver	H_5_A-filtered_feature_bc_matrix.h5	rna_h5	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_5_A-filtered_feature_bc_matrix.h5	72.2	E-MTAB-13070
+H_5_A	H_5_A	H_5	disomic	fetal_liver	H_5_A-atac_fragments.tsv.gz	atac_fragment	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_5_A-atac_fragments.tsv.gz	1918.5	E-MTAB-13070
+H_5_B	H_5_B	H_5	disomic	fetal_liver	H_5_B-filtered_feature_bc_matrix.h5	rna_h5	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_5_B-filtered_feature_bc_matrix.h5	69.0	E-MTAB-13070
+H_5_B	H_5_B	H_5	disomic	fetal_liver	H_5_B-atac_fragments.tsv.gz	atac_fragment	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_5_B-atac_fragments.tsv.gz	2074.0	E-MTAB-13070
+H_6_A	H_6_A	H_6	disomic	fetal_liver	H_6_A-filtered_feature_bc_matrix.h5	rna_h5	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_6_A-filtered_feature_bc_matrix.h5	130.4	E-MTAB-13070
+H_6_A	H_6_A	H_6	disomic	fetal_liver	H_6_A-atac_fragments.tsv.gz	atac_fragment	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_6_A-atac_fragments.tsv.gz	2215.8	E-MTAB-13070
+H_7_A	H_7_A	H_7	disomic	fetal_liver	H_7_A-filtered_feature_bc_matrix.h5	rna_h5	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_7_A-filtered_feature_bc_matrix.h5	119.4	E-MTAB-13070
+H_7_A	H_7_A	H_7	disomic	fetal_liver	H_7_A-atac_fragments.tsv.gz	atac_fragment	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_7_A-atac_fragments.tsv.gz	2471.8	E-MTAB-13070
+H_7_B	H_7_B	H_7	disomic	fetal_liver	H_7_B-filtered_feature_bc_matrix.h5	rna_h5	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_7_B-filtered_feature_bc_matrix.h5	153.3	E-MTAB-13070
+H_7_B	H_7_B	H_7	disomic	fetal_liver	H_7_B-atac_fragments.tsv.gz	atac_fragment	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_7_B-atac_fragments.tsv.gz	2859.1	E-MTAB-13070
+H_7_C	H_7_C	H_7	disomic	fetal_liver	H_7_C-filtered_feature_bc_matrix.h5	rna_h5	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_7_C-filtered_feature_bc_matrix.h5	143.1	E-MTAB-13070
+H_7_C	H_7_C	H_7	disomic	fetal_liver	H_7_C-atac_fragments.tsv.gz	atac_fragment	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/H_7_C-atac_fragments.tsv.gz	2796.6	E-MTAB-13070
+META	META	NA	NA	NA	E-MTAB-13070.idf.txt	annotation	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/E-MTAB-13070.idf.txt	0.02	E-MTAB-13070
+META	META	NA	NA	NA	E-MTAB-13070.sdrf.txt	annotation	https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/070/E-MTAB-13070/Files/E-MTAB-13070.sdrf.txt	0.19	E-MTAB-13070
