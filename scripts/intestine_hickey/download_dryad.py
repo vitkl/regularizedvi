@@ -47,6 +47,38 @@ TOKEN_URL = f"{DRYAD_BASE}/oauth/token"
 TOKEN_LIFETIME_S = 10 * 3600  # documented Dryad token lifetime
 TOKEN_REFRESH_MARGIN_S = 30 * 60  # refresh if older than (10h - 30 min) = 9.5h
 
+
+class _StripAuthOnCrossHostRedirect(urllib.request.HTTPRedirectHandler):
+    """Strip Authorization header when 302/303 sends us to a different host.
+
+    Dryad's /api/v2/files/<id>/download returns a 302 to AWS S3 with a
+    pre-signed URL containing X-Amz-Signature. S3 returns 400
+    `InvalidArgument: Only one auth mechanism allowed` if both the
+    Authorization header AND the signed query parameter are present.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+        try:
+            old_host = urllib.parse.urlparse(req.full_url).netloc
+            new_host = urllib.parse.urlparse(newurl).netloc
+        except Exception:  # noqa: BLE001
+            return new_req
+        if old_host != new_host:
+            for h in ("Authorization", "authorization"):
+                if new_req.has_header(h.capitalize()) or h in new_req.headers:
+                    try:
+                        del new_req.headers[h.capitalize()]
+                    except KeyError:
+                        pass
+                    new_req.unredirected_hdrs.pop(h.capitalize(), None)
+        return new_req
+
+
+_OPENER = urllib.request.build_opener(_StripAuthOnCrossHostRedirect())
+
 # Mirror the SUBDIR_MAP / CANONICAL_NAME conventions from
 # scripts/geo_download/download_multiome.py (kept in sync intentionally).
 SUBDIR_MAP = {
@@ -221,7 +253,7 @@ def download_one(
         headers["Range"] = f"bytes={start_byte}-"
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with _OPENER.open(req, timeout=300) as resp:
             # Throttle proactively if quota is running low (avoid getting 429'd).
             remaining_hdr = resp.headers.get("RateLimit-Remaining") or resp.headers.get("X-RateLimit-Remaining")
             if remaining_hdr is not None:
