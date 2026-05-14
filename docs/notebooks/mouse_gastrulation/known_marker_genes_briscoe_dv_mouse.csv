@@ -1,0 +1,148 @@
+gene,cell_type,lineage,category
+Lmx1a,Roof plate,radial glia,radial glia_Roof plate
+Msx1,Roof plate,radial glia,radial glia_Roof plate
+Msx2,Roof plate,radial glia,radial glia_Roof plate
+Msx1,DL1/dp1,radial glia,radial glia_DL1/dp1
+Msx2,DL1/dp1,radial glia,radial glia_DL1/dp1
+Pax3,DL1/dp1,radial glia,radial glia_DL1/dp1
+Olig3,DL1/dp1,radial glia,radial glia_DL1/dp1
+Irx3,DL1/dp1,radial glia,radial glia_DL1/dp1
+Irx5,DL1/dp1,radial glia,radial glia_DL1/dp1
+Pax6,DL1/dp1,radial glia,radial glia_DL1/dp1
+Msx1,DL2/dp2,radial glia,radial glia_DL2/dp2
+Pax3,DL2/dp2,radial glia,radial glia_DL2/dp2
+Olig3,DL2/dp2,radial glia,radial glia_DL2/dp2
+Irx3,DL2/dp2,radial glia,radial glia_DL2/dp2
+Irx5,DL2/dp2,radial glia,radial glia_DL2/dp2
+Pax6,DL2/dp2,radial glia,radial glia_DL2/dp2
+Msx1,DL3/dp3,radial glia,radial glia_DL3/dp3
+Pax3,DL3/dp3,radial glia,radial glia_DL3/dp3
+Olig3,DL3/dp3,radial glia,radial glia_DL3/dp3
+Irx3,DL3/dp3,radial glia,radial glia_DL3/dp3
+Irx5,DL3/dp3,radial glia,radial glia_DL3/dp3
+Pax6,DL3/dp3,radial glia,radial glia_DL3/dp3
+Pax7,DL3/dp3,radial glia,radial glia_DL3/dp3
+Gsx2,DL3/dp3,radial glia,radial glia_DL3/dp3
+Pax3,DL4/dp4,radial glia,radial glia_DL4/dp4
+Irx3,DL4/dp4,radial glia,radial glia_DL4/dp4
+Irx5,DL4/dp4,radial glia,radial glia_DL4/dp4
+Pax6,DL4/dp4,radial glia,radial glia_DL4/dp4
+Pax7,DL4/dp4,radial glia,radial glia_DL4/dp4
+Gsx2,DL4/dp4,radial glia,radial glia_DL4/dp4
+Gsx1,DL4/dp4,radial glia,radial glia_DL4/dp4
+Pax3,DL5/dp5,radial glia,radial glia_DL5/dp5
+Irx3,DL5/dp5,radial glia,radial glia_DL5/dp5
+Irx5,DL5/dp5,radial glia,radial glia_DL5/dp5
+Pax6,DL5/dp5,radial glia,radial glia_DL5/dp5
+Pax7,DL5/dp5,radial glia,radial glia_DL5/dp5
+Dbx2,DL5/dp5,radial glia,radial glia_DL5/dp5
+Pax3,DL6/dp6,radial glia,radial glia_DL6/dp6
+Irx3,DL6/dp6,radial glia,radial glia_DL6/dp6
+Irx5,DL6/dp6,radial glia,radial glia_DL6/dp6
+Pax6,DL6/dp6,radial glia,radial glia_DL6/dp6
+Pax7,DL6/dp6,radial glia,radial glia_DL6/dp6
+Dbx2,DL6/dp6,radial glia,radial glia_DL6/dp6
+Dbx1,DL6/dp6,radial glia,radial glia_DL6/dp6
+Sp8,DL6/dp6,radial glia,radial glia_DL6/dp6
+Irx3,V0/p0,radial glia,radial glia_V0/p0
+Irx5,V0/p0,radial glia,radial glia_V0/p0
+Pax6,V0/p0,radial glia,radial glia_V0/p0
+Dbx2,V0/p0,radial glia,radial glia_V0/p0
+Dbx1,V0/p0,radial glia,radial glia_V0/p0
+Sp8,V0/p0,radial glia,radial glia_V0/p0
+Irx3,V1/p1,radial glia,radial glia_V1/p1
+Irx5,V1/p1,radial glia,radial glia_V1/p1
+Pax6,V1/p1,radial glia,radial glia_V1/p1
+Dbx2,V1/p1,radial glia,radial glia_V1/p1
+Sp8,V1/p1,radial glia,radial glia_V1/p1
+Nkx6-2,V1/p1,radial glia,radial glia_V1/p1
+Prdm12,V1/p1,radial glia,radial glia_V1/p1
+Irx3,V2a/p2,radial glia,radial glia_V2a/p2
+Irx5,V2a/p2,radial glia,radial glia_V2a/p2
+Pax6,V2a/p2,radial glia,radial glia_V2a/p2
+Sp8,V2a/p2,radial glia,radial glia_V2a/p2
+Nkx6-1,V2a/p2,radial glia,radial glia_V2a/p2
+Foxn4,V2a/p2,radial glia,radial glia_V2a/p2
+Irx3,V2b/p2,radial glia,radial glia_V2b/p2
+Irx5,V2b/p2,radial glia,radial glia_V2b/p2
+Pax6,V2b/p2,radial glia,radial glia_V2b/p2
+Sp8,V2b/p2,radial glia,radial glia_V2b/p2
+Nkx6-1,V2b/p2,radial glia,radial glia_V2b/p2
+Foxn4,V2b/p2,radial glia,radial glia_V2b/p2
+Sp8,MN/pMN,radial glia,radial glia_MN/pMN
+Nkx6-1,MN/pMN,radial glia,radial glia_MN/pMN
+Olig2,MN/pMN,radial glia,radial glia_MN/pMN
+Nkx6-1,V3/p3,radial glia,radial glia_V3/p3
+Nkx2-2,V3/p3,radial glia,radial glia_V3/p3
+Foxa2,Floor plate,radial glia,radial glia_Floor plate
+Arx,Floor plate,radial glia,radial glia_Floor plate
+Shh,Floor plate,radial glia,radial glia_Floor plate
+Lmx1b,Floor plate,radial glia,radial glia_Floor plate
+Pou4f1,DL1/dp1,neuron,neuron_DL1/dp1
+Lhx2,DL1/dp1,neuron,neuron_DL1/dp1
+Lhx9,DL1/dp1,neuron,neuron_DL1/dp1
+Barhl1,DL1/dp1,neuron,neuron_DL1/dp1
+Barhl2,DL1/dp1,neuron,neuron_DL1/dp1
+Atoh1,DL1/dp1,neuron,neuron_DL1/dp1
+Pou4f1,DL2/dp2,neuron,neuron_DL2/dp2
+Foxd3,DL2/dp2,neuron,neuron_DL2/dp2
+Lhx1,DL2/dp2,neuron,neuron_DL2/dp2
+Lhx5,DL2/dp2,neuron,neuron_DL2/dp2
+Pou4f1,DL3/dp3,neuron,neuron_DL3/dp3
+Isl1,DL3/dp3,neuron,neuron_DL3/dp3
+Tlx3,DL3/dp3,neuron,neuron_DL3/dp3
+Otp,DL3/dp3,neuron,neuron_DL3/dp3
+Lhx1,DL4/dp4,neuron,neuron_DL4/dp4
+Lhx5,DL4/dp4,neuron,neuron_DL4/dp4
+Lbx1,DL4/dp4,neuron,neuron_DL4/dp4
+Pax2,DL4/dp4,neuron,neuron_DL4/dp4
+Gbx1,DL4/dp4,neuron,neuron_DL4/dp4
+Bhlhe22,DL4/dp4,neuron,neuron_DL4/dp4
+Pou4f1,DL5/dp5,neuron,neuron_DL5/dp5
+Tlx3,DL5/dp5,neuron,neuron_DL5/dp5
+Lbx1,DL5/dp5,neuron,neuron_DL5/dp5
+Lmx1b,DL5/dp5,neuron,neuron_DL5/dp5
+Ascl1,DL5/dp5,neuron,neuron_DL5/dp5
+Lhx1,DL6/dp6,neuron,neuron_DL6/dp6
+Lhx5,DL6/dp6,neuron,neuron_DL6/dp6
+Lbx1,DL6/dp6,neuron,neuron_DL6/dp6
+Pax2,DL6/dp6,neuron,neuron_DL6/dp6
+Bhlhe22,DL6/dp6,neuron,neuron_DL6/dp6
+Dmrt3,DL6/dp6,neuron,neuron_DL6/dp6
+Wt1,DL6/dp6,neuron,neuron_DL6/dp6
+Lhx1,V0/p0,neuron,neuron_V0/p0
+Lhx5,V0/p0,neuron,neuron_V0/p0
+Evx1,V0/p0,neuron,neuron_V0/p0
+Evx2,V0/p0,neuron,neuron_V0/p0
+Pitx2,V0/p0,neuron,neuron_V0/p0
+Foxd3,V1/p1,neuron,neuron_V1/p1
+Lhx1,V1/p1,neuron,neuron_V1/p1
+Lhx5,V1/p1,neuron,neuron_V1/p1
+Otp,V1/p1,neuron,neuron_V1/p1
+Pax2,V1/p1,neuron,neuron_V1/p1
+Bhlhe22,V1/p1,neuron,neuron_V1/p1
+En1,V1/p1,neuron,neuron_V1/p1
+Bhlhe22,V2a/p2,neuron,neuron_V2a/p2
+Ascl1,V2a/p2,neuron,neuron_V2a/p2
+Lhx3,V2a/p2,neuron,neuron_V2a/p2
+Vsx2,V2a/p2,neuron,neuron_V2a/p2
+Sox14,V2a/p2,neuron,neuron_V2a/p2
+Sox21,V2a/p2,neuron,neuron_V2a/p2
+Foxn4,V2a/p2,neuron,neuron_V2a/p2
+Vsx1,V2a/p2,neuron,neuron_V2a/p2
+Lhx1,V2b/p2,neuron,neuron_V2b/p2
+Lhx5,V2b/p2,neuron,neuron_V2b/p2
+Bhlhe22,V2b/p2,neuron,neuron_V2b/p2
+Tal1,V2b/p2,neuron,neuron_V2b/p2
+Gata2,V2b/p2,neuron,neuron_V2b/p2
+Gata3,V2b/p2,neuron,neuron_V2b/p2
+Msx1,V2b/p2,neuron,neuron_V2b/p2
+Isl1,MN/pMN,neuron,neuron_MN/pMN
+Lhx3,MN/pMN,neuron,neuron_MN/pMN
+Isl2,MN/pMN,neuron,neuron_MN/pMN
+Mnx1,MN/pMN,neuron,neuron_MN/pMN
+Slc10a4,MN/pMN,neuron,neuron_MN/pMN
+Slc18a3,MN/pMN,neuron,neuron_MN/pMN
+Nkx2-2,V3/p3,neuron,neuron_V3/p3
+Sim1,V3/p3,neuron,neuron_V3/p3
+Tbx20,autonomic_MN_V3/p3,neuron,neuron_autonomic_MN_V3/p3
