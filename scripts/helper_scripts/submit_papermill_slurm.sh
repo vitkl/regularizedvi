@@ -110,8 +110,11 @@ for col in name template output mem; do
     fi
 done
 
-FIXED_COLS=(name template output queue mem priority time partition)
+FIXED_COLS=(name template output queue mem priority time partition depends_on)
 RAW_COLS=(wandb_project wandb_group wandb_name)
+
+# Map of submitted row name → job id (populated as rows submit; used by depends_on).
+declare -A SUBMITTED_JIDS=()
 
 is_fixed_col() {
     local c="$1"
@@ -204,6 +207,23 @@ while IFS= read -r line; do
     fi
     row_reservation="$(detect_reservation "$row_partition" || true)"
 
+    # --- Per-row dependency (column `depends_on` in TSV).
+    # Value is another row's `name`. Single forward pass: the referenced row
+    # must appear earlier in the TSV so its job id is already in the map.
+    # `-` / empty / "none" → no dependency.
+    dep_jid=""
+    if [[ -n "${IDX[depends_on]+set}" ]]; then
+        dep_name="${ROW[${IDX[depends_on]}]:-}"
+        if [[ -n "$dep_name" && "$dep_name" != "-" && "$dep_name" != "none" ]]; then
+            if [[ -z "${SUBMITTED_JIDS[$dep_name]:-}" ]]; then
+                echo "ERROR: row '$name' depends_on='$dep_name' but '$dep_name' has not been submitted yet." >&2
+                echo "       Order the TSV so dependencies appear before dependents." >&2
+                exit 4
+            fi
+            dep_jid="${SUBMITTED_JIDS[$dep_name]}"
+        fi
+    fi
+
     # --- Build sbatch command ---
     SBATCH_ARGS=(
         --job-name="$name"
@@ -222,6 +242,9 @@ while IFS= read -r line; do
     fi
     if [[ -n "$row_reservation" ]]; then
         SBATCH_ARGS+=(--reservation="$row_reservation")
+    fi
+    if [[ -n "$dep_jid" ]]; then
+        SBATCH_ARGS+=(--dependency="afterok:$dep_jid")
     fi
 
     # --- Build wrapped command ---
@@ -255,7 +278,12 @@ while IFS= read -r line; do
         if [[ -n "$JID" ]]; then
             echo "$JID" >> "$LOGDIR/.last_submitted_jobs.txt"
             printf '%s\t%s\t%s\n' "$JID" "$name" "$output" >> "$LOGDIR/.last_submitted_summary.tsv"
+            SUBMITTED_JIDS[$name]="$JID"
         fi
+    else
+        # In dry-run mode, fake a JID so downstream depends_on resolution can
+        # be exercised (we use the row index suffixed with "_dryrun").
+        SUBMITTED_JIDS[$name]="dryrun_${name}"
     fi
 done < <(tail -n +2 "$TSV")
 
