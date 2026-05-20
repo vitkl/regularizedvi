@@ -44,6 +44,7 @@ while [[ $# -gt 0 ]]; do
         --name-filter)  NAME_FILTER="$2"; shift 2 ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --exclusive-node) EXCLUSIVE_NODE=true; shift ;;
+        --env-path)     ENV_PATH="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,17p' "$0"; exit 0 ;;
         *)  echo "ERROR: unknown arg: $1" >&2; exit 2 ;;
@@ -209,11 +210,13 @@ while IFS= read -r line; do
         --output="${LOGDIR}/%j.slurm.out"
         --error="${LOGDIR}/%j.slurm.err"
         --partition="$row_partition"
-        --gres="$GRES"
         --cpus-per-task="$CPUS"
         --time="$row_time"
         --mem="${mem}M"
     )
+    if [[ -n "$GRES" ]]; then
+        SBATCH_ARGS+=(--gres="$GRES")
+    fi
     if $EXCLUSIVE_NODE; then
         SBATCH_ARGS+=(--exclusive)
     fi
