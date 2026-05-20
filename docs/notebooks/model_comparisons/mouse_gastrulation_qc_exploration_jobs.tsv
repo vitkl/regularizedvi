@@ -1,0 +1,2 @@
+name	template	output	mem	partition	time
+mouse_gastr_qc_exploration	/nemo/lab/briscoej/home/users/kleshcv/cell2state_embryo/notebooks/benchmark/regularizedvi/mouse_gastrulation_qc_exploration.ipynb	/nemo/lab/briscoej/home/users/kleshcv/cell2state_embryo/notebooks/benchmark/regularizedvi/results/mouse_gastr_qc_exploration_out.ipynb	80000	ncpu	04:00:00
