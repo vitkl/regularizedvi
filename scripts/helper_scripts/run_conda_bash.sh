@@ -250,5 +250,14 @@ if [[ "$CLUSTER" == "crick" ]]; then
 fi
 conda activate "$ENV_SPEC"
 
+# Make the activated env's interpreters win for bare `python`/`python3` lookups.
+# On some bases `conda activate` leaves /usr/bin ahead of the env on PATH, so a
+# bare `python3` resolves to the SYSTEM interpreter (missing env packages like
+# `fire`) while `python` resolves to the env — an inconsistency that silently
+# skips fire-gated test runtime checks. Prepend the env bin so both agree.
+if [[ -n "${CONDA_PREFIX:-}" && -d "$CONDA_PREFIX/bin" ]]; then
+    export PATH="$CONDA_PREFIX/bin:$PATH"
+fi
+
 # --- Exec the bash command verbatim ---
 exec "$@"
